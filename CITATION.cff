@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: aff4tools
+message: Citation information for aff4tools
+type: software
+authors:
+  - given-names: Jeffrey
+    family-names: Bolas
+repository-code: 'https://github.com/jbolas/aff4tools'
+abstract: An AFF4 and AFF4-L implementation in Rust.
+keywords:
+  - aff4
+  - aff4-l
+  - forensics
+  - DFIR
+  - evidence
+  - file format
+license: MIT
+version: 0.1.0

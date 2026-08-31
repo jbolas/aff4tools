@@ -1,0 +1,84 @@
+# The FFI crate is a workspace member rather than part of this crate.
+[workspace]
+members = ["aff4tools-ffi"]
+
+# Metadata both crates share, so the URL, license, and edition live in exactly
+# one place and cannot drift apart between the library and its C ABI.
+[workspace.package]
+repository = "https://github.com/jbolas/aff4tools"
+license = "MIT"
+edition = "2024"
+
+[package]
+name = "aff4tools"
+version = "0.1.0"
+edition.workspace = true
+description = "Rust implementation for access to AFF4 and AFF4-L evidence files"
+authors = ["Jeffrey Bolas"]
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[features]
+corpus = []
+
+# An Header, Dictionary, Triples measurement harness.
+# Off by default and deliberately inert — enabling it adds one `examples/`
+# binary and changes no library or CLI behavior whatsoever. `Graph` remains the
+# only metadata representation the tool uses. This exists to produce numbers
+# that decide whether phase H2 (an interchangeable backend) is worth building.
+hdt-experiment = ["dep:hdt"]
+
+[dependencies]
+blake2 = "0.10"
+clap = { version = "4.6", features = ["derive"] }
+crc32fast = "1.5"
+# OS randomness for volume UUIDs. Already in the tree via `rand`.
+getrandom = "0.3"
+flate2 = "1.1.9"
+lz4_flex = "0.14.0"
+md-5 = "0.10"
+# RDF term types (IRI, Literal, Triple) produced by oxttl.
+oxrdf = "0.3"
+# Streaming RDF Turtle parser; reads `information.turtle`.
+oxttl = "0.2"
+# `derive` annotates the model types for `--format json`.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+snap = "1.1.2"
+# Derives std::error::Error for the crate's typed Error enum.
+thiserror = "2"
+# Optional, and only for the `hdt-experiment` feature's measurement harness.
+# Never reached by the library or the CLI. MIT licensed.
+hdt = { version = "0.7", features = ["nt"], optional = true }
+
+# ZIP archive access. AFF4 containers are ZIP files.
+#
+# NOTE ON READ-ONLY: `zip::ZipWriter` is NOT feature-gated and compiles
+# regardless of the settings here — writing cannot be disabled at the
+# dependency level. Read-only is enforced by clippy.toml's
+# disallowed-methods list, the crate-root lints in src/lib.rs, a CI grep guard,
+# and the single File::open chokepoint in src/zip.rs. **Do not use ZipWriter.**
+#
+# `default-features = false` trims unused codecs (bzip2, zstd, lzma, aes) 
+# from the build.
+zip = { version = "8.6", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+] }
+
+[dev-dependencies]
+# Runs the built binary as a subprocess to assert exit codes and output.
+assert_cmd = "2"
+oxttl = "0.2"
+# Composable output assertions, pairs with assert_cmd.
+predicates = "3"
+serde_json = "1"
+# Temp dirs for mutated-copy tests; corpus fixtures are never touched.
+tempfile = "3"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# Optimize dependencies even in debug builds.
+[profile.dev.package."*"]
+opt-level = 3

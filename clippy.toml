@@ -1,0 +1,35 @@
+# READ-ONLY ENFORCEMENT for everything outside `src/write/`.
+#
+# These mutating APIs are denied crate-wide. `src/write/` is the sole exception
+# and carries its own narrow #[allow] plus a runtime source-path guard; see
+# `src/write/mod.rs`.
+#
+# Denying these in the read path is what proves that examining evidence cannot
+# alter it. That proof became MORE important when the crate gained the ability
+# to write, not less. Never weaken this list to make a write compile — put the
+# write in `src/write/` instead, behind `WriteSink`.
+#
+# `zip::ZipWriter` stays denied even in the writer: AFF4 §5.4 needs exact member
+# ordering and unconditional ZIP64, so we write ZIP structures directly.
+disallowed-types = [
+    { path = "zip::ZipWriter", reason = "the aff4tools read-only path may never write ZIP containers" },
+]
+
+disallowed-methods = [
+    { path = "std::fs::File::create", reason = "the aff4tools read-only path may never create files" },
+    { path = "std::fs::File::create_new", reason = "the aff4tools read-only path may never create files" },
+    { path = "std::fs::write", reason = "the aff4tools read-only path may never write files" },
+    { path = "std::fs::create_dir", reason = "the aff4tools read-only path may new directories belong to an output path" },
+    { path = "std::fs::create_dir_all", reason = "the aff4tools read-only path may new directories belong to an output path" },
+    { path = "std::fs::remove_file", reason = "the aff4tools read-only path may never delete evidence" },
+    { path = "std::fs::remove_dir_all", reason = "the aff4tools read-only path may never delete" },
+    { path = "std::fs::rename", reason = "the aff4tools read-only path may never rename evidence" },
+    { path = "std::fs::copy", reason = "the aff4tools read-only path may never duplicate evidence implicitly" },
+    { path = "std::fs::set_permissions", reason = "the aff4tools read-only path may never alter evidence metadata" },
+    { path = "std::fs::OpenOptions::write", reason = "the aff4tools read-only path may open handles must be read-only" },
+    { path = "std::fs::OpenOptions::append", reason = "the aff4tools read-only path may open handles must be read-only" },
+    { path = "std::fs::OpenOptions::truncate", reason = "the aff4tools read-only path may never truncate" },
+    { path = "std::fs::OpenOptions::create", reason = "the aff4tools read-only path may never create files" },
+    { path = "std::fs::OpenOptions::create_new", reason = "the aff4tools read-only path may never create files" },
+    { path = "std::fs::File::set_len", reason = "the aff4tools read-only path may never truncate or extend a file" },
+]

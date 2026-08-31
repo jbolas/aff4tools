@@ -1,0 +1,9 @@
+target/
+.DS_Store
+.superpowers/
+__pycache__/
+*.lang-bak
+docs/working/
+docs/superpowers/
+utilities/language-review/
+CLAUDE.md
