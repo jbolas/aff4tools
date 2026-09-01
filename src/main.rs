@@ -3064,7 +3064,7 @@ fn run_acquire(
 
     // Check 1: recompute from the container we just wrote.
     let _ = writeln!(out);
-    let mut worst = verify_after_acquire(out, output, written.size, verify_written_container, None);
+    let mut worst = verify_after_acquire(out, output, written.size, verify_written_container);
 
     // Check 2: conformance.
     match summarize(std::slice::from_ref(&output.to_path_buf())) {
@@ -3289,7 +3289,7 @@ fn run_acquire_from_aff4(
     stamp_acquisition_complete(out);
 
     let _ = writeln!(out);
-    let mut worst = verify_after_acquire(out, output, written.size, verify_written_container, None);
+    let mut worst = verify_after_acquire(out, output, written.size, verify_written_container);
 
     match summarize(std::slice::from_ref(&output.to_path_buf())) {
         Ok(summary) => {
@@ -3688,7 +3688,6 @@ fn run_acquire_logical(
         output,
         acquired.bytes,
         verify_written_container,
-        None,
     ));
 
     // Check 2: conformance.
@@ -3953,10 +3952,7 @@ fn run_acquire_device(
             &algorithms,
             &registry,
             Some(&mut |out: &mut dyn Write, parts: &[PathBuf]| {
-                let scope = "Scope:       verification read the parts, not the device. The \
-                             device was read once, during acquisition, and the digests above \
-                             were computed from that single pass.";
-                verify_set_after_acquire(out, parts, total, verify_written_container, Some(scope))
+                verify_set_after_acquire(out, parts, total, verify_written_container)
             }),
         ) {
             Ok(floor) => floor,
@@ -4120,20 +4116,11 @@ fn run_acquire_device(
     stamp_acquisition_complete(out);
 
     let _ = writeln!(out);
-    // What "Verify" establishes and what it cannot. The earlier wording led
-    // with "Bytes: NOT compared", which read as a failed check; it is not a
-    // check at all, but a statement of scope.
-    let scope = "Scope:       verification read the container, not the device. The \
-                 device was read once, during acquisition, and the digests above were \
-                 computed from that single pass. Re-reading it could not confirm them: \
-                 a live device may change between reads, so a difference would not \
-                 distinguish a bad acquisition from a changed device.";
     worst = worst.max(verify_after_acquire(
         out,
         output,
         written.size,
         verify_written_container,
-        Some(scope),
     ));
 
     stamp_completed(out);
@@ -4192,9 +4179,7 @@ fn write_acquired_digests(
 /// is the only way that stays fixed.
 ///
 /// `size` is the acquired byte count, named in the announcement so a long
-/// re-read is explained while it happens. `scope_note` is appended when the
-/// pass runs and the mode has something to add about what verification did and
-/// did not establish.
+/// re-read is explained while it happens.
 ///
 /// Returns the worst exit code the pass produced.
 fn verify_after_acquire(
@@ -4202,7 +4187,6 @@ fn verify_after_acquire(
     output: &std::path::Path,
     size: u64,
     verify: bool,
-    scope_note: Option<&str>,
 ) -> u8 {
     let mut worst = 0u8;
 
@@ -4260,10 +4244,6 @@ fn verify_after_acquire(
         }
     }
 
-    if let Some(note) = scope_note {
-        let _ = writeln!(out, "{note}");
-    }
-
     worst
 }
 
@@ -4273,13 +4253,7 @@ fn verify_after_acquire(
 /// opens a single container. A part opened alone is a partial view of the
 /// evidence, so the whole set is opened together through the same path
 /// `verify --split-file` uses.
-fn verify_set_after_acquire(
-    out: &mut dyn Write,
-    parts: &[PathBuf],
-    size: u64,
-    verify: bool,
-    scope_note: Option<&str>,
-) -> u8 {
+fn verify_set_after_acquire(out: &mut dyn Write, parts: &[PathBuf], size: u64, verify: bool) -> u8 {
     let mut worst = 0u8;
 
     if !verify {
@@ -4330,10 +4304,6 @@ fn verify_set_after_acquire(
             }
         }
         Err(error) => worst = worst.max(error.report()),
-    }
-
-    if let Some(note) = scope_note {
-        let _ = writeln!(out, "{note}");
     }
 
     worst
