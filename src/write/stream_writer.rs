@@ -420,7 +420,7 @@ fn write_stream_metadata(
     digests: &[crate::hash::Digest],
     block_segments: &BlockSegments,
 ) -> Vec<BlockHashDigest> {
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     {
         let graph = writer.graph_mut();
         graph.add_type(stream_arn, &lexicon.iri(lexicon.image_stream));

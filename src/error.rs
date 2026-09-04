@@ -499,7 +499,7 @@ impl DeviationKind {
     }
 
     /// The specification section this condition departs from, as a section
-    /// number within [`SPEC_NAME`].
+    /// number within the base document governing `generation`.
     ///
     /// Section numbers are identical in v1.0 and v1.0a for every section cited
     /// here; the draft renumbers nothing, so these citations are checkable
@@ -512,8 +512,26 @@ impl DeviationKind {
     /// container uses them, not because a clause was broken. Presenting an
     /// invented section number against either would be worse than citing
     /// nothing.
+    ///
+    /// # Generation
+    ///
+    /// The base document is v1.0a for every generation this build checks, so
+    /// the section numbers below hold for all of them. `generation` is taken
+    /// anyway, because it is what decides which document the number is read
+    /// *in*: when a generation arrives whose base is not v1.0a, this signature
+    /// already carries what the answer depends on, and every caller already
+    /// supplies it. A citation is a claim about a specific document, and the
+    /// document must be part of the question.
     #[must_use]
-    pub fn spec_section(self) -> Option<&'static str> {
+    pub fn spec_section(self, generation: crate::lexicon::Generation) -> Option<&'static str> {
+        // The AFF4-L v1.0-ALPHA rules are not implemented: a v2.1 container is
+        // declined before any deviation is recorded, so no section of that
+        // document may be cited. Returning None here keeps a v1.0a section
+        // number from being printed against a document that does not contain
+        // it, should a deviation ever reach this path.
+        if matches!(generation, crate::lexicon::Generation::Aff4L10) {
+            return None;
+        }
         match self {
             // §2.2 defines aff4:size and the other base properties whose
             // literals these three concern.
@@ -565,15 +583,31 @@ impl DeviationKind {
 
     /// The section of a *different* normative document this cites, if any.
     ///
-    /// AFF4-L is specified in Schatz (2019), not in the Standard, so a
-    /// deviation from it has no Standard section to name. Returning the paper's
-    /// section here keeps the report from printing either an invented Standard
-    /// citation or "the Standard does not address this" — the latter is true
-    /// but misleading, since another specification addresses it squarely.
+    /// AFF4-L logical constructs are specified in Schatz (2019), not in the
+    /// Standard, so a deviation from them has no Standard section to name.
+    /// Returning the paper's section here keeps the report from printing
+    /// either an invented Standard citation or "the Standard does not address
+    /// this" — the latter is true but misleading, since another specification
+    /// addresses it squarely.
+    ///
+    /// # Generation
+    ///
+    /// Only [`Generation::PyAff4Logical`] is governed by the paper, per the
+    /// mapping table: version 1.1 is v1.0a as base *plus* the 2019 paper for
+    /// logical constructs. A v1.0a container carries no logical layer, so a
+    /// logical citation against one would name a document that does not govern
+    /// it.
+    ///
+    /// [`Generation::PyAff4Logical`]: crate::lexicon::Generation::PyAff4Logical
     #[must_use]
-    pub fn other_specification(self) -> Option<(&'static str, &'static str)> {
-        match self {
-            Self::MissingZipSegmentType => Some((AFF4_L_SPEC_NAME, "§3.8")),
+    pub fn other_specification(
+        self,
+        generation: crate::lexicon::Generation,
+    ) -> Option<(&'static str, &'static str)> {
+        match (self, generation) {
+            (Self::MissingZipSegmentType, crate::lexicon::Generation::PyAff4Logical) => {
+                Some((AFF4_L_SPEC_NAME, "§3.8"))
+            }
             _ => None,
         }
     }
@@ -587,14 +621,25 @@ impl DeviationKind {
 pub const AFF4_L_SPEC_NAME: &str =
     "AFF4-L (Schatz, DFRWS USA 2019, Digital Investigation 29, S143-S149)";
 
-/// The specification revision `aff4tools conformance` checks against.
+/// The base specification `aff4tools conformance` checks against.
 ///
-/// v1.0a is an unofficial draft (Schatz, Feb 2022) that supersedes nothing, but
-/// it is the fuller document: it specifies chunk padding (§3.2), the `mapPath`
-/// segment (§6.3), and striped multi-ZIP containers (§7), none of which v1.0
-/// covers. It renumbers no section v1.0 defines, so a citation here resolves in
-/// either document.
+/// v1.0a is an unofficial draft (Schatz, Feb 2022), and it is the fuller
+/// document: it specifies chunk padding (§3.2), the `mapPath` segment (§6.3),
+/// and striped multi-ZIP containers (§7), none of which the v1.0 PDF covers.
+/// Every section number cited in this crate was verified against it.
+///
+/// It governs the base container for both AFF4 Standard v1.0a containers and
+/// pyaff4-era AFF4-L; see [`crate::lexicon::Generation::governing_spec`].
 pub const SPEC_NAME: &str = "AFF4 Specification 1.0a";
+
+/// The AFF4-L Standard v1.0-ALPHA (Schatz, Apple Inc., September 2026).
+///
+/// Named so a v2.1 container can be identified accurately, then declined: its
+/// rules are not implemented here. The document is a pre-release that states
+/// its Canonical Reference Images take precedence over its own text, and those
+/// images are not yet published — so no rule from it could be validated
+/// against evidence. See `docs/working/AFF4-L-Standard-v1.0-ALPHA-design-phases.md`.
+pub const AFF4_L_STANDARD_NAME: &str = "AFF4-L Standard v1.0-ALPHA";
 
 impl std::fmt::Display for DeviationKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

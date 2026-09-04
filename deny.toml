@@ -1,0 +1,59 @@
+# cargo-deny configuration.
+#
+#   cargo install cargo-deny
+#   cargo deny check licenses
+#
+# The point of this file is that a future `cargo update` cannot quietly pull a
+# copyleft or unusual-license crate into the shipping build without the check
+# failing. Run it when dependencies change.
+
+[licenses]
+# Every license permitted in a default build. All are permissive.
+#
+# Only licenses actually present are listed: an allowance nothing matches warns
+# as `license-not-encountered`. Add one when a dependency brings it, not in
+# anticipation. Deliberately absent: AFL-3.0, MPL-2.0 and CECILL-B, which the
+# optional `hdt-experiment` feature pulls in — so `--all-features` fails here
+# until that question is settled. That is the signal, not a misconfiguration.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+]
+
+# Crates whose license expression cargo-deny cannot resolve against `allow`
+# are listed here with the reading that was actually verified. Empty for now:
+# every crate in a default build resolves cleanly.
+#
+# Must precede [licenses.private]: a bare key after a table header belongs to
+# that table, so listing it below would make it `private.exceptions`, which
+# does not exist.
+exceptions = []
+
+# The workspace's own crates are not third-party code, so their licenses are
+# not checked against the allow list.
+[licenses.private]
+ignore = true
+
+[bans]
+# Duplicate major versions are a size and audit-surface concern, not a
+# licensing one. Warn rather than fail; the tree legitimately carries several
+# (digest 0.10/0.11, rand 0.8/0.9, getrandom 0.2/0.3/0.4).
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+# Security advisories are checked by `cargo deny check advisories`, which is a
+# separate concern from licensing and needs a fetched advisory database.
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -690,23 +690,27 @@ fn case_metadata_appears_before_the_object_listing() {
     assert!(case < objects, "case metadata must precede the listing");
 }
 
-/// Pre-standard types the same object `caseNotes`, lowercase, in a separate
-/// vocabulary. A block keyed on the Standard spelling would silently show
-/// nothing for an entire generation.
+/// A pre-standard container is named, then declined.
+///
+/// No specification aff4tools cites describes one, so reading it would be
+/// reverse engineering presented as conformance. The refusal must name what
+/// the container is — an examiner learns what they have, not merely that the
+/// tool said no — and must not read as an integrity finding.
 #[cfg(feature = "corpus")]
 #[test]
-fn case_metadata_is_found_in_pre_standard_containers_too() {
+fn a_pre_standard_container_is_named_then_declined() {
     let path = corpus_path("pyaff4/test_images/AFF4PreStd/Base-Linear.af4");
-    let assert = aff4tools().args(["info", &path]).assert().success();
-    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let assert = aff4tools().args(["info", &path]).assert().failure().code(6);
+    let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
 
     assert!(
-        out.contains("Case ID: 1SR Canonical"),
-        "no case number:\n{out}"
+        err.contains("pre-standard"),
+        "the refusal must name the generation:\n{err}"
     );
-    let case = out.find("Case ID: 1SR Canonical").expect("case number");
-    let objects = out.find("Objects").expect("object listing");
-    assert!(case < objects, "case metadata must precede the listing");
+    assert!(
+        !err.contains("malformed") && !err.contains("corrupt"),
+        "an unsupported generation is not an integrity finding:\n{err}"
+    );
 }
 
 /// AFF4-L containers carry zero case-bearing predicates (measured directly
@@ -1041,15 +1045,12 @@ mod corpus {
         );
     }
 
-    /// Pre-standard containers use a separate vocabulary with no `DiskImage`
-    /// term at all, typing their image `QueryMap, map, Image`.
-    ///
-    /// Those types are listed as found rather than mapped onto the Standard's
-    /// vocabulary, which would assert an equivalence no specification states.
-    /// The listing is restricted to objects declaring an image type: an
-    /// unrestricted sweep pulls in case notes, timestamps, and the acquisition
-    /// tool block, which are provenance rather than content.
+    /// Pre-standard containers are declined, so `info` never reaches the
+    /// listing for one. Kept as a guard: were support restored, this test
+    /// would have to be restored with it rather than quietly passing.
     #[test]
+    #[ignore = "pre-standard containers are declined; see \
+                a_pre_standard_container_is_named_then_declined"]
     fn info_lists_prestandard_types_rather_than_inventing_a_mapping() {
         let assert = aff4tools()
             .args(["info"])
@@ -1105,8 +1106,11 @@ mod corpus {
         );
     }
 
-    /// A container declaring no version says so, and prints no empty `Tool:`.
+    /// A container declaring no version is pre-standard, and pre-standard
+    /// containers are declined before any report is written.
     #[test]
+    #[ignore = "pre-standard containers are declined; see \
+                a_pre_standard_container_is_named_then_declined"]
     fn info_omits_the_tool_line_when_none_is_declared() {
         let assert = aff4tools()
             .args(["info"])
@@ -1272,6 +1276,37 @@ mod corpus {
         );
     }
 
+    /// The header identifies the container before judging it: version, then
+    /// tool, then the document(s) checked against.
+    ///
+    /// The version is what selects the governing document, so a report citing
+    /// a specification without showing the version leaves the examiner unable
+    /// to check that choice. Both lines use the same words `info` does.
+    #[test]
+    fn conformance_header_states_version_and_tool_before_the_specification() {
+        let assert = aff4tools()
+            .args(["conformance"])
+            .arg(fixture(BASE_LINEAR))
+            .assert()
+            .success();
+        let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+        let version = out
+            .find("AFF4 Version: 1.0")
+            .unwrap_or_else(|| panic!("no version line:\n{out}"));
+        let tool = out
+            .find("Tool: ")
+            .unwrap_or_else(|| panic!("no tool line:\n{out}"));
+        let checking = out
+            .find("Checking conformance with")
+            .unwrap_or_else(|| panic!("no specification line:\n{out}"));
+
+        assert!(
+            version < tool && tool < checking,
+            "version, then tool, then the document checked against:\n{out}"
+        );
+    }
+
     /// Every listed deviation cites the section it departs from.
     #[test]
     fn conformance_cites_a_spec_section_per_deviation() {
@@ -1292,7 +1327,7 @@ mod corpus {
     fn conformance_on_a_clean_container_makes_no_verification_claim() {
         let assert = aff4tools()
             .args(["conformance"])
-            .arg(fixture(PRESTD))
+            .arg(fixture(BASE_LINEAR))
             .assert()
             .success();
         let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
@@ -1586,14 +1621,18 @@ mod corpus {
 
     #[test]
     fn pre_standard_reports_no_version_rather_than_inventing_one() {
+        // Declined rather than summarised, but the principle is unchanged and
+        // is what this test still pins: pyaff4 fabricates Version(0,1) for
+        // these containers, and aff4tools names the generation instead of
+        // inventing a version number for it.
         aff4tools()
             .args(["info"])
             .arg(fixture(PRESTD))
             .assert()
-            .success()
-            .stdout(
-                predicate::str::contains("not declared")
-                    .and(predicate::str::contains("pre-standard")),
+            .failure()
+            .code(6)
+            .stderr(
+                predicate::str::contains("pre-standard").and(predicate::str::contains("0.1").not()),
             );
     }
 
@@ -2410,10 +2449,11 @@ fn full_listing_refuses_to_overwrite() {
 #[cfg(feature = "corpus")]
 #[test]
 fn no_corpus_container_triggers_the_listing_degrade() {
+    // Pre-standard containers are excluded: they are declined at open, so
+    // they never reach the listing this test is about.
     for relative in [
         "pyaff4/test_images/AFF4-L/broken-dedupe.aff4",
         "pyaff4/test_images/AFF4Std/Base-Linear.aff4",
-        "pyaff4/test_images/AFF4PreStd/Base-Linear.af4",
     ] {
         aff4tools()
             .args(["info"])

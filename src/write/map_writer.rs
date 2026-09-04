@@ -109,7 +109,7 @@ pub fn write_map_as(
     // state `broken-dedupe.aff4` is in.
     writer.add_stored_segment(&format!("{base}/{}", crate::map::MAP_PATH_SEGMENT), &[])?;
 
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let graph = writer.graph_mut();
 
     graph.add_type(&map_arn, &lexicon.iri(lexicon.map));
@@ -319,7 +319,7 @@ pub fn write_slice_map(
 
     // The file is now map-backed as well as being a FileImage: exactly the
     // `FileImage, Image, Map` type triple `broken-dedupe.aff4` carries.
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let graph = writer.graph_mut();
     graph.add_type(file_arn, &lexicon.iri(lexicon.map));
     graph.add(

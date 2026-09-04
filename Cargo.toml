@@ -51,7 +51,17 @@ snap = "1.1.2"
 # Derives std::error::Error for the crate's typed Error enum.
 thiserror = "2"
 # Optional, and only for the `hdt-experiment` feature's measurement harness.
-# Never reached by the library or the CLI. MIT licensed.
+# Never reached by the library or the CLI.
+#
+# NOTE ON LICENSING: the `hdt` crate itself is MIT, but its dependency closure
+# is not, and it is the only part of the tree that is not plainly permissive.
+# Enabling this feature pulls in ntriple (AFL-3.0), resiter (MPL-2.0, weak
+# file-level copyleft), and mownstr plus the ten sophia crates (CECILL-B, a
+# French license with its own attribution requirement). mem_dbg offers
+# Apache-2.0 OR LGPL-2.1-or-later; the Apache option is the one taken.
+#
+# None of this reaches a default build, which is wholly MIT/Apache/BSD/Zlib.
+# Settle the licensing before phase H2 makes an HDT backend real.
 hdt = { version = "0.7", features = ["nt"], optional = true }
 
 # ZIP archive access. AFF4 containers are ZIP files.

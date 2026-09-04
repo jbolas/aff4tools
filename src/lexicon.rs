@@ -2,27 +2,27 @@
 //!
 //! AFF4 metadata uses different term spellings depending on which era of the
 //! format wrote the container. A property lookup must therefore be
-//! generation-aware: asking for "the chunk size predicate" has three different
+//! generation-aware: asking for "the chunk size predicate" has two different
 //! answers.
 //!
-//! # The three vocabularies
+//! # The two vocabularies
 //!
 //! Verified by extracting every `aff4:` term from the reference corpus:
 //!
-//! | | Standard v1.0/v1.1 | Pre-standard | Rekall/winpmem |
-//! |---|---|---|---|
-//! | Namespace | `http://aff4.org/Schema#` | `http://afflib.org/2009/aff4#` | `http://aff4.org/Schema#` |
-//! | Chunk size | `chunkSize` | `chunk_size` | `chunk_size` |
-//! | Chunks/segment | `chunksInSegment` | `chunks_in_segment` | `chunks_per_segment` |
-//! | Compression | `compressionMethod` | `CompressionMethod` | `compression` |
-//! | Map class | `Map` | `map` | `map` |
-//! | Stream class | `ImageStream` | `stream` | `ImageStream` |
+//! | | Standard (v1.0a, and pyaff4-era AFF4-L) | Pre-standard |
+//! |---|---|---|
+//! | Namespace | `http://aff4.org/Schema#` | `http://afflib.org/2009/aff4#` |
+//! | Chunk size | `chunkSize` | `chunk_size` |
+//! | Chunks/segment | `chunksInSegment` | `chunks_in_segment` |
+//! | Compression | `compressionMethod` | `CompressionMethod` |
+//! | Map class | `Map` | `map` |
+//! | Stream class | `ImageStream` | `stream` |
 //!
 //! The pre-standard vocabulary diverges far more than a handful of properties:
 //! comparing the corpus, 65 of its terms have no Standard counterpart, and it
 //! uses `PascalCase` where the Standard uses camel case (`CreationTime`, `StartTime`,
 //! `EndTime`, `Operation`, `TimeSource`). Only seven terms — `Image`, `MD5`,
-//! `SHA1`, `hash`, `size`, `stored`, `contains` — are common to all generations.
+//! `SHA1`, `hash`, `size`, `stored`, `contains` — are common to both.
 //!
 //! # Structure
 //!
@@ -32,7 +32,7 @@
 
 use crate::version::ContainerVersion;
 
-/// The RDF namespace used by AFF4 Standard v1.0/v1.1 and by Rekall/winpmem.
+/// The RDF namespace used by AFF4 Standard v1.0a and by pyaff4-era AFF4-L.
 pub const STANDARD_NAMESPACE: &str = "http://aff4.org/Schema#";
 
 /// The RDF namespace used by pre-standard (Evimetry/Wirespeed) containers.
@@ -40,26 +40,51 @@ pub const LEGACY_NAMESPACE: &str = "http://afflib.org/2009/aff4#";
 
 /// Which era of the AFF4 format wrote a container.
 ///
-/// Serializes as a stable `snake_case` token (`"standard10"`, `"standard11"`,
-/// `"rekall"`, `"legacy"`) — a short machine-checkable value, deliberately
-/// distinct from [`Generation::name`]'s prose (`"AFF4 Standard v1.0"`,
-/// `"pre-standard (Evimetry/Wirespeed)"`) which text output uses via
-/// [`std::fmt::Display`]. A script matching on generation should not have to
-/// parse a sentence.
+/// Serializes as a stable `snake_case` token (`"standard10"`,
+/// `"pyaff4_logical"`, `"aff4l10"`, `"legacy"`) — a short machine-checkable
+/// value, deliberately distinct from [`Generation::name`]'s prose which text
+/// output uses via [`std::fmt::Display`]. A script matching on generation
+/// should not have to parse a sentence.
+///
+/// # Which document governs each
+///
+/// See `docs/working/AFF4-L-Standard-v1.0-ALPHA-design-phases.md`. The mapping
+/// is [`Generation::governing_spec`], and it is what `conformance` measures
+/// against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Generation {
-    /// AFF4 Standard v1.0. Has `version.txt` declaring `major=1 minor=0`.
+    /// AFF4 Standard v1.0a. Has `version.txt` declaring `major=1 minor=0`.
     Standard10,
-    /// AFF4 Standard v1.1, which adds logical (AFF4-L) imaging.
-    Standard11,
-    /// The Rekall/winpmem dialect: the standard namespace, but no `version.txt`
-    /// and `snake_case` property names.
+    /// pyaff4-era AFF4-L. `version.txt` declares `major=1 minor=1`.
+    ///
+    /// **No specification defines version 1.1.** v1.0a states only "For AFF4
+    /// Standard v1.0, Major is 1, Minor is 0", and the AFF4-L Standard
+    /// v1.0-ALPHA assigns AFF4-L major 2, minor 1. Version 1.1 is what pyaff4
+    /// wrote when it added logical imaging, and every AFF4-L container in the
+    /// reference corpus carries it. It is a de facto marker for pyaff4-era
+    /// AFF4-L, not a standard version — naming it "AFF4 Standard v1.1" would
+    /// assert a document that has never existed.
+    ///
+    /// Governed by v1.0a for the base container, plus the AFF4-L 2019 paper
+    /// for logical constructs.
+    ///
+    /// The wire token is spelled `pyaff4_logical` rather than serde's derived
+    /// `py_aff4_logical`: `pyaff4` is one word, the name of the tool.
+    #[serde(rename = "pyaff4_logical")]
+    PyAff4Logical,
+    /// AFF4-L Standard v1.0-ALPHA. `version.txt` declares `major=2 minor=1`.
+    ///
+    /// Recognised and named so a report can say what the container is, then
+    /// declined: the v2.1 rules are not implemented, and the standard is a
+    /// pre-release whose Canonical Reference Images — which it says take
+    /// precedence over its own text — are not yet published. See
+    /// [`Generation::is_supported`].
+    Aff4L10,
+    /// Pre-standard Evimetry/Wirespeed. No `version.txt`, and its own namespace.
     ///
     /// Detected so it can be named in an error, then rejected — see
     /// [`Generation::is_supported`].
-    Rekall,
-    /// Pre-standard Evimetry/Wirespeed. No `version.txt`, and its own namespace.
     Legacy,
 }
 
@@ -74,7 +99,9 @@ impl Generation {
         if version.is_v1_0() {
             Some(Self::Standard10)
         } else if version.is_v1_1() {
-            Some(Self::Standard11)
+            Some(Self::PyAff4Logical)
+        } else if version.is_v2_1() {
+            Some(Self::Aff4L10)
         } else {
             None
         }
@@ -83,14 +110,15 @@ impl Generation {
     /// The generation implied by the `aff4:` namespace of a container that has
     /// no `version.txt`.
     ///
-    /// `version.txt` arrived with Standard v1.0, so its absence means one of
-    /// the two pre-standard dialects. They are told apart by namespace: Rekall
-    /// adopted the new one, Evimetry kept the original.
+    /// `version.txt` arrived with Standard v1.0, so its absence means the
+    /// container predates the standard. Both pre-standard namespaces resolve
+    /// to [`Self::Legacy`]: the dialects are told apart in the corpus by
+    /// namespace, but neither is supported, so drawing the distinction would
+    /// only produce two names for one outcome.
     #[must_use]
     pub fn from_namespace(namespace: &str) -> Option<Self> {
         match namespace {
-            STANDARD_NAMESPACE => Some(Self::Rekall),
-            LEGACY_NAMESPACE => Some(Self::Legacy),
+            STANDARD_NAMESPACE | LEGACY_NAMESPACE => Some(Self::Legacy),
             _ => None,
         }
     }
@@ -99,33 +127,74 @@ impl Generation {
     #[must_use]
     pub fn lexicon(self) -> &'static Lexicon {
         match self {
-            Self::Standard10 => &STANDARD,
-            Self::Standard11 => &STANDARD11,
-            Self::Rekall => &REKALL,
+            Self::Standard10 | Self::PyAff4Logical => &STANDARD,
+            // The v2.1 lexicon is not modelled: §4.1 adds a second namespace
+            // and nineteen properties this build does not implement. The base
+            // vocabulary is returned so the type is total, never so a v2.1
+            // container can be read — `is_supported` declines first. Kept as
+            // its own arm because merging it would assert that v2.1 *uses*
+            // the base vocabulary, which is exactly what is not yet known.
+            #[allow(clippy::match_same_arms)]
+            Self::Aff4L10 => &STANDARD,
             Self::Legacy => &LEGACY,
         }
     }
 
     /// Whether this build can interpret the generation.
     ///
-    /// Rekall is detected but not supported: no container of that dialect
-    /// exists in the reference corpus, so any implementation would ship
-    /// untested. pyaff4 likewise refuses to block-verify them
-    /// (`block_hasher.py` raises for any lexicon but standard and legacy).
-    /// Claiming untested support for evidence is worse than declining.
+    /// Two are detected but not supported, for different reasons.
+    ///
+    /// [`Self::Legacy`] predates the standard. Its containers are read by no
+    /// specification this tool cites, so any behaviour would be reverse
+    /// engineering presented as conformance.
+    ///
+    /// [`Self::Aff4L10`] is the AFF4-L Standard v1.0-ALPHA. Its rules are not
+    /// implemented, and the standard is a pre-release stating that its
+    /// Canonical Reference Images take precedence over its own text — those
+    /// images are unpublished, so no rule could be validated against evidence.
+    ///
+    /// In both cases the container is named accurately and declined. Claiming
+    /// untested support for evidence is worse than declining.
     #[must_use]
     pub fn is_supported(self) -> bool {
-        !matches!(self, Self::Rekall)
+        matches!(self, Self::Standard10 | Self::PyAff4Logical)
     }
 
     /// A short name for messages.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            Self::Standard10 => "AFF4 Standard v1.0",
-            Self::Standard11 => "AFF4 Standard v1.1",
-            Self::Rekall => "Rekall/winpmem dialect",
+            Self::Standard10 => "AFF4 Standard v1.0a",
+            Self::PyAff4Logical => "AFF4-L (pyaff4, version 1.1, unspecified)",
+            Self::Aff4L10 => "AFF4-L Standard v1.0-ALPHA",
             Self::Legacy => "pre-standard (Evimetry/Wirespeed)",
+        }
+    }
+
+    /// The document(s) `conformance` measures this generation against.
+    ///
+    /// The base specification comes first; the second element is the
+    /// additional document governing logical constructs, where one applies.
+    /// See the mapping table in
+    /// `docs/working/AFF4-L-Standard-v1.0-ALPHA-design-phases.md`.
+    #[must_use]
+    pub fn governing_spec(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Self::Standard10 => (crate::error::SPEC_NAME, None),
+            // v1.0a governs the container; the paper governs the logical layer
+            // above it. Two documents, each authoritative for its own layer.
+            Self::PyAff4Logical => (
+                crate::error::SPEC_NAME,
+                Some(crate::error::AFF4_L_SPEC_NAME),
+            ),
+            Self::Aff4L10 => (crate::error::AFF4_L_STANDARD_NAME, None),
+            // Nothing this tool cites describes a pre-standard container. The
+            // base document is named only so the type is total; a Legacy
+            // container is declined before any citation is printed. Kept
+            // separate from Standard10, whose identical value means the
+            // opposite: that v1.0a genuinely governs it.
+            #[allow(clippy::match_same_arms)]
+            Self::Legacy => (crate::error::SPEC_NAME, None),
         }
     }
 }
@@ -206,7 +275,11 @@ impl Lexicon {
     }
 }
 
-/// AFF4 Standard v1.0 (spec §2).
+/// AFF4 Standard v1.0a (spec §2).
+///
+/// Also the base vocabulary for pyaff4-era AFF4-L, which adds logical terms
+/// (`FileImage`, `FolderImage`, `originalFileName`, the filesystem timestamps)
+/// rather than changing any spelling modelled here.
 pub const STANDARD: Lexicon = Lexicon {
     namespace: STANDARD_NAMESPACE,
     image: "Image",
@@ -220,42 +293,6 @@ pub const STANDARD: Lexicon = Lexicon {
     chunk_size: "chunkSize",
     chunks_in_segment: "chunksInSegment",
     compression_method: "compressionMethod",
-    hash: "hash",
-    stored: "stored",
-    data_stream: "dataStream",
-    dependent_stream: "dependentStream",
-    target: "target",
-    map_gap_default_stream: "mapGapDefaultStream",
-    contains: "contains",
-};
-
-/// AFF4 Standard v1.1.
-///
-/// Identical to v1.0 for the terms modelled here; v1.1 adds logical-imaging
-/// vocabulary (`FileImage`, `FolderImage`, `originalFileName`, and the four
-/// filesystem timestamps) rather than changing existing spellings.
-pub const STANDARD11: Lexicon = STANDARD;
-
-/// The Rekall/winpmem dialect.
-///
-/// Reconstructed from pyaff4's lexicon for this dialect (the class is named
-/// `ScudetteLexicon` there, after its original author). **Untested** —
-/// the reference corpus contains no such container, which is why
-/// [`Generation::is_supported`] returns false for it. Present so a container
-/// can be named accurately in an error rather than reported as unrecognised.
-pub const REKALL: Lexicon = Lexicon {
-    namespace: STANDARD_NAMESPACE,
-    image: "Image",
-    contiguous_image: "ContiguousImage",
-    disk_image: "DiskImage",
-    image_stream: "ImageStream",
-    map: "map",
-    volume: "ZipVolume",
-    block_hashes: "BlockHashes",
-    size: "size",
-    chunk_size: "chunk_size",
-    chunks_in_segment: "chunks_per_segment",
-    compression_method: "compression",
     hash: "hash",
     stored: "stored",
     data_stream: "dataStream",
@@ -314,7 +351,11 @@ mod tests {
         );
         assert_eq!(
             Generation::from_version(&version(1, 1)),
-            Some(Generation::Standard11)
+            Some(Generation::PyAff4Logical)
+        );
+        assert_eq!(
+            Generation::from_version(&version(2, 1)),
+            Some(Generation::Aff4L10)
         );
     }
 
@@ -324,15 +365,17 @@ mod tests {
     fn an_unknown_version_has_no_generation() {
         assert_eq!(Generation::from_version(&version(1, 2)), None);
         assert_eq!(Generation::from_version(&version(2, 0)), None);
+        assert_eq!(Generation::from_version(&version(3, 0)), None);
     }
 
-    /// `version.txt` arrived with Standard v1.0, so its absence means a
-    /// pre-standard dialect, told apart by namespace.
+    /// `version.txt` arrived with Standard v1.0, so its absence means the
+    /// container is pre-standard. Either pre-standard namespace resolves to
+    /// Legacy; neither is supported, so one name suffices.
     #[test]
-    fn distinguishes_the_two_pre_standard_dialects_by_namespace() {
+    fn either_pre_standard_namespace_is_legacy() {
         assert_eq!(
             Generation::from_namespace(STANDARD_NAMESPACE),
-            Some(Generation::Rekall)
+            Some(Generation::Legacy)
         );
         assert_eq!(
             Generation::from_namespace(LEGACY_NAMESPACE),
@@ -341,38 +384,51 @@ mod tests {
         assert_eq!(Generation::from_namespace("http://example.com/#"), None);
     }
 
-    /// Rekall is named accurately but refused: no fixture exists, so any
-    /// implementation would ship untested.
+    /// Legacy and the AFF4-L v1.0-ALPHA standard are named accurately and
+    /// refused. Legacy is described by no specification this tool cites;
+    /// v2.1's rules are unimplemented and its reference images unpublished.
     #[test]
-    fn rekall_is_detected_but_not_supported() {
-        assert!(!Generation::Rekall.is_supported());
-        assert!(Generation::Rekall.name().contains("Rekall"));
+    fn unsupported_generations_are_named_but_refused() {
+        assert!(!Generation::Legacy.is_supported());
+        assert!(Generation::Legacy.name().contains("pre-standard"));
 
-        for g in [
-            Generation::Standard10,
-            Generation::Standard11,
-            Generation::Legacy,
-        ] {
+        assert!(!Generation::Aff4L10.is_supported());
+        assert!(Generation::Aff4L10.name().contains("v1.0-ALPHA"));
+
+        for g in [Generation::Standard10, Generation::PyAff4Logical] {
             assert!(g.is_supported(), "{g} must be supported");
         }
     }
 
+    /// The mapping table: which document conformance measures each against.
+    #[test]
+    fn governing_specs_follow_the_mapping_table() {
+        use crate::error::{AFF4_L_SPEC_NAME, AFF4_L_STANDARD_NAME, SPEC_NAME};
+
+        assert_eq!(Generation::Standard10.governing_spec(), (SPEC_NAME, None));
+        assert_eq!(
+            Generation::PyAff4Logical.governing_spec(),
+            (SPEC_NAME, Some(AFF4_L_SPEC_NAME)),
+            "1.1 is v1.0a as base plus the AFF4-L paper for logical constructs"
+        );
+        assert_eq!(
+            Generation::Aff4L10.governing_spec(),
+            (AFF4_L_STANDARD_NAME, None)
+        );
+    }
+
     /// The spellings that actually differ between generations. Each value was
-    /// read out of a reference container (or, for Rekall, out of pyaff4's
-    /// lexicon).
+    /// read out of a reference container.
     #[test]
     fn property_spellings_differ_per_generation() {
         assert_eq!(STANDARD.chunk_size, "chunkSize");
         assert_eq!(LEGACY.chunk_size, "chunk_size");
-        assert_eq!(REKALL.chunk_size, "chunk_size");
 
         assert_eq!(STANDARD.chunks_in_segment, "chunksInSegment");
         assert_eq!(LEGACY.chunks_in_segment, "chunks_in_segment");
-        assert_eq!(REKALL.chunks_in_segment, "chunks_per_segment");
 
         assert_eq!(STANDARD.compression_method, "compressionMethod");
         assert_eq!(LEGACY.compression_method, "CompressionMethod");
-        assert_eq!(REKALL.compression_method, "compression");
     }
 
     /// Pre-standard lowercases what the standard capitalises.
@@ -385,11 +441,11 @@ mod tests {
         assert_eq!(LEGACY.volume, "zip_volume");
     }
 
-    /// Only seven terms are spelled identically across all generations; these
+    /// Only seven terms are spelled identically in both vocabularies; these
     /// are the ones a generation-agnostic reader could rely on.
     #[test]
     fn the_universal_terms_agree() {
-        for lex in [&STANDARD, &LEGACY, &REKALL] {
+        for lex in [&STANDARD, &LEGACY] {
             assert_eq!(lex.size, "size");
             assert_eq!(lex.hash, "hash");
             assert_eq!(lex.stored, "stored");
@@ -420,30 +476,44 @@ mod tests {
         );
     }
 
-    /// The two pre-standard dialects share the Standard's namespace or their
-    /// own; `owns` must not confuse them.
+    /// The vocabularies use different namespaces; `owns` must not confuse them.
     #[test]
     fn ownership_follows_the_namespace() {
         assert!(STANDARD.owns("http://aff4.org/Schema#hash"));
         assert!(!STANDARD.owns("http://afflib.org/2009/aff4#hash"));
         assert!(LEGACY.owns("http://afflib.org/2009/aff4#hash"));
         assert!(!LEGACY.owns("http://aff4.org/Schema#hash"));
-        // Rekall shares the standard namespace; only spellings differ.
-        assert!(REKALL.owns("http://aff4.org/Schema#chunk_size"));
     }
 
     #[test]
     fn every_generation_resolves_to_a_lexicon() {
         assert_eq!(Generation::Standard10.lexicon(), &STANDARD);
-        assert_eq!(Generation::Standard11.lexicon(), &STANDARD11);
-        assert_eq!(Generation::Rekall.lexicon(), &REKALL);
+        assert_eq!(Generation::PyAff4Logical.lexicon(), &STANDARD);
+        assert_eq!(Generation::Aff4L10.lexicon(), &STANDARD);
         assert_eq!(Generation::Legacy.lexicon(), &LEGACY);
     }
 
     #[test]
     fn generation_names_are_readable() {
-        assert_eq!(Generation::Standard10.to_string(), "AFF4 Standard v1.0");
-        assert_eq!(Generation::Standard11.to_string(), "AFF4 Standard v1.1");
+        assert_eq!(Generation::Standard10.to_string(), "AFF4 Standard v1.0a");
         assert!(Generation::Legacy.to_string().contains("pre-standard"));
+    }
+
+    /// No specification defines version 1.1, so no name may imply one does.
+    #[test]
+    fn no_generation_claims_a_standard_v1_1() {
+        for g in [
+            Generation::Standard10,
+            Generation::PyAff4Logical,
+            Generation::Aff4L10,
+            Generation::Legacy,
+        ] {
+            let name = g.name();
+            assert!(
+                !name.contains("Standard v1.1"),
+                "{name} names a standard that does not exist"
+            );
+        }
+        assert!(Generation::PyAff4Logical.name().contains("pyaff4"));
     }
 }

@@ -390,7 +390,7 @@ pub fn acquire_logical(
     use crate::write::turtle::{TurtleTerm, XSD_DATE_TIME, XSD_LONG, XSD_STRING};
 
     let volume_arn = writer.volume_arn().as_str().to_owned();
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let mut result = LogicalAcquisition::default();
     // The pool spans the whole acquisition, so identical content is stored once
     // *across* files rather than merely within one.
@@ -522,7 +522,7 @@ pub fn acquire_logical_scanned(
     use crate::write::turtle::TurtleTerm;
 
     let volume_arn = writer.volume_arn().as_str().to_owned();
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let mut result = LogicalAcquisition::default();
     let mut pool = options
         .deduplicate
@@ -608,7 +608,7 @@ pub fn acquire_logical_prescanned(
     use crate::write::turtle::TurtleTerm;
 
     let volume_arn = writer.volume_arn().as_str().to_owned();
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let mut result = LogicalAcquisition::default();
     let mut pool = options
         .deduplicate
@@ -771,7 +771,7 @@ fn acquire_from_items(
     use crate::write::scan::ScanItem;
     use crate::write::turtle::TurtleTerm;
 
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let mut stack: Vec<OpenDir> = Vec::new();
     let mut roots: Vec<String> = Vec::new();
 
@@ -919,7 +919,7 @@ fn record_file(
 ) {
     use crate::write::turtle::{TurtleTerm, XSD_LONG};
 
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
 
     let stamps = match std::fs::symlink_metadata(path) {
         Ok(m) => timestamps_of(&m),
@@ -1047,7 +1047,7 @@ fn record_deduplicated_file(
 ) {
     use crate::write::turtle::{TurtleTerm, XSD_LONG};
 
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let locus = crate::error::Locus::new(path);
 
     let file = match std::fs::File::open(path) {
@@ -1161,7 +1161,7 @@ fn record_large_file(
     use crate::write::stream_writer::write_image_stream_as;
     use crate::write::turtle::{TurtleTerm, XSD_LONG};
 
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let locus = crate::error::Locus::new(path);
 
     let mut file = match std::fs::File::open(path) {
@@ -1225,7 +1225,7 @@ fn write_table_3(
 ) {
     use crate::write::turtle::{TurtleTerm, XSD_DATE_TIME, XSD_STRING};
 
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let graph = writer.graph_mut();
     graph.add(
         arn,

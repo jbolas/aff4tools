@@ -257,7 +257,7 @@ impl ChunkPool {
         // content names storage. Offsets come from the pool's own insertion
         // order — chunk *n* sits at `n * chunk_size`, because every pooled
         // chunk is padded to full length.
-        let lexicon = crate::lexicon::STANDARD11;
+        let lexicon = crate::lexicon::STANDARD;
         let chunk_len = self.chunk_size as u64;
         for (index, arn) in self.arns.iter().enumerate() {
             let offset = index as u64 * chunk_len;

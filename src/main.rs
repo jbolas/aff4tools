@@ -15,8 +15,8 @@ use aff4tools::zip::Volume as _;
 use aff4tools::zip_volume_set::VolumeOrigin;
 use aff4tools::{
     Aff4Object, Container, ContainerSummary, Coverage, Deviation, DeviationKind, Error, HashCheck,
-    Image, Locus, ObjectRole, Outcome, Progress, SPEC_NAME, SplitLayout, VerificationReport,
-    VerifyOptions, WorkEstimate, estimate_work, verify_container_with_progress,
+    Image, Locus, ObjectRole, Outcome, Progress, SplitLayout, VerificationReport, VerifyOptions,
+    WorkEstimate, estimate_work, verify_container_with_progress,
 };
 // Re-exported at `pub(crate)` visibility so `report.rs` can keep referring to
 // it as `crate::human_bytes`, unchanged from when the function lived here.
@@ -3070,7 +3070,10 @@ fn run_acquire(
     match summarize(std::slice::from_ref(&output.to_path_buf())) {
         Ok(summary) => {
             if summary.deviations.is_empty() {
-                let _ = writeln!(out, "Conformance: no deviations from {SPEC_NAME}");
+                // Named from the container's own generation, not a constant:
+                // what aff4tools wrote decides which document governs it.
+                let (spec, _) = summary.generation.governing_spec();
+                let _ = writeln!(out, "Conformance: no deviations from {spec}");
             } else {
                 let _ = writeln!(
                     out,
@@ -3294,7 +3297,10 @@ fn run_acquire_from_aff4(
     match summarize(std::slice::from_ref(&output.to_path_buf())) {
         Ok(summary) => {
             if summary.deviations.is_empty() {
-                let _ = writeln!(out, "Conformance: no deviations from {SPEC_NAME}");
+                // Named from the container's own generation, not a constant:
+                // what aff4tools wrote decides which document governs it.
+                let (spec, _) = summary.generation.governing_spec();
+                let _ = writeln!(out, "Conformance: no deviations from {spec}");
             } else {
                 let _ = writeln!(
                     out,
@@ -3694,7 +3700,10 @@ fn run_acquire_logical(
     match summarize(std::slice::from_ref(&output.to_path_buf())) {
         Ok(summary) => {
             if summary.deviations.is_empty() {
-                let _ = writeln!(out, "Conformance: no deviations from {SPEC_NAME}");
+                // Named from the container's own generation, not a constant:
+                // what aff4tools wrote decides which document governs it.
+                let (spec, _) = summary.generation.governing_spec();
+                let _ = writeln!(out, "Conformance: no deviations from {spec}");
             } else {
                 let _ = writeln!(
                     out,
@@ -4342,7 +4351,7 @@ fn verify_written(path: &std::path::Path) -> aff4tools::Result<VerificationRepor
 /// findings; see docs/RDF-scalability.md.
 fn conformance_findings(
     paths: &[PathBuf],
-) -> std::result::Result<(PathBuf, Vec<aff4tools::Deviation>), OpenError> {
+) -> std::result::Result<aff4tools::ConformanceScan, OpenError> {
     let mut container = open_striped_for_summary(paths)?;
     Ok(container.deviations_only()?)
 }
@@ -4363,8 +4372,9 @@ fn run_conformance(sets: &[Vec<PathBuf>], format: Format, strict: bool) -> ExitC
 
     for (index, set) in sets.iter().enumerate() {
         match conformance_findings(set) {
-            Ok((source_path, deviations)) => {
-                if strict && aff4tools::model::has_noteworthy_deviation(&deviations) {
+            Ok(scan) => {
+                let deviations = &scan.deviations;
+                if strict && aff4tools::model::has_noteworthy_deviation(deviations) {
                     // Same rule --strict follows everywhere else: routine
                     // conditions are reported but do not set the exit code.
                     worst = worst.max(EXIT_STRICT_DEVIATION);
@@ -4374,10 +4384,10 @@ fn run_conformance(sets: &[Vec<PathBuf>], format: Format, strict: bool) -> ExitC
                         if index > 0 {
                             let _ = writeln!(out);
                         }
-                        let _ = write_conformance(&mut out, &source_path, &deviations);
+                        let _ = write_conformance(&mut out, &scan);
                     }
                     Format::Json => {
-                        reports.push(ConformanceReport::from(&source_path, &deviations));
+                        reports.push(ConformanceReport::from(&scan));
                     }
                 }
             }
@@ -4426,11 +4436,39 @@ fn run_conformance(sets: &[Vec<PathBuf>], format: Format, strict: bool) -> ExitC
 /// exactly the lossy conversion this project refuses to make.
 fn write_conformance(
     out: &mut impl Write,
-    source_path: &std::path::Path,
-    deviations: &[aff4tools::Deviation],
+    scan: &aff4tools::ConformanceScan,
 ) -> std::io::Result<()> {
-    writeln!(out, "Container: {}", source_path.display())?;
-    writeln!(out, "Checking conformance with {SPEC_NAME}")?;
+    let deviations = &scan.deviations;
+    let (base_spec, logical_spec) = scan.generation.governing_spec();
+
+    writeln!(out, "Container: {}", scan.path.display())?;
+    // The declared version and the producing tool, in the same words `info`
+    // uses. The version is what selected the document named below, so a report
+    // that cites a specification without showing the version leaves the
+    // examiner unable to check that choice. Which implementation wrote the
+    // container is then the first thing that explains a deviation, and neither
+    // fact should require running a second command.
+    match scan.version.as_ref() {
+        Some(version) => {
+            writeln!(out, "AFF4 Version: {}.{}", version.major, version.minor)?;
+            if let Some(tool) = version.tool.as_ref() {
+                writeln!(out, "Tool: {tool}")?;
+            }
+        }
+        // Stated rather than omitted: absence is a fact about the container,
+        // and pyaff4 fabricates Version(0,1) here.
+        None => writeln!(out, "AFF4 Version: not declared (pre-standard container)")?,
+    }
+    match logical_spec {
+        // Two documents govern a pyaff4-era AFF4-L container: v1.0a for the
+        // base container, the paper for the logical layer above it. Naming
+        // only one would misstate what was measured.
+        Some(logical) => writeln!(
+            out,
+            "Checking conformance with {base_spec}, and {logical} for logical constructs"
+        )?,
+        None => writeln!(out, "Checking conformance with {base_spec}")?,
+    }
     writeln!(out)?;
 
     if deviations.is_empty() {
@@ -4439,7 +4477,7 @@ fn write_conformance(
         // must not be read as "the evidence is intact".
         writeln!(
             out,
-            "No deviations. This container's metadata conforms to {SPEC_NAME}."
+            "No deviations. This container's metadata conforms to {base_spec}."
         )?;
         writeln!(
             out,
@@ -4454,10 +4492,10 @@ fn write_conformance(
         writeln!(out)?;
         writeln!(out, "  [{}] {}", deviation.kind, deviation.locus)?;
         match (
-            deviation.kind.spec_section(),
-            deviation.kind.other_specification(),
+            deviation.kind.spec_section(scan.generation),
+            deviation.kind.other_specification(scan.generation),
         ) {
-            (Some(section), _) => writeln!(out, "      {SPEC_NAME} {section}")?,
+            (Some(section), _) => writeln!(out, "      {base_spec} {section}")?,
             // AFF4-L rules are specified in the paper, not the Standard.
             // Citing that document is both true and findable; saying the
             // Standard is silent would imply nothing legislates it.
@@ -4468,7 +4506,7 @@ fn write_conformance(
             // citation cannot read as an omission.
             (None, None) => writeln!(
                 out,
-                "      {SPEC_NAME} does not address this; reported as an extension"
+                "      {base_spec} does not address this; reported as an extension"
             )?,
         }
         writeln!(out, "      {}", deviation.detail)?;
@@ -4494,8 +4532,22 @@ struct ConformanceJsonReport {
 struct ConformanceReport {
     /// The container's path on disk.
     source_path: PathBuf,
-    /// The specification revision checked against.
+    /// Which era wrote the container, as [`Generation`] serializes it.
+    generation: aff4tools::Generation,
+    /// The version declared in `version.txt`, e.g. `"1.1"`. Absent for a
+    /// container that declares none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aff4_version: Option<String>,
+    /// The producing tool from `version.txt`, absent if it declared none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<String>,
+    /// The base specification checked against, decided by the generation.
     specification: &'static str,
+    /// The additional document governing logical constructs, where one
+    /// applies. Present only for pyaff4-era AFF4-L, whose logical layer is
+    /// specified in a paper rather than in the Standard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logical_specification: Option<&'static str>,
     /// Whether anything at all departed from the standard. Routine conditions
     /// count here — this is [`ContainerSummary::is_conformant`], not the
     /// narrower question `--strict` asks.
@@ -4505,14 +4557,26 @@ struct ConformanceReport {
 }
 
 impl ConformanceReport {
-    fn from(source_path: &std::path::Path, deviations: &[aff4tools::Deviation]) -> Self {
+    fn from(scan: &aff4tools::ConformanceScan) -> Self {
+        let (base_spec, logical_spec) = scan.generation.governing_spec();
         Self {
-            source_path: source_path.to_path_buf(),
-            specification: SPEC_NAME,
+            source_path: scan.path.clone(),
+            generation: scan.generation,
+            aff4_version: scan
+                .version
+                .as_ref()
+                .map(|v| format!("{}.{}", v.major, v.minor)),
+            tool: scan.version.as_ref().and_then(|v| v.tool.clone()),
+            specification: base_spec,
+            logical_specification: logical_spec,
             // `is_conformant` is "no deviation at all", routine ones included —
             // deliberately not the narrower question `--strict` asks.
-            conformant: deviations.is_empty(),
-            deviations: deviations.iter().map(ConformanceDeviation::from).collect(),
+            conformant: scan.deviations.is_empty(),
+            deviations: scan
+                .deviations
+                .iter()
+                .map(|d| ConformanceDeviation::from(d, scan.generation))
+                .collect(),
         }
     }
 }
@@ -4550,16 +4614,16 @@ struct OtherSpecification {
 }
 
 impl ConformanceDeviation {
-    fn from(deviation: &Deviation) -> Self {
+    fn from(deviation: &Deviation, generation: aff4tools::Generation) -> Self {
         Self {
             kind: deviation.kind,
             description: deviation.kind.to_string(),
             locus: deviation.locus.to_string(),
             detail: deviation.detail.clone(),
-            spec_section: deviation.kind.spec_section(),
+            spec_section: deviation.kind.spec_section(generation),
             other_specification: deviation
                 .kind
-                .other_specification()
+                .other_specification(generation)
                 .map(|(document, section)| OtherSpecification { document, section }),
         }
     }

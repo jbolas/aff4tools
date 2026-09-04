@@ -1833,7 +1833,7 @@ mod tests {
                     .expect("volume ARN must parse"),
                 arn_source: aff4tools::ArnSource::ZipComment,
             },
-            generation: aff4tools::Generation::Standard11,
+            generation: aff4tools::Generation::PyAff4Logical,
             version: None,
             objects,
             segments: aff4tools::SegmentSummary {

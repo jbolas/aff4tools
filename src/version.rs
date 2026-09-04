@@ -37,9 +37,11 @@ pub const SEGMENT_NAME: &str = "version.txt";
 /// A parsed `version.txt`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ContainerVersion {
-    /// Major version. `1` for AFF4 Standard v1.0 and v1.1.
+    /// Major version. `1` for AFF4 Standard v1.0a and for pyaff4-era AFF4-L;
+    /// `2` for the AFF4-L Standard v1.0-ALPHA.
     pub major: u32,
-    /// Minor version. `0` for v1.0, `1` for v1.1.
+    /// Minor version. `0` for v1.0a, `1` for pyaff4-era AFF4-L and for the
+    /// AFF4-L Standard v1.0-ALPHA (which pairs it with major `2`).
     pub minor: u32,
     /// The producing tool, verbatim, e.g. `Evimetry 2.2.0` or `pyaff4`.
     ///
@@ -107,26 +109,46 @@ impl ContainerVersion {
         })
     }
 
-    /// Whether this is AFF4 Standard v1.0.
+    /// Whether this is AFF4 Standard v1.0a (spec §1: major 1, minor 0).
     #[must_use]
     pub fn is_v1_0(&self) -> bool {
         self.major == 1 && self.minor == 0
     }
 
-    /// Whether this is AFF4 Standard v1.1.
+    /// Whether this is pyaff4-era AFF4-L, which declares `major=1 minor=1`.
+    ///
+    /// **No specification defines version 1.1.** v1.0a states only that AFF4
+    /// Standard v1.0 is major 1, minor 0; the AFF4-L Standard v1.0-ALPHA
+    /// assigns AFF4-L major 2, minor 1. Version 1.1 is what pyaff4 wrote when
+    /// it added logical imaging, and it is carried by every AFF4-L container
+    /// in the reference corpus. Recognised because the evidence exists, not
+    /// because a document sanctions the number.
     #[must_use]
     pub fn is_v1_1(&self) -> bool {
         self.major == 1 && self.minor == 1
     }
 
-    /// Whether this build understands the declared version.
+    /// Whether this is the AFF4-L Standard v1.0-ALPHA.
     ///
-    /// Only 1.0 and 1.1 are specified. A container declaring anything else is
-    /// intact but beyond this build — the caller should raise
-    /// [`Error::Unsupported`], never [`Error::Malformed`].
+    /// Its §3 fixes the pair: "For AFF4-L Standard v1.0, the Major is 2, Minor
+    /// is 1."
+    #[must_use]
+    pub fn is_v2_1(&self) -> bool {
+        self.major == 2 && self.minor == 1
+    }
+
+    /// Whether this build recognises the declared version.
+    ///
+    /// Recognising a version is not the same as being able to check it:
+    /// `2.1` is known here but declined by
+    /// [`crate::lexicon::Generation::is_supported`], because naming a
+    /// container accurately and measuring its conformance are separate
+    /// questions. A container declaring anything else is intact but beyond
+    /// this build — the caller should raise [`Error::Unsupported`], never
+    /// [`Error::Malformed`].
     #[must_use]
     pub fn is_known(&self) -> bool {
-        self.is_v1_0() || self.is_v1_1()
+        self.is_v1_0() || self.is_v1_1() || self.is_v2_1()
     }
 }
 
@@ -197,7 +219,20 @@ mod tests {
         let v = parse(b"major=1\nminor=1\ntool=pyaff4\n").unwrap();
         assert!(v.is_v1_1());
         assert!(!v.is_v1_0());
+        assert!(!v.is_v2_1());
         assert_eq!(v.tool.as_deref(), Some("pyaff4"));
+    }
+
+    /// AFF4-L Standard v1.0-ALPHA §3's example: major 2, minor 1.
+    #[test]
+    fn parses_an_aff4l_v2_1_container() {
+        let v = parse(b"major=2\nminor=1\ntool=pyaff4 0.9\n").unwrap();
+        assert!(v.is_v2_1());
+        assert!(!v.is_v1_0() && !v.is_v1_1());
+        assert!(
+            v.is_known(),
+            "2.1 is recognised here; refusal to check it is a separate decision"
+        );
     }
 
     /// `Base-Linear-AllHashes.aff4` reports a different tool version from its
@@ -329,7 +364,12 @@ mod tests {
         let v = parse(b"major=1\nminor=2\ntool=Future 1.0\n").unwrap();
         assert_eq!((v.major, v.minor), (1, 2));
         assert!(!v.is_known());
-        assert!(!v.is_v1_0() && !v.is_v1_1());
+        assert!(!v.is_v1_0() && !v.is_v1_1() && !v.is_v2_1());
+
+        // 2.0 is not 2.1: the AFF4-L standard fixes both numbers.
+        let two_oh = parse(b"major=2\nminor=0\n").unwrap();
+        assert!(!two_oh.is_known());
+        assert!(!two_oh.is_v2_1());
     }
 
     /// A stray byte in a vendor string must not make the container unreadable;

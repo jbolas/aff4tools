@@ -76,9 +76,10 @@ pub mod zip_volume_set;
 
 pub use arn::{Arn, ByteRange};
 pub use codec::Codec;
-pub use container::Container;
+pub use container::{ConformanceScan, Container};
 pub use error::{
-    Deviation, DeviationKind, Error, Feature, Locus, NotAff4Reason, Result, SPEC_NAME,
+    AFF4_L_STANDARD_NAME, Deviation, DeviationKind, Error, Feature, Locus, NotAff4Reason, Result,
+    SPEC_NAME,
 };
 pub use hash::{Digest, MultiHasher};
 pub use image::Image;

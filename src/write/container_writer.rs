@@ -60,7 +60,7 @@ pub enum VersionProfile {
     /// Verified accurate for this writer's output — a physical container uses
     /// 18 distinct `aff4:` terms, every one of them v1.0, and v1.1 adds
     /// logical-imaging vocabulary rather than changing existing spellings (see
-    /// `crate::lexicon::STANDARD11`, which is literally `= STANDARD`).
+    /// `crate::lexicon::STANDARD`, which is literally `= STANDARD`).
     Physical,
     /// A logical (AFF4-L) image: `major=1 minor=1`.
     ///

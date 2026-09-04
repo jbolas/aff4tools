@@ -1,6 +1,6 @@
 //! Opening a container and identifying which generation wrote it.
 //!
-//! This is the crate's top-level entry point: [`Container::open`] resolves the
+//! This is the crate's top-level entry point. [`Container::open`] resolves the
 //! storage layer ([`crate::zip`]), the declared version ([`crate::version`]),
 //! and the generation ([`crate::lexicon`]) into one handle the rest of the
 //! library reads through.
@@ -8,7 +8,7 @@
 //! # Detection order (spec §1)
 //!
 //! 1. An empty archive is not an AFF4 volume.
-//! 2. `version.txt` present → parse it. `1.0` and `1.1` are the two known
+//! 2. If `version.txt` present → parse it. `1.0` and `1.1` are the two known
 //!    Standard generations; anything else is [`crate::Error::Unsupported`],
 //!    because a future version is intact rather than damaged.
 //! 3. `version.txt` present but unparseable → [`crate::Error::Malformed`].
@@ -86,6 +86,43 @@ pub struct Container {
     deviations: Vec<Deviation>,
 }
 
+/// What `aff4tools conformance` learned from one container.
+
+#[derive(Debug, Clone)]
+pub struct ConformanceScan {
+    /// The container the findings came from.
+    pub path: PathBuf,
+    /// Which era wrote it, and so which document governs it.
+    pub generation: Generation,
+    /// The parsed `version.txt`, absent only for a container that declares
+    /// none. Carries both the declared version and the producing tool, which
+    /// the report prints in the same words `info` uses.
+    pub version: Option<ContainerVersion>,
+    /// Every departure recorded, routine or not.
+    pub deviations: Vec<Deviation>,
+}
+
+/// Why an unsupported generation is being declined.
+fn unsupported_generation_detail(generation: Generation, path: &std::path::Path) -> String {
+    match generation {
+        Generation::Aff4L10 => format!(
+            "{} declares version 2.1, the {}; aff4tools recognises it but does \
+             not yet implement its rules, and that standard's Canonical \
+             Reference Images are not published, so no conformance claim about \
+             it would be checkable",
+            path.display(),
+            generation.name()
+        ),
+        _ => format!(
+            "{} declares no version.txt and uses the {} vocabulary; no \
+             specification aff4tools cites describes this container, so it \
+             does not claim to read it",
+            path.display(),
+            generation.name()
+        ),
+    }
+}
+
 impl Container {
     /// Open a container read-only and identify its generation.
     ///
@@ -107,13 +144,7 @@ impl Container {
                 Feature::Generation {
                     named: generation.name().to_string(),
                 },
-                format!(
-                    "{} declares no version.txt and uses the {} vocabulary; \
-                     no container of this dialect exists in the reference corpus, \
-                     so aff4tools does not claim to read it",
-                    volume.path().display(),
-                    generation.name()
-                ),
+                unsupported_generation_detail(generation, volume.path()),
             ));
         }
 
@@ -414,13 +445,7 @@ impl Container {
                 Feature::Generation {
                     named: generation.name().to_string(),
                 },
-                format!(
-                    "{} declares no version.txt and uses the {} vocabulary; \
-                     no container of this dialect exists in the reference corpus, \
-                     so aff4tools does not claim to read it",
-                    volume.path().display(),
-                    generation.name()
-                ),
+                unsupported_generation_detail(generation, volume.path()),
             ));
         }
 
@@ -483,7 +508,7 @@ impl Container {
     /// # Errors
     ///
     /// As [`Container::summarize`].
-    pub fn deviations_only(&mut self) -> Result<(PathBuf, Vec<Deviation>)> {
+    pub fn deviations_only(&mut self) -> Result<ConformanceScan> {
         let locus = self.volumes.primary().locus(Some(METADATA_SEGMENT));
         let volume_arn = self.volumes.primary().arn().clone();
         // Every volume the examiner opened, not just the primary. A reference
@@ -587,7 +612,12 @@ impl Container {
             &mut deviations,
         );
 
-        Ok((self.volumes.primary().path().to_path_buf(), deviations))
+        Ok(ConformanceScan {
+            path: self.volumes.primary().path().to_path_buf(),
+            generation: self.generation,
+            version: self.version.clone(),
+            deviations,
+        })
     }
 
     /// Build a complete summary of the container.
@@ -1530,43 +1560,45 @@ mod tests {
     fn identifies_standard_v1_1() {
         let (_d, path) = synth(&[("version.txt", b"major=1\nminor=1\ntool=pyaff4\n")]);
         let c = Container::open(&path).unwrap();
-        assert_eq!(c.generation(), Generation::Standard11);
+        assert_eq!(c.generation(), Generation::PyAff4Logical);
     }
 
-    /// No version.txt plus the legacy namespace means pre-standard Evimetry.
+    /// A pre-standard container is detected accurately, then declined.
+    ///
+    /// No `version.txt` means the container predates the standard, and no
+    /// specification this tool cites describes one. Reading it would be
+    /// reverse engineering presented as conformance, so it is named and
+    /// refused. The corpus `AFF4PreStd/*.af4` fixtures take this path.
     #[test]
-    fn identifies_legacy_by_namespace() {
-        let (_d, path) = synth(&[(METADATA_SEGMENT, &turtle_with(LEGACY_NAMESPACE))]);
-        let c = Container::open(&path).unwrap();
-        assert_eq!(c.generation(), Generation::Legacy);
-        assert_eq!(c.lexicon().chunk_size, "chunk_size");
+    fn a_pre_standard_container_is_unsupported_not_malformed() {
+        for namespace in [LEGACY_NAMESPACE, STANDARD_NAMESPACE] {
+            let (_d, path) = synth(&[(METADATA_SEGMENT, &turtle_with(namespace))]);
+            let err = Container::open(&path).unwrap_err();
+
+            assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+            assert!(
+                !err.is_integrity_finding(),
+                "an unsupported generation says nothing about evidence integrity"
+            );
+            assert_eq!(err.exit_code(), 6);
+            assert!(
+                err.to_string().contains("pre-standard"),
+                "the container must be named, not merely refused: {err}"
+            );
+        }
     }
 
-    /// pyaff4 fabricates Version(0,1) here; a summary must not invent one.
+    /// Either pre-standard namespace resolves to Legacy: neither is supported,
+    /// so telling the two dialects apart would give one outcome two names.
     #[test]
-    fn a_pre_standard_container_has_no_version() {
-        let (_d, path) = synth(&[(METADATA_SEGMENT, &turtle_with(LEGACY_NAMESPACE))]);
-        let c = Container::open(&path).unwrap();
-        assert_eq!(
-            c.version(),
-            None,
-            "no version.txt means no version, not 0.1"
-        );
-    }
-
-    /// Detected accurately, then declined — never reported as damaged.
-    #[test]
-    fn rekall_is_unsupported_not_malformed() {
-        let (_d, path) = synth(&[(METADATA_SEGMENT, &turtle_with(STANDARD_NAMESPACE))]);
-        let err = Container::open(&path).unwrap_err();
-
-        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
-        assert!(
-            !err.is_integrity_finding(),
-            "an unimplemented dialect says nothing about evidence integrity"
-        );
-        assert_eq!(err.exit_code(), 6);
-        assert!(err.to_string().contains("Rekall"), "{err}");
+    fn either_pre_standard_namespace_is_legacy() {
+        for namespace in [LEGACY_NAMESPACE, STANDARD_NAMESPACE] {
+            assert_eq!(
+                Generation::from_namespace(namespace),
+                Some(Generation::Legacy)
+            );
+        }
+        assert!(!Generation::Legacy.is_supported());
     }
 
     /// A future standard version is intact, not damaged.
@@ -1629,8 +1661,13 @@ mod tests {
 
     #[test]
     fn reads_the_metadata_segment() {
-        let body = turtle_with(LEGACY_NAMESPACE);
-        let (_d, path) = synth(&[(METADATA_SEGMENT, &body)]);
+        // A supported generation: a pre-standard container is declined at
+        // open, so it cannot be used to exercise the metadata reader.
+        let body = turtle_with(STANDARD_NAMESPACE);
+        let (_d, path) = synth(&[
+            ("version.txt", b"major=1\nminor=0\ntool=test\n".as_slice()),
+            (METADATA_SEGMENT, &body),
+        ]);
         let mut c = Container::open(&path).unwrap();
         assert_eq!(c.metadata_bytes().unwrap(), body);
     }

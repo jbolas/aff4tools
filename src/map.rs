@@ -642,7 +642,7 @@ impl Map {
         if !self.targets.iter().any(|t| t.block_hash().is_some()) {
             return;
         }
-        let data_stream = crate::lexicon::STANDARD11.iri(crate::lexicon::STANDARD11.data_stream);
+        let data_stream = crate::lexicon::STANDARD.iri(crate::lexicon::STANDARD.data_stream);
 
         // Target id → where in the shared stream that chunk begins.
         let mut slice_starts: BTreeMap<u32, u64> = BTreeMap::new();

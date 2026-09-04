@@ -295,7 +295,7 @@ pub fn write_split_set(
 /// `parts[0]` is part 001 itself, whose stream is already fully described by
 /// [`write_image_stream_bounded`], so it is skipped.
 fn declare_foreign_streams(first: &mut ContainerWriter, parts: &[WrittenPart], map_arn: &str) {
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let graph = first.graph_mut();
     for part in parts.iter().skip(1) {
         graph.add_type(&part.stream_arn, &lexicon.iri(lexicon.image_stream));
@@ -357,7 +357,7 @@ fn finish_first_part(
     )?;
 
     // The image digest belongs to the DiskImage, not to any one stream.
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     {
         let graph = first.graph_mut();
         for digest in digests {
@@ -386,7 +386,7 @@ fn finish_first_part(
 /// belonging to the set: the shared `DiskImage` (§7.1's point of commonality)
 /// and the Map the stream targets.
 fn write_stub(writer: &mut ContainerWriter, image_arn: &str, map_arn: &str, map_volume_arn: &str) {
-    let lexicon = crate::lexicon::STANDARD11;
+    let lexicon = crate::lexicon::STANDARD;
     let stream_arn = format!("{}/data", writer.volume_arn().as_str());
     let graph = writer.graph_mut();
 
