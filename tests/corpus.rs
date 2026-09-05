@@ -67,7 +67,7 @@ fn base_linear_matches_its_recorded_metadata() {
     assert_eq!(version.tool.as_deref(), Some("Evimetry 2.2.0"));
     assert_eq!(s.segments.count, 10);
 
-    // Spec §2.1 requires all three types on a disk image.
+    // v1.0a §2.1 requires all three types on a disk image.
     let images = s.images();
     assert_eq!(images.len(), 1);
     let image = images[0];
@@ -288,7 +288,7 @@ fn a_striped_volume_reports_external_references() {
 ///
 /// The counterpart to `a_striped_volume_reports_external_references`. A
 /// cross-volume `aff4:stored` is not a spec violation — v1.0a line 90 puts no
-/// requirement on which volume, and §7.1's discovery mechanism depends on
+/// requirement on which volume, and v1.0a §7.1's discovery mechanism depends on
 /// pointing at siblings — so the finding is an *unresolvable* reference. When
 /// the named volume is among those opened, there is nothing to tell the
 /// examiner. `Locality::External` is unaffected: the object still lives
@@ -1473,7 +1473,8 @@ fn broken_dedupe_parses_without_a_map_path_segment() {
     assert_eq!(map.entries().len(), 437);
     assert_eq!(map.targets().len(), 437);
 
-    // Content-addressed names parse as AFF4-L §4 block hashes, and — because
+    // Content-addressed names parse as AFF4-L 2019 §4 block hashes, and —
+    // because
     // this container declares no `aff4:dataStream` for any of them — must stay
     // unresolved rather than being guessed at. `Map::parse` has no graph, so
     // resolution cannot even be attempted here.
@@ -3640,7 +3641,7 @@ fn export_refuses_to_overwrite() {
 /// `export --logical` writes every file, including stream-backed ones.
 ///
 /// `unicode.aff4` stores six of its seven files as `ImageStream`s rather than
-/// ZIP segments (AFF4-L §3.4). Reading only segments silently skipped every
+/// ZIP segments (AFF4-L 2019 §3.4). Reading only segments silently skipped every
 /// file above the threshold, which is why this asserts the count.
 #[test]
 fn export_logical_writes_every_file() {
@@ -3795,8 +3796,9 @@ fn extracted_files_carry_their_recorded_times() {
 /// `unicode.aff4` omits `aff4:zip_segment` on the one file it stores as a
 /// segment, and that departure must be reported.
 ///
-/// AFF4-L §3.8's recipe ends by adding the type "to indicate that it is stored
-/// as a Zip Segment". pyaff4 writes it in `dream.aff4` and not here, so the
+/// AFF4-L 2019 §3.8's recipe ends by adding the type "to indicate that it is
+/// stored as a Zip Segment". pyaff4 writes it in `dream.aff4` and not here, so
+/// the
 /// same implementation is inconsistent with itself — which is why the rule
 /// cannot be inferred from reference output alone.
 #[test]

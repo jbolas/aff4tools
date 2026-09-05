@@ -128,7 +128,8 @@ impl Generation {
     pub fn lexicon(self) -> &'static Lexicon {
         match self {
             Self::Standard10 | Self::PyAff4Logical => &STANDARD,
-            // The v2.1 lexicon is not modelled: §4.1 adds a second namespace
+            // The v2.1 lexicon is not modelled: AFF4-L v1.0-ALPHA §4.1 adds a
+            // second namespace
             // and nineteen properties this build does not implement. The base
             // vocabulary is returned so the type is total, never so a v2.1
             // container can be read — `is_supported` declines first. Kept as
@@ -171,30 +172,35 @@ impl Generation {
         }
     }
 
-    /// The document(s) `conformance` measures this generation against.
+    /// The document or documents that govern a container of this generation.
     ///
-    /// The base specification comes first; the second element is the
-    /// additional document governing logical constructs, where one applies.
-    /// See the mapping table in
+    /// Returns the base document and, where a second document governs a layer
+    /// above it, that document too. This is the mapping table from the design,
+    /// expressed as a function so it cannot drift from the prose. See
     /// `docs/working/AFF4-L-Standard-v1.0-ALPHA-design-phases.md`.
     #[must_use]
-    pub fn governing_spec(self) -> (&'static str, Option<&'static str>) {
+    pub fn governing_spec(self) -> (crate::rules::Document, Option<crate::rules::Document>) {
+        use crate::rules::Document;
         match self {
-            Self::Standard10 => (crate::error::SPEC_NAME, None),
+            Self::Standard10 => (Document::Aff4Standard10a, None),
             // v1.0a governs the container; the paper governs the logical layer
             // above it. Two documents, each authoritative for its own layer.
-            Self::PyAff4Logical => (
-                crate::error::SPEC_NAME,
-                Some(crate::error::AFF4_L_SPEC_NAME),
+            Self::PyAff4Logical => (Document::Aff4Standard10a, Some(Document::Aff4LPaper2019)),
+            // Base-plus-delta: AFF4-L v1.0-ALPHA §3 says its versioning
+            // extends the v1.0 scheme, and AFF4-L v1.0-ALPHA §4.1 says its
+            // classes supplement the base lexicon, so v1.0a still governs the
+            // ZIP structure and map rules.
+            Self::Aff4L10 => (
+                Document::Aff4Standard10a,
+                Some(Document::Aff4LStandard10Alpha),
             ),
-            Self::Aff4L10 => (crate::error::AFF4_L_STANDARD_NAME, None),
             // Nothing this tool cites describes a pre-standard container. The
             // base document is named only so the type is total; a Legacy
             // container is declined before any citation is printed. Kept
             // separate from Standard10, whose identical value means the
             // opposite: that v1.0a genuinely governs it.
             #[allow(clippy::match_same_arms)]
-            Self::Legacy => (crate::error::SPEC_NAME, None),
+            Self::Legacy => (Document::Aff4Standard10a, None),
         }
     }
 }
@@ -217,9 +223,9 @@ pub struct Lexicon {
     // Classes.
     /// A stored image.
     pub image: &'static str,
-    /// A contiguous image (spec §2.1).
+    /// A contiguous image (v1.0a §2.1).
     pub contiguous_image: &'static str,
-    /// A disk image (spec §2.1).
+    /// A disk image (v1.0a §2.1).
     pub disk_image: &'static str,
     /// A chunked, optionally compressed data stream.
     pub image_stream: &'static str,
@@ -400,20 +406,29 @@ mod tests {
         }
     }
 
-    /// The mapping table: which document conformance measures each against.
+    /// The mapping table from the design, as a function.
     #[test]
     fn governing_specs_follow_the_mapping_table() {
-        use crate::error::{AFF4_L_SPEC_NAME, AFF4_L_STANDARD_NAME, SPEC_NAME};
+        use crate::rules::Document;
 
-        assert_eq!(Generation::Standard10.governing_spec(), (SPEC_NAME, None));
+        assert_eq!(
+            Generation::Standard10.governing_spec(),
+            (Document::Aff4Standard10a, None)
+        );
         assert_eq!(
             Generation::PyAff4Logical.governing_spec(),
-            (SPEC_NAME, Some(AFF4_L_SPEC_NAME)),
-            "1.1 is v1.0a as base plus the AFF4-L paper for logical constructs"
+            (Document::Aff4Standard10a, Some(Document::Aff4LPaper2019))
         );
         assert_eq!(
             Generation::Aff4L10.governing_spec(),
-            (AFF4_L_STANDARD_NAME, None)
+            (
+                Document::Aff4Standard10a,
+                Some(Document::Aff4LStandard10Alpha)
+            )
+        );
+        assert_eq!(
+            Generation::Legacy.governing_spec(),
+            (Document::Aff4Standard10a, None)
         );
     }
 

@@ -8,10 +8,10 @@
 //!
 //! # The three segments
 //!
-//! - `map` — the entries, 28 bytes each (spec §4):
+//! - `map` — the entries, 28 bytes each (v1.0a §4):
 //!   `mappedOffset: u64`, `length: u64`, `targetOffset: u64`, `targetId: u32`
 //! - `idx` — the target index: one target ARN per line, `\n` separated, where
-//!   line *n* is target ID *n* (spec §4.1)
+//!   line *n* is target ID *n* (v1.0a §4.1)
 //! - `mapPath` — documented by v1.0a §6.3 and hashed by `mapPathHash`
 //!
 //! Every one of these is parsed by `crate::map`, so the layout here is taken
@@ -53,7 +53,7 @@ pub struct WrittenMap {
 /// [`write_map`] derives both names from the volume, which is right when one
 /// volume holds the whole image. A split set cannot do that: every part shares
 /// **one** `DiskImage`, so its ARN is minted once by the caller and passed here
-/// (spec §7.1, the point of commonality).
+/// (v1.0a §7.1, the point of commonality).
 ///
 /// `targets` are the ARNs a map entry's `target_id` indexes into. They need not
 /// name streams in `writer`'s own volume; in a split set most of them do not.
@@ -124,7 +124,7 @@ pub fn write_map_as(
             &lexicon.iri(lexicon.dependent_stream),
             TurtleTerm::iri(target),
         );
-        // The inverse edge, which spec §2.2 calls a "backwards pointer to the
+        // The inverse edge, which v1.0a §2.2 calls a "backwards pointer to the
         // parent of this object" and lists on ImageStream as well as Map.
         // Written here rather than by the stream writer because a stream is
         // written before its map exists, and this is where both ARNs are known.
@@ -158,7 +158,7 @@ pub fn write_map_as(
         TurtleTerm::iri(&image_arn),
     );
 
-    // Spec §2.1 requires the full type chain, not only the most specific type.
+    // v1.0a §2.1 requires the full type chain, not only the most specific type.
     graph.add_type(&image_arn, &lexicon.iri(lexicon.disk_image));
     graph.add_type(&image_arn, &lexicon.iri(lexicon.contiguous_image));
     graph.add_type(&image_arn, &lexicon.iri(lexicon.image));
@@ -205,7 +205,8 @@ pub fn write_map(
     write_map_as(writer, &map_arn, &image_arn, entries, targets, size, locus)
 }
 
-/// Write a deduplicated file's Map, whose targets are Block Hash ARNs (§4).
+/// Write a deduplicated file's Map, whose targets are Block Hash ARNs
+/// (AFF4-L 2019 §4).
 ///
 /// `chunk_targets` is one target ID per chunk in file order; `targets` is the
 /// acquisition-wide Block Hash ARN list those IDs index into. Those IDs are
@@ -481,7 +482,7 @@ mod tests {
         );
     }
 
-    /// Spec §2.2 lists `target` on `ImageStream` as a "backwards pointer to the
+    /// v1.0a §2.2 lists `target` on `ImageStream` as a "backwards pointer to the
     /// parent of this object", and every corpus container writes one. Without
     /// it a consumer holding a stream ARN cannot find the map that assembles
     /// it without scanning the whole graph — and pyaff4's `getParentMap`

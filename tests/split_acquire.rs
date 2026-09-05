@@ -92,7 +92,7 @@ fn a_split_set_is_written_as_several_parts() {
         assert_eq!(part.path, expected);
         assert!(part.path.is_file());
     }
-    // Every part shares one DiskImage: §7.1's point of commonality.
+    // Every part shares one DiskImage: v1.0a §7.1's point of commonality.
     assert!(set.image_arn.starts_with("aff4://"));
     assert_eq!(set.digests.len(), 2);
 }
@@ -260,7 +260,7 @@ fn cross_part_references_resolve() {
 /// image is divided across files.**
 ///
 /// Covers the image digest and every block hash. `blockMapHash` is excluded by
-/// construction — spec §6.2 derives it from each stream's ordinal in the map
+/// construction — v1.0a §6.2 derives it from each stream's ordinal in the map
 /// index, so N streams cannot produce a single stream's value. It is a digest
 /// of map structure, not of stored data, and aff4tools does not write it.
 #[test]
@@ -353,9 +353,10 @@ fn splitting_does_not_change_the_digests_of_the_stored_data() {
     );
 }
 
-/// Every part must conform, stubs included, apart from the one note §7.1 makes
+/// Every part must conform, stubs included, apart from the one note v1.0a §7.1
+/// makes
 /// unavoidable: a part read alone says it references its siblings. The stub is
-/// the minimum spec §3 allows (lines 142, 152, 154), not an abbreviation of it.
+/// the minimum v1.0a §3 allows (lines 142, 152, 154), not an abbreviation of it.
 #[test]
 fn every_part_conforms_with_zero_deviations() {
     let dir = tempfile::tempdir().unwrap();
@@ -382,7 +383,7 @@ fn every_part_conforms_with_zero_deviations() {
         cmd.args(["conformance", part.path.to_str().unwrap()]);
         let out = cmd.assert().get_output().stdout.clone();
         let text = String::from_utf8(out).unwrap();
-        // A part read alone necessarily references its siblings (§7.1), so
+        // A part read alone necessarily references its siblings (v1.0a §7.1), so
         // `ExternalReference` is expected here. Nothing else is: this pins that
         // no other deviation creeps into split output.
         let others: Vec<&str> = text
@@ -681,7 +682,7 @@ fn unreadable_region_straddling_a_part_boundary_matches_whole() {
 }
 
 /// A source too large for 999 parts at the given threshold is refused before
-/// any part file is created, so the refusal costs nothing (decision §60).
+/// any part file is created, so the refusal costs nothing.
 ///
 /// Exercised through `preflight` rather than the CLI: `SplitSize` offers no
 /// threshold below 1 GiB, so a CLI fixture would need a terabyte of source.

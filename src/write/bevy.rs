@@ -241,7 +241,7 @@ impl BevyBuilder {
     }
 }
 
-/// The member name of bevy `number`: eight ASCII digits, per spec §4.
+/// The member name of bevy `number`: eight ASCII digits, per v1.0a §4.
 #[must_use]
 pub fn bevy_name(base: &str, number: u64) -> String {
     format!("{base}/{number:08}")

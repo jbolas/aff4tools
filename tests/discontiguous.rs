@@ -59,7 +59,7 @@ fn verify_text(container: &Path) -> String {
 
 /// A container that declares no gap stream must not be reported as if it had.
 ///
-/// Spec §4's `aff4:Zero` applies by default, but the container said nothing.
+/// v1.0a §4's `aff4:Zero` applies by default, but the container said nothing.
 /// Naming `aff4:Zero` alone would attribute to it a claim it never made — the
 /// failure mode CLAUDE.md's "don't invent format details" names. So the default
 /// is named *and* flagged as inferred.

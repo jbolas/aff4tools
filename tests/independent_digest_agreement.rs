@@ -227,7 +227,7 @@ for bad in listener.invalid:
 ///    single-implementation test can detect.
 /// 3. Both compute the same `blockMapHash`. That is a Merkle-style digest over
 ///    every block-hash segment plus `mapPointHash`, `mapIdxHash`, and
-///    `mapPathHash` (spec §6.2), so agreeing on it means agreeing about the
+///    `mapPathHash` (v1.0a §6.2), so agreeing on it means agreeing about the
 ///    whole tree rather than about one number.
 #[test]
 fn pyaff4_and_aff4tools_compute_the_same_digests() {

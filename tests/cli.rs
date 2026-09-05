@@ -1518,7 +1518,7 @@ mod corpus {
 
     /// the disk image's `hash (blockMapHashSHA512)` and the map's
     /// `blockMapHash (SHA512)` are the identical value, spec-mandated at two
-    /// locations (§6.2). The report must say so rather than leaving two
+    /// locations (v1.0a §6.2). The report must say so rather than leaving two
     /// identical 128-character digests unconnected.
     #[test]
     fn block_map_hash_duplication_is_cross_referenced() {
@@ -1938,7 +1938,8 @@ mod corpus {
 
     /// The deviation listing lives in `conformance`, with its spec citation.
     ///
-    /// `dream.aff4` stores `container.description` 2nd of 4 where §5.4 requires
+    /// `dream.aff4` stores `container.description` 2nd of 4 where v1.0a §5.4
+    /// requires
     /// it first. Its four lowercase `xsd:datetime` literals are no longer
     /// reported, so this container is down to that one
     /// finding — and the datatype must not reappear in the listing.
@@ -3244,7 +3245,7 @@ fn logical_progress_is_suppressed_when_stderr_is_not_a_terminal() {
     );
 }
 
-/// Read one container's volume ARN, from `container.description` (§5.4: the
+/// Read one container's volume ARN, from `container.description` (v1.0a §5.4: the
 /// first member stored, and the one place the ARN appears unencoded).
 fn read_volume_arn(path: &std::path::Path) -> String {
     let file = std::fs::File::open(path).unwrap();
@@ -3424,7 +3425,7 @@ fn scan_first_log_reports_no_estimated_total() {
 ///
 /// The regression, measured on a real 5.3 GiB acquisition of two macOS
 /// applications: `Arn::member_name` re-escaped an ARN path fragment that
-/// AFF4-L §3.2 had already escaped, so `%20` became `%2520`. Three name
+/// AFF4-L 2019 §3.2 had already escaped, so `%20` became `%2520`. Three name
 /// spellings resulted for one file — the ARN's, the small-file writer's, and
 /// the stream writer's — and they did not agree.
 ///

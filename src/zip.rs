@@ -1,4 +1,4 @@
-//! Read-only access to the ZIP storage layer (spec §5).
+//! Read-only access to the ZIP storage layer (v1.0a §5).
 //!
 //! An AFF4 container is a ZIP archive whose members are *segments*. This module
 //! opens one for reading, enumerates its segments, and resolves the volume ARN.
@@ -12,7 +12,7 @@
 //!
 //! # Volume ARN resolution
 //!
-//! Spec §5.4 gives two locations for the volume ARN and -recommends- both:
+//! v1.0a §5.4 gives two locations for the volume ARN and -recommends- both:
 //! the ZIP comment and a `container.description` segment. Readers accept either.
 //!
 //! Two observed common deviations are handled:
@@ -22,13 +22,14 @@
 //!   `container.description` is never padded. An untrimmed ARN carries an
 //!   invisible `\0` and compares unequal to everything, so the NUL is trimmed
 //!   and a [`DeviationKind::NulPaddedComment`] recorded.
-//! - **`container.description` is not always first.** Spec §5.4 says it MUST be
+//! - **`container.description` is not always first.** v1.0a §5.4 says it MUST
+//!   be
 //!   the first member when present; all three pyaff4-written containers place
 //!   it at index 1, 3, and 4.
 //!
 //! # zip64
 //!
-//! Spec §5.4 says all ZIP headers MUST be zip64. No canonical reference
+//! v1.0a §5.4 says all ZIP headers MUST be zip64. No canonical reference
 //! container has a zip64 end-of-central-directory record, so this is not
 //! enforced — enforcing it would reject every real container.
 
@@ -43,7 +44,7 @@ use crate::error::{Deviation, DeviationKind, Error, Locus, NotAff4Reason, Result
 use crate::model::SegmentKind;
 use crate::stream::INDEX_SUFFIX;
 
-/// The segment holding the volume ARN, per spec §5.4.
+/// The segment holding the volume ARN, per v1.0a §5.4.
 pub const DESCRIPTION_SEGMENT: &str = "container.description";
 
 /// The ZIP compression method meaning "not compressed".
@@ -172,7 +173,7 @@ pub fn classify_segment(name: &str) -> SegmentKind {
     SegmentKind::Other
 }
 
-/// Whether a name is a bevy number: eight ASCII digits, per spec §4.
+/// Whether a name is a bevy number: eight ASCII digits, per v1.0a §4.
 pub(crate) fn is_bevy_number(s: &str) -> bool {
     s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit())
 }
@@ -346,7 +347,7 @@ pub enum ArnSource {
     ZipComment,
     /// From the `container.description` segment only.
     ContainerDescription,
-    /// From both locations, as spec §5.4 recommends.
+    /// From both locations, as v1.0a §5.4 recommends.
     Both {
         /// Whether the two agree. A mismatch is an integrity signal.
         consistent: bool,
@@ -359,7 +360,7 @@ pub enum ArnSource {
 ///
 /// Implemented by [`ZipVolume`] today. It exists as a trait because striped
 /// containers (README feature 3) need a set of volumes resolving segments
-/// across siblings, and spec §5 also defines a Directory storage layer.
+/// across siblings, and v1.0a §5 also defines a Directory storage layer.
 ///
 /// Deliberately not a seekable stream API: `ImageStream` and `Map` decoding
 /// layer on top of this rather than inside it.
@@ -948,7 +949,7 @@ fn resolve_volume_arn(
         (Some(c), None) => (c, ArnSource::ZipComment),
         (None, Some(d)) => (d, ArnSource::ContainerDescription),
         (None, None) => {
-            // Spec §5.4 requires one of the two. Recovery from the metadata's
+            // v1.0a §5.4 requires one of the two. Recovery from the metadata's
             // empty `:` prefix belongs to the RDF layer, which is not built
             // yet; report precisely rather than guess.
             return Err(Error::not_aff4(path, NotAff4Reason::NoVolumeArn));
@@ -1003,7 +1004,7 @@ fn description_arn(
     };
 
     if index != 0 {
-        // Spec §5.4: "the file MUST be the first file stored in the Zip
+        // v1.0a §5.4: "the file MUST be the first file stored in the Zip
         // volume". pyaff4 writes it at index 1, 3, and 4 in the reference
         // corpus, so this cannot be an acceptance criterion.
         //
@@ -1011,7 +1012,8 @@ fn description_arn(
         // position is named. `index` is a 0-based offset, and reporting it raw
         // beside the word "first" read as a contradiction — "member 1, but it
         // is required to be the first member" invites the examiner to conclude
-        // the tool is wrong about a container that really does violate §5.4.
+        // the tool is wrong about a container that really does violate
+        // v1.0a §5.4.
         // A finding must be checkable against the container without knowing
         // whether this crate counts from zero.
         let position = index + 1;
@@ -1147,7 +1149,8 @@ mod tests {
         );
     }
 
-    /// Spec §5.4 requires it first; pyaff4 does not comply. Record, don't reject.
+    /// v1.0a §5.4 requires it first; pyaff4 does not comply. Record, don't
+    /// reject.
     ///
     /// The position must be stated so an examiner can check it against the
     /// archive. It is counted **from 1**, and the member actually holding first

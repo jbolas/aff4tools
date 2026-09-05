@@ -3,6 +3,10 @@
 //! > Schatz, B.L. *AFF4-L: A Scalable Open Logical Evidence Container.*
 //! > Digital Investigation 29, S143–S149. DFRWS USA 2019.
 //!
+//! **Every bare section number below cites that paper**, not the AFF4
+//! Standard. Where a rule comes from the Standard instead, the citation names
+//! v1.0a explicitly.
+//!
 //! **The paper is the specification here, not pyaff4.** The two disagree: the
 //! paper's Table 3 defines nine lexicon items and pyaff4 writes only five,
 //! omitting the whole §3.6 resource-enumeration model
@@ -1301,9 +1305,9 @@ mod tests {
 
     const VOLUME: &str = "aff4://e6bae91b-14d231833e18";
 
-    /// **Table 1 of the paper, verbatim.** These are the specification's own
-    /// worked examples, so they are the closest thing to an external oracle
-    /// this encoding has — gate 5 of the plan's §6.
+    /// **Table 1 of the paper.** These are the specification's own worked
+    /// examples, so they are the closest thing to an external oracle this
+    /// encoding has.
     #[test]
     fn table_1_path_to_arn_vectors() {
         let cases = [

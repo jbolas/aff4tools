@@ -88,7 +88,8 @@ fn a_written_container_opens_and_conforms() {
     );
 }
 
-/// §5.4: `container.description` must be the first member stored — measured by
+/// v1.0a §5.4: `container.description` must be the first member stored —
+/// measured by
 /// physical offset, which is what "stored" means.
 #[test]
 fn container_description_is_written_first() {

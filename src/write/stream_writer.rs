@@ -85,7 +85,7 @@ pub struct BlockHashDigest {
 /// Write `source` into `writer` as an `ImageStream`, returning what was stored.
 ///
 /// `algorithms` are computed over the stream's bytes and recorded as
-/// `aff4:hash`. The AFF4-L paper §3.7 uses SHA-1 and MD5; physical acquisition
+/// `aff4:hash`. AFF4-L 2019 §3.7 uses SHA-1 and MD5; physical acquisition
 /// conventionally uses SHA-256 and MD5. The caller chooses.
 ///
 /// The stream is named `<volume>/data`, which is the single-image case. A
@@ -111,7 +111,8 @@ pub fn write_image_stream(
 /// Write `source` as an `ImageStream` named `stream_arn`.
 ///
 /// The ARN is the caller's because a volume may hold many streams: AFF4-L
-/// stores one per file above the §3.3 threshold, and they would collide on the
+/// stores one per file above the AFF4-L 2019 §3.3 threshold, and they would
+/// collide on the
 /// `<volume>/data` name [`write_image_stream`] uses.
 ///
 /// # Errors

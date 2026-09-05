@@ -4,11 +4,12 @@
 //!
 //! Three AFF4 requirements a general-purpose library fights:
 //!
-//! 1. **§5.4 member ordering.** `container.description` MUST be the first file
+//! 1. **v1.0a §5.4 member ordering.** `container.description` MUST be the
+//!    first file
 //!    *stored* in the volume — a physical-layout constraint. Three of the four
 //!    corpus writers violate it, pyaff4 because it flushes segments from an
 //!    object cache in eviction order rather than creation order.
-//! 2. **§5.4 requires ZIP64 unconditionally**, regardless of size. Libraries
+//! 2. **v1.0a §5.4 requires ZIP64 unconditionally**, regardless of size. Libraries
 //!    emit it only when a field overflows.
 //! 3. **No member may be buffered whole in memory.** Evidence reaches
 //!    terabytes.
@@ -50,7 +51,8 @@ const VERSION_MADE_BY: u16 = 0x032d;
 
 /// UTF-8 filename flag (EFS, bit 11).
 ///
-/// AFF4-L §3.4 keeps Unicode filenames readable in ordinary ZIP browsers, which
+/// AFF4-L 2019 §3.4 keeps Unicode filenames readable in ordinary ZIP browsers,
+/// which
 /// requires declaring the encoding rather than leaving it to be guessed.
 const FLAG_UTF8: u16 = 1 << 11;
 
@@ -74,7 +76,7 @@ pub struct MemberRecord {
 /// Writes ZIP members to a [`WriteSink`] in the order they are added.
 ///
 /// Physical order is exactly call order, which is what lets the caller satisfy
-/// §5.4 by adding `container.description` first.
+/// v1.0a §5.4 by adding `container.description` first.
 #[derive(Debug)]
 pub struct ZipWriter {
     members: Vec<MemberRecord>,
@@ -187,7 +189,7 @@ impl ZipWriter {
         header.extend_from_slice(&0u16.to_le_bytes()); // mod date
         header.extend_from_slice(&crc.to_le_bytes());
         // 32-bit size fields carry the ZIP64 sentinel; the extra field holds
-        // the real values. §5.4 requires zip64 headers unconditionally.
+        // the real values. v1.0a §5.4 requires zip64 headers unconditionally.
         header.extend_from_slice(&u32::MAX.to_le_bytes());
         header.extend_from_slice(&u32::MAX.to_le_bytes());
         // Bounds-checked above, so this cannot truncate.
@@ -220,7 +222,7 @@ impl ZipWriter {
 
     /// Write the central directory and close the archive.
     ///
-    /// `comment` becomes the ZIP comment, which AFF4 §5.4 uses to carry the
+    /// `comment` becomes the ZIP comment, which v1.0a §5.4 uses to carry the
     /// volume ARN. It is written with **no NUL padding** — one corpus writer
     /// pads it, which this crate records as a deviation on read and must never
     /// reproduce on write.

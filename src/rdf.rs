@@ -378,7 +378,7 @@ impl Graph {
 
     /// Every `rdf:type` of `subject`.
     ///
-    /// Spec §2.1 requires multiple types (a disk image is `DiskImage` **and**
+    /// v1.0a §2.1 requires multiple types (a disk image is `DiskImage` **and**
     /// `ContiguousImage` **and** `Image`), so this always returns the full set.
     #[must_use]
     pub fn types(&self, subject: &str) -> Vec<&str> {
@@ -775,7 +775,7 @@ mod tests {
         );
     }
 
-    /// Spec §2.1 mandates multiple rdf:type values; collapsing to one would
+    /// v1.0a §2.1 mandates multiple rdf:type values; collapsing to one would
     /// discard information the standard requires.
     #[test]
     fn keeps_every_rdf_type() {
@@ -883,7 +883,7 @@ mod tests {
 
     /// A quote inside an IRI is escaped; a quote delimiting a literal is not.
     ///
-    /// `IRIREF` excludes `"`, and §3.2 does not name it, so
+    /// `IRIREF` excludes `"`, and AFF4-L 2019 §3.2 does not name it, so
     /// `About "Convert" Scripts.scpt` in `/Library` produced an unparseable
     /// subject. Escaping it must not touch the quotes that delimit literals —
     /// `originalFileName` is a quoted string on almost every statement, so a
@@ -986,7 +986,7 @@ mod tests {
     /// `escape_byte_ranges` exists to smuggle pyaff4's `[0x0:0x400]` suffix
     /// past a conformant Turtle parser, and the unescape on the way out was
     /// undoing it. Applied to the whole IRI it also undid escapes the ARN
-    /// legitimately carries: AFF4-L §3.2 encodes the forbidden `>` as `%3E`,
+    /// legitimately carries: AFF4-L 2019 §3.2 encodes the forbidden `>` as `%3E`,
     /// and the segment name keeps that escape, so decoding it here produced a
     /// subject whose `member_name` matched nothing in the archive.
     ///

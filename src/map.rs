@@ -56,7 +56,8 @@ pub const MAP_PATH_SEGMENT: &str = "mapPath";
 
 /// Whether an ARN names a stream the standard defines rather than the container.
 ///
-/// Symbolic streams (spec §4.4) are resolved by name: a run of repeated bytes is
+/// Symbolic streams (v1.0a §4.4) are resolved by name: a run of repeated bytes
+/// is
 /// recorded as a description rather than stored, so no triple declares them and
 /// an edge to one is not dangling.
 ///
@@ -74,7 +75,7 @@ pub fn is_symbolic_target(iri: &str) -> bool {
         || matches!(tail, "Zero" | "UnknownData" | "UnreadableData" | "FF")
 }
 
-/// The prefix a content-addressed chunk target carries (AFF4-L §4).
+/// The prefix a content-addressed chunk target carries (AFF4-L 2019 §4).
 ///
 /// Defined here rather than in the writer because it is a property of the
 /// format: the reader must recognize these whoever wrote them, and
@@ -99,7 +100,7 @@ pub enum Target {
     /// unreadable. Distinct from [`Target::RepeatedByte`]. See
     /// [`UnknownKind`].
     Unknown(UnknownKind),
-    /// A content-addressed chunk, `aff4:sha512:<digest>` (AFF4-L §4).
+    /// A content-addressed chunk, `aff4:sha512:<digest>` (AFF4-L 2019 §4).
     ///
     /// Names a chunk by its content rather than by resource. The bytes live in
     /// a shared `ImageStream`, reached through the ARN's own `aff4:dataStream`
@@ -164,7 +165,8 @@ impl Target {
             };
         }
 
-        // AFF4-L §4's content-addressed chunk. Not an `aff4://` resource name,
+        // AFF4-L 2019 §4's content-addressed chunk. Not an `aff4://` resource
+        // name,
         // so it is checked before the symbolic vocabularies below.
         if text.starts_with(BLOCK_HASH_PREFIX) {
             return Self::BlockHash(text.to_owned());
@@ -226,10 +228,11 @@ impl Target {
     /// How to name this target as a gap fill source.
     ///
     /// The ARN form rather than [`Target::describe`]'s prose, because a gap
-    /// fill is reported as the thing the container names (or the thing spec §4
+    /// fill is reported as the thing the container names (or the thing v1.0a §4
     /// names on its behalf), not as a description of what it contains.
     ///
-    /// `aff4:Zero` and `aff4:FF` are the two symbolic streams §4 defines by a
+    /// `aff4:Zero` and `aff4:FF` are the two symbolic streams v1.0a §4 defines
+    /// by a
     /// repeated byte; any other repeated byte has no standard name, so it is
     /// stated as the byte value rather than given an invented one.
     #[must_use]
@@ -286,7 +289,7 @@ impl MapEntry {
 
 /// How a map's holes should be treated.
 ///
-/// Spec §4 permits a **discontiguous** map to leave regions of its address
+/// v1.0a §4 permits a **discontiguous** map to leave regions of its address
 /// space uncovered, filled on read from `aff4:mapGapDefaultStream` and
 /// defaulting to `aff4:Zero` when that is unset. A *contiguous* image with a
 /// hole is a different matter entirely — there the gap is a finding, since the
@@ -300,11 +303,11 @@ pub enum GapPolicy {
     /// `ContiguousImage` or `DiskImage`.
     #[default]
     Refuse,
-    /// Holes are covered by this target, per spec §4. Only for an image typed
+    /// Holes are covered by this target, per v1.0a §4. Only for an image typed
     /// `aff4:DiscontiguousImage`.
     ///
     /// The `bool` is whether `aff4:mapGapDefaultStream` was declared, as
-    /// against spec §4's `aff4:Zero` default applying. Carried here because it
+    /// against v1.0a §4's `aff4:Zero` default applying. Carried here because it
     /// is known where the policy is built and unrecoverable afterwards, and a
     /// report must not present the default as the container's own statement.
     Fill(Target, bool),
@@ -340,7 +343,7 @@ pub struct GapSummary {
 ///
 /// The distinction matters in a report. A container that declares
 /// `aff4:mapGapDefaultStream` has *stated* what fills its holes; one that omits
-/// it has stated nothing, and spec §4's `aff4:Zero` default applies. Printing
+/// it has stated nothing, and v1.0a §4's `aff4:Zero` default applies. Printing
 /// the same sentence for both would attribute to the container a claim it never
 /// made — the failure mode CLAUDE.md's "don't invent format details" names.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -349,14 +352,14 @@ pub struct GapFill {
     pub name: String,
     /// Whether `aff4:mapGapDefaultStream` was present.
     ///
-    /// `false` means this is spec §4's default, inferred rather than declared.
+    /// `false` means this is v1.0a §4's default, inferred rather than declared.
     pub declared: bool,
 }
 
 impl GapFill {
     /// How a report should name this fill source.
     ///
-    /// A declared stream is named plainly; an undeclared one names the §4
+    /// A declared stream is named plainly; an undeclared one names the v1.0a §4
     /// default **and** says it is the standard's rather than the container's.
     /// Attributing the default to the container would be inventing a statement
     /// it never made.
@@ -388,7 +391,7 @@ pub enum SplitLayout {
     Single,
     /// Each part is filled before the next begins.
     Sequential,
-    /// Stored streams alternate through the image address space (§7.1).
+    /// Stored streams alternate through the image address space (v1.0a §7.1).
     Striped,
 }
 
@@ -454,7 +457,7 @@ impl Map {
     ///
     /// [`Map::parse`] is this with [`GapPolicy::Refuse`], which is right for
     /// every contiguous image. Pass [`GapPolicy::Fill`] only for an image typed
-    /// `aff4:DiscontiguousImage`, where spec §4 permits holes.
+    /// `aff4:DiscontiguousImage`, where v1.0a §4 permits holes.
     ///
     /// Filled holes become ordinary entries, so everything downstream —
     /// traversal, byte accounting, the sorted view — needs no special case and
@@ -621,7 +624,8 @@ impl Map {
         Ok(map)
     }
 
-    /// Rewrite content-addressed targets into concrete stream reads (AFF4-L §4).
+    /// Rewrite content-addressed targets into concrete stream reads
+    /// (AFF4-L 2019 §4).
     ///
     /// A `aff4:sha512:<digest>` target names a chunk's *content*; the bytes are
     /// found by following that ARN's own `aff4:dataStream` to a slice of the
@@ -682,7 +686,7 @@ impl Map {
         }
     }
 
-    /// The gap stream a map declares, per spec §4.
+    /// The gap stream a map declares, per v1.0a §4.
     ///
     /// Reads `aff4:mapGapDefaultStream`, **defaulting to `aff4:Zero`** when the
     /// property is absent per Specification.
@@ -693,7 +697,8 @@ impl Map {
 
     /// [`Map::declared_gap_target`], also saying whether the property was there.
     ///
-    /// A report must not attribute the §4 default to the container as though it
+    /// A report must not attribute the v1.0a §4 default to the container as
+    /// though it
     /// had been declared, so the two cases are distinguishable at the point the
     /// distinction is still known.
     #[must_use]
@@ -829,7 +834,7 @@ impl Map {
     ///
     /// **Described runs are skipped, and that is what makes it work.** A map's
     /// targets include symbolic streams — a run of `0x00`, `0xFF`, or any
-    /// repeated byte (spec §4.4) — which are storage-free descriptions rather
+    /// repeated byte (v1.0a §4.4) — which are storage-free descriptions rather
     /// than parts of a set. They routinely alternate with stored data in a
     /// perfectly sequential image, so counting them would report every set as
     /// striped. Only stored targets are read, since only those live in a part.
@@ -953,8 +958,8 @@ pub struct ReadAccounting {
     /// What those holes were filled from, when there were any.
     ///
     /// Carried so a report can name the source rather than saying "the gap
-    /// stream", and can tell a declared `aff4:mapGapDefaultStream` from spec
-    /// §4's default applying.
+    /// stream", and can tell a declared `aff4:mapGapDefaultStream` from
+    /// v1.0a §4's default applying.
     pub gap_fill: Option<GapFill>,
 }
 
@@ -1924,7 +1929,8 @@ mod tests {
     /// Those are not ARNs and must be kept verbatim rather than guessed at.
     ///
     /// They now parse as [`Target::BlockHash`] rather than `Unrecognised`, so
-    /// AFF4-L §4's second level can resolve them — but only when the graph
+    /// AFF4-L 2019 §4's second level can resolve them — but only when the
+    /// graph
     /// actually says where the chunk lives. Absent that, the text is still kept
     /// verbatim and still refuses to produce bytes.
     #[test]
@@ -2277,7 +2283,7 @@ mod tests {
         assert!(err.to_string().contains("the sink refused"), "{err}");
     }
 
-    // --- Discontiguous maps (spec §4) -------------------------------------
+    // --- Discontiguous maps (v1.0a §4) ------------------------------------
 
     /// The default must stay strict. A contiguous image with a hole is a
     /// finding, and always was.
@@ -2292,7 +2298,7 @@ mod tests {
         assert!(err.to_string().contains("uncovered"), "{err}");
     }
 
-    /// Spec §5: a discontiguous map may leave holes, filled from the gap
+    /// v1.0a §5: a discontiguous map may leave holes, filled from the gap
     /// stream. The filled region becomes an ordinary entry, so the sorted view
     /// is gapless by construction.
     #[test]
@@ -2329,7 +2335,7 @@ mod tests {
     /// "the gap stream".
     ///
     /// `declared` distinguishes a container that stated
-    /// `aff4:mapGapDefaultStream` from one where spec §4's default applied.
+    /// `aff4:mapGapDefaultStream` from one where v1.0a §4's default applied.
     /// Reporting the default as though the container had declared it would
     /// attribute a claim it never made.
     #[test]
@@ -2354,7 +2360,7 @@ mod tests {
         assert_eq!(fill.name, "aff4:Zero");
         assert!(
             !fill.declared,
-            "the §4 default is not the container's claim"
+            "the v1.0a §4 default is not the container's claim"
         );
 
         let declared = Map::parse_with(
@@ -2536,7 +2542,7 @@ mod tests {
         }
     }
 
-    /// Spec §4's default is `aff4:Zero` when `mapGapDefaultStream` is unset.
+    /// v1.0a §4's default is `aff4:Zero` when `mapGapDefaultStream` is unset.
     #[test]
     fn the_gap_stream_defaults_to_zero_per_spec() {
         // `false`: this is the standard's default applying, not the container

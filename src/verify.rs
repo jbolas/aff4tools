@@ -961,7 +961,7 @@ fn verify_object(
 /// A sibling's stream is only a stub in the primary's graph — no `size` — so
 /// opening it there fails, and a caller that treats failure as "nothing to
 /// count" then drops it in silence. That is how eight parts of nine vanished
-/// from the work estimate: the same §58-shaped assumption §66 corrected in
+/// from the work estimate: the same assumption already corrected in
 /// `verify_stream`.
 fn open_declared_stream(
     object: &crate::model::Aff4Object,
@@ -1046,7 +1046,7 @@ pub fn estimate_work(
         // part 001 — so testing for a digest alone estimated
         // zero bytes for an entire split set, and the run then announced
         // nothing about what it was about to cost. Mirrors the same correction
-        // made in `verify_stream` (§66).
+        // made in `verify_stream`.
         let has_digest = object.hashes.iter().any(|h| h.predicate == "hash");
         if !has_digest && !options.block_hashes {
             continue;
@@ -1164,8 +1164,8 @@ pub fn estimate_work(
 /// only streams therefore described a fraction of the run: on a 4.4 GiB logical
 /// container the meter announced a 3.3 GiB total and then read past it, because
 /// segment-stored files were work the estimate never admitted existed. The same
-/// §58-shaped assumption the split-set correction fixed for volumes, here for
-/// storage form.
+/// assumption the split-set correction fixed for volumes, here for storage
+/// form.
 ///
 /// Metadata only, like the rest of the estimate: `uncompressed_bytes` reads the
 /// central directory entry, never the member.
@@ -2342,7 +2342,7 @@ fn verify_image(
     }
 
     // A file whose bytes are a plain member but which never declared
-    // `aff4:zip_segment`. AFF4-L §3.8 requires the type; pyaff4's own
+    // `aff4:zip_segment`. AFF4-L 2019 §3.8 requires the type; pyaff4's own
     // `unicode.aff4` omits it on `README.txt`, and without this fallback that
     // file's two recorded digests were declined although its bytes were
     // present and matched. The departure is reported by `conformance` as
@@ -2967,7 +2967,7 @@ fn verify_whole_image_digests_in_set(
 
 /// Whether an object declares the given type, by local name.
 ///
-/// Spec §2.1 requires multiple `rdf:type` values, and [`ObjectRole`] reports
+/// v1.0a §2.1 requires multiple `rdf:type` values, and [`ObjectRole`] reports
 /// only the most specific — so a `FileImage` that is also an `ImageStream` needs
 /// the full list to be read, not the role.
 fn declares_type(object: &crate::model::Aff4Object, name: &str) -> bool {
@@ -2998,7 +2998,7 @@ fn verify_zip_segment_image(
         return false;
     };
 
-    // `member_name` escapes the path per spec §5.1, but pyaff4 writes logical
+    // `member_name` escapes the path per v1.0a §5.1, but pyaff4 writes logical
     // segment names unescaped where the characters are already legal —
     // `dream.aff4` stores `/test_images/AFF4-L/dream.txt` verbatim. Both
     // spellings are tried rather than assuming one, since either produces a

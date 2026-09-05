@@ -30,7 +30,7 @@ use crate::rdf::Value;
 
 /// The four AFF4-L filesystem timestamps, as the container recorded them.
 ///
-/// Schatz 2019 §3.5 Table 3 defines all four. Each is `Option` because a
+/// AFF4-L 2019 §3.5 Table 3 defines all four. Each is `Option` because a
 /// container may legitimately carry fewer: `src/write/logical.rs` records that
 /// macOS has no `recordChanged` and Linux needs `statx` for `birthTime`, so an
 /// absent term means the acquiring platform could not read it — not that the

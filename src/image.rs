@@ -59,7 +59,7 @@ impl Image {
 
         let map_arn = data_stream_of(arn, graph, lexicon, &locus)?;
 
-        // Spec §4 (p7), verbatim: "The map MAY be discontiguous, in which case a
+        // v1.0a §4 (p7), verbatim: "The map MAY be discontiguous, in which case a
         // default value of holes MAY be specified by the property of the Map
         // object aff4:mapGapDefaultStream. If the map is discontiguous, and the
         // mapGapDefaultStream property is not set, then aff4:Zero is used to

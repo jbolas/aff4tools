@@ -1,5 +1,11 @@
 //! Phase 4: AFF4-L logical acquisition, per Schatz (2019).
 //!
+//! > Schatz, B.L. *AFF4-L: A Scalable Open Logical Evidence Container.*
+//! > Digital Investigation 29, S143-S149. DFRWS USA 2019.
+//!
+//! **Every bare section number below cites that paper**, not the AFF4
+//! Standard. This file cites no other document.
+//!
 //! The tests that matter here are the ones covering what **pyaff4 does not
 //! write**: the §3.6 resource-enumeration model. Without it a consumer cannot
 //! tell which paths were acquisition roots or walk the acquired tree, and no

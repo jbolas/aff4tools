@@ -242,7 +242,8 @@ enum Command {
         #[arg(long, requires = "logical", conflicts_with_all = ["images", "device"])]
         scan_first: bool,
 
-        /// Deduplicate logical file content (AFF4-L §4). `--logical` only. Experimental only!
+        /// Deduplicate logical file content (AFF4-L 2019 §4). `--logical` only.
+        /// Experimental only!
         ///
         /// Stores each distinct chunk once in a shared `ImageStream` and builds
         /// every file from references to it, which can shrink a container
@@ -865,7 +866,8 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
             alterations.push(alteration);
         }
 
-        // AFF4-L §3.4 stores a small file as a ZIP segment and a larger one as
+        // AFF4-L 2019 §3.4 stores a small file as a ZIP segment and a larger
+        // one as
         // an ImageStream whose ARN is the file's own. Both are FileImage
         // objects, so the type list is what distinguishes them — reading only
         // segments silently skipped every file above 1 MiB.
@@ -1043,7 +1045,7 @@ fn locus_for(path: &std::path::Path) -> aff4tools::Locus {
 
 /// Read a logical file stored as an `ImageStream` rather than a ZIP segment.
 ///
-/// AFF4-L §3.4: a file above the segment threshold is written as a chunked,
+/// AFF4-L 2019 §3.4: a file above the segment threshold is written as a chunked,
 /// compressed stream whose ARN is the file's own. `unicode.aff4` stores six of
 /// its seven files this way, so this is the common case rather than the
 /// exception.
@@ -2701,7 +2703,7 @@ struct AcquireOptions {
     chunks_per_bevy: usize,
     /// Whether to recompute the recorded digests from the written container.
     verify_written_container: bool,
-    /// Whether a logical acquisition deduplicates content (AFF4-L §4).
+    /// Whether a logical acquisition deduplicates content (AFF4-L 2019 §4).
     deduplicate: bool,
     /// When set, write the image across several parts, starting a new one once
     /// the current part reaches this many bytes on disk. Applies to the
@@ -3440,9 +3442,9 @@ fn run_acquire_split(
 /// Acquire files and folders as an AFF4-L logical image.
 ///
 /// Follows Schatz (2019) rather than pyaff4's behaviour where the two differ.
-/// Notably it writes the §3.6
-/// enumeration model, so a consumer can identify the acquisition roots and walk
-/// the tree, which no existing AFF4-L container supports.
+/// Notably it writes the AFF4-L 2019 §3.6 enumeration model, so a consumer can
+/// identify the acquisition roots and walk the tree, which no existing AFF4-L
+/// container supports.
 fn run_acquire_logical(
     out: &mut impl Write,
     roots: &[PathBuf],
@@ -4567,8 +4569,8 @@ impl ConformanceReport {
                 .as_ref()
                 .map(|v| format!("{}.{}", v.major, v.minor)),
             tool: scan.version.as_ref().and_then(|v| v.tool.clone()),
-            specification: base_spec,
-            logical_specification: logical_spec,
+            specification: base_spec.name(),
+            logical_specification: logical_spec.map(aff4tools::rules::Document::name),
             // `is_conformant` is "no deviation at all", routine ones included —
             // deliberately not the narrower question `--strict` asks.
             conformant: scan.deviations.is_empty(),
@@ -4592,9 +4594,11 @@ struct ConformanceDeviation {
     locus: String,
     /// The specifics, including the offending lexical value.
     detail: String,
-    /// The specification section departed from, e.g. `"§5.4"`. `null` where the
-    /// standard does not legislate the condition at all — an extension that no
-    /// clause prohibits, reported so the examiner knows it is in use.
+    /// The v1.0a section departed from, serialized bare — e.g. `"§5.4"`. The
+    /// document it belongs to is the report's `specification` field. `null`
+    /// where the standard does not legislate the condition at all — an
+    /// extension that no clause prohibits, reported so the examiner knows it
+    /// is in use.
     spec_section: Option<&'static str>,
     /// The other normative document this cites, where the Standard is silent
     /// but another specification is not — AFF4-L is defined in a paper, so its
@@ -4609,7 +4613,8 @@ struct ConformanceDeviation {
 struct OtherSpecification {
     /// The document's full name, so an examiner can find it.
     document: &'static str,
-    /// The section within it, e.g. `"§3.8"`.
+    /// The section within the document named above, serialized bare — for the
+    /// AFF4-L 2019 paper, e.g. `"§3.8"`.
     section: &'static str,
 }
 

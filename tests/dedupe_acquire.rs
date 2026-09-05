@@ -1,4 +1,10 @@
-//! Phase 6: deduplicated logical writing, per AFF4-L §4.
+//! Phase 6: deduplicated logical writing, per AFF4-L 2019 §4.
+//!
+//! > Schatz, B.L. *AFF4-L: A Scalable Open Logical Evidence Container.*
+//! > Digital Investigation 29, S143-S149. DFRWS USA 2019.
+//!
+//! **Every bare section number below cites that paper**, not the AFF4
+//! Standard. This file cites no other document.
 //!
 //! The property that matters is not that the container is smaller — that is
 //! easy and unfalsifiable on its own. It is that **every file still reads back

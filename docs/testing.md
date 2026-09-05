@@ -8,9 +8,9 @@ conventions that keep it honest.
 ## Running
 
 ```sh
-cargo test                          # 534 tests, nothing to download
+cargo test                          # 624 tests, nothing to download
 ./utilities/fetch-corpus.sh         # get the reference containers, once
-cargo test --features corpus        # 687 tests, against real evidence
+cargo test --features corpus        # 773 tests, against real evidence
 ```
 
 That is the whole setup. The fetch script downloads the reference containers
@@ -34,7 +34,7 @@ AFF4_PYAFF4_ROOT=/path/to/pyaff4 AFF4_PYAFF4_PYTHON=python3 \
 ```
 
 **Corpus tests are gated, not skipped.** A green `cargo test` without fixtures
-means 534 tests passed — not that any real container was verified. A runtime
+means 624 tests passed — not that any real container was verified. A runtime
 skip would let CI report success having checked nothing, so the gate is a
 compile-time feature instead.
 

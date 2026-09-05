@@ -2,15 +2,16 @@
 //!
 //! A **part** is one file of a split set; a **segment** is a member inside a
 //! volume (`docs/glossary.md`). This module writes *split* sets —
-//! sequential, non-striped — which are the special case of spec §7.1 where map
+//! sequential, non-striped — which are the special case of v1.0a §7.1 where map
 //! entries are monotonic and each part holds one stream.
 //!
 //! # What makes the parts one image
 //!
-//! Every part declares the same `aff4:DiskImage`, which §7.1 calls the point of
+//! Every part declares the same `aff4:DiskImage`, which v1.0a §7.1 calls the
+//! point of
 //! commonality. Part 001 additionally holds the Map naming every part's stream,
 //! so a reader that opens it learns the whole layout. Parts 002..N hold a stub
-//! declaring only their own stream, which is the minimum spec §3 requires of a
+//! declaring only their own stream, which is the minimum v1.0a §3 requires of a
 //! volume containing an Image Stream (lines 142, 152, 154).
 //!
 //! # Why not replicate the full graph
@@ -151,7 +152,7 @@ pub fn write_split_set(
     preflight(source_size, options.split_after, locus)?;
 
     // Minted before anything is written: every part refers to these, and the
-    // shared DiskImage is what makes the parts one image (§7.1).
+    // shared DiskImage is what makes the parts one image (v1.0a §7.1).
     let image_arn = format!(
         "aff4://{}",
         crate::write::container_writer::new_uuid(output)?
@@ -286,7 +287,7 @@ pub fn write_split_set(
 
 /// Declare, in part 001, every stream that lives in a later part.
 ///
-/// §7.1: a reference must be resolvable. Part 001's map depends on streams
+/// v1.0a §7.1: a reference must be resolvable. Part 001's map depends on streams
 /// living in other parts, so it declares each one — type, the volume that holds
 /// it, and what it targets. This is the shape Evimetry writes for a foreign
 /// stream in `Base-Linear_1.aff4`, and it is what lets a reader follow the
@@ -383,7 +384,8 @@ fn finish_first_part(
 ///
 /// The stream's own declaration is already in the graph, written by
 /// [`write_image_stream_bounded`]. This adds only what identifies the part as
-/// belonging to the set: the shared `DiskImage` (§7.1's point of commonality)
+/// belonging to the set: the shared `DiskImage` (v1.0a §7.1's point of
+/// commonality)
 /// and the Map the stream targets.
 fn write_stub(writer: &mut ContainerWriter, image_arn: &str, map_arn: &str, map_volume_arn: &str) {
     let lexicon = crate::lexicon::STANDARD;

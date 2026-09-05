@@ -84,7 +84,7 @@ impl std::fmt::Display for Digest {
 
 /// Whether this build can compute a given algorithm.
 ///
-/// The block-map variants (spec §6.2) are composite constructions over block
+/// The block-map variants (v1.0a §6.2) are composite constructions over block
 /// hashes, not digests over a byte stream, so they are **not** computable here
 /// — see [`HashAlgorithm::BlockMapSha512`]. `Other` names a datatype this
 /// build does not recognise.

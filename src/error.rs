@@ -423,7 +423,7 @@ pub enum DeviationKind {
     ContentAddressedSubject,
     /// Two ZIP members share a name, so the later one is unreachable.
     DuplicateSegmentName,
-    /// A discontiguous map left holes, filled from its gap stream (spec §4).
+    /// A discontiguous map left holes, filled from its gap stream (v1.0a §4).
     ///
     /// Legal for an `aff4:DiscontiguousImage`, but always worth reporting: the
     /// filled bytes were never recorded by the acquisition, so a digest over
@@ -432,7 +432,7 @@ pub enum DeviationKind {
     MapGap,
     /// A logical file stored as a ZIP segment without `aff4:zip_segment`.
     ///
-    /// AFF4-L §3.8's recipe ends by adding `aff4:zip_segment` to the
+    /// AFF4-L 2019 §3.8's recipe ends by adding `aff4:zip_segment` to the
     /// `rdf:type` list "to indicate that it is stored as a Zip Segment". The
     /// type is what tells a consumer where a `FileImage`'s bytes live: without
     /// it a reader that dispatches on type finds neither a segment nor an
@@ -467,7 +467,7 @@ pub enum DeviationKind {
     /// but the volume's own `aff4:contains` manifest never names it.
     ///
     /// The manifest is the volume's authoritative statement of what it holds
-    /// (spec §5.4); an object outside it is legal RDF but not accounted for by
+    /// (v1.0a §5.4); an object outside it is legal RDF but not accounted for by
     /// the container's own bookkeeping. Sub-resources named by suffixing a
     /// declared ARN's path (`BlockHashes` objects, `<stream>/blockhash.sha1`)
     /// are not undeclared — every corpus writer omits those from `contains` as
@@ -488,14 +488,14 @@ impl DeviationKind {
     /// defect went unreported, from an unrelated routine note.
     ///
     /// Frequency alone does not make a condition routine. Three of the four
-    /// corpus writers violate spec §5.4's `container.description` ordering and
+    /// corpus writers violate v1.0a §5.4's `container.description` ordering and
     /// so does one commercial tool, but member order can affect how another
     /// implementation reads the volume, so [`Self::InconsistentVolumeArn`]
     /// stays noteworthy. The test is whether the condition can affect
     /// interpretation, not how often it occurs.
     #[must_use]
     pub fn is_routine(self) -> bool {
-        matches!(self, Self::ExternalReference | Self::NulPaddedComment)
+        crate::rules::rule_for_kind(self).is_some_and(|rule| rule.routine)
     }
 
     /// The specification section this condition departs from, as a section
@@ -506,17 +506,20 @@ impl DeviationKind {
     /// against either document. Where the two differ in *content* the draft is
     /// the fuller statement, which is why `conformance` names it.
     ///
+    /// The numbers come from the rule registry, which is the single place a
+    /// citation is declared.
+    ///
     /// [`None`] is not "no rule applies" — it marks a condition the standard
-    /// does not legislate at all. Both cases are extensions that no section
-    /// prohibits: they are reported because an examiner should know the
-    /// container uses them, not because a clause was broken. Presenting an
-    /// invented section number against either would be worse than citing
-    /// nothing.
+    /// does not legislate at all, or one another document legislates instead.
+    /// Extensions that no section prohibits are reported because an examiner
+    /// should know the container uses them, not because a clause was broken.
+    /// Presenting an invented section number against either would be worse
+    /// than citing nothing.
     ///
     /// # Generation
     ///
     /// The base document is v1.0a for every generation this build checks, so
-    /// the section numbers below hold for all of them. `generation` is taken
+    /// the registry's section numbers hold for all of them. `generation` is taken
     /// anyway, because it is what decides which document the number is read
     /// *in*: when a generation arrives whose base is not v1.0a, this signature
     /// already carries what the answer depends on, and every caller already
@@ -528,57 +531,23 @@ impl DeviationKind {
         // declined before any deviation is recorded, so no section of that
         // document may be cited. Returning None here keeps a v1.0a section
         // number from being printed against a document that does not contain
-        // it, should a deviation ever reach this path.
+        // it, should a deviation ever reach this path. The registry cannot make
+        // this decision: it is keyed by kind alone and knows no generation.
         if matches!(generation, crate::lexicon::Generation::Aff4L10) {
             return None;
         }
-        match self {
-            // §2.2 defines aff4:size and the other base properties whose
-            // literals these three concern.
-            Self::UntypedNumericLiteral | Self::NonstandardDatatype | Self::UnexpectedDatatype => {
-                Some("§2.2")
-            }
-            // §6.1 tabulates each hash datatype, and so fixes each digest length.
-            Self::DigestLengthMismatch => Some("§6.1"),
-            // §5.4 is the Zip-specific storage clause: the ZIP comment carries
-            // the Volume URI "starting at offset 0", the two locations must
-            // agree on it, and aff4:contains is the volume's own statement of
-            // what it holds.
-            Self::NulPaddedComment | Self::InconsistentVolumeArn | Self::UndeclaredObject => {
-                Some("§5.4")
-            }
-            // §5.1's URI-to-path mapping admits no byte-range suffix.
-            Self::ByteRangeArn => Some("§5.1"),
-            // §4: the map may be discontiguous, holes coming from
-            // mapGapDefaultStream or aff4:Zero. Not §5 — that is the storage
-            // layer, and this rule is stated in the Map section.
-            Self::MapGap => Some("§4"),
-            // §5: one segment per path in the storage layer, so a repeated
-            // member name leaves the earlier one unreachable.
-            Self::DuplicateSegmentName => Some("§5"),
-            // §7.1 describes both: a stripe referencing streams held in a
-            // sibling volume is the construction the section defines, and
-            // since it unifies stripes on commonly-named objects, two volumes
-            // giving one stream different property values cannot both hold.
-            Self::ExternalReference | Self::ConflictingStreamValue => Some("§7.1"),
-            // Extensions the standard does not address. pyaff4's
-            // content-addressed dedupe subjects (aff4:sha512:<digest>) appear in
-            // no section, and no clause requires every referenced ARN to be
-            // described in the same volume — §7.1 explicitly contemplates the
-            // opposite.
-            Self::ContentAddressedSubject | Self::DanglingReference => None,
-            // AFF4-L is specified in the paper, not the Standard. The citation
-            // belongs to `other_specification`, so this returns None and the
-            // report prints the paper's section instead of claiming the
-            // Standard legislates it.
-            //
-            // Kept as its own arm rather than merged with the two above, whose
-            // `None` means something different: those are extensions *nothing*
-            // legislates, this one is legislated elsewhere. Merging them would
-            // erase a distinction the report depends on.
-            #[allow(clippy::match_same_arms)]
-            Self::MissingZipSegmentType => None,
+        let rule = crate::rules::rule_for_kind(self)?;
+        // Two cases yield no section in the base document, and they mean
+        // different things. A rule belonging to another document is legislated
+        // elsewhere, and `other_specification` names where. A rule carrying the
+        // "none" clause is an extension no clause legislates at all, reported
+        // so an examiner knows the container uses it.
+        if rule.id.document != crate::rules::Document::Aff4Standard10a || rule.id.clause == "none" {
+            return None;
         }
+        // Returned as stored: the catalog keeps the section sign, so a report
+        // prints the clause with no allocation.
+        Some(rule.id.clause)
     }
 
     /// The section of a *different* normative document this cites, if any.
@@ -604,12 +573,16 @@ impl DeviationKind {
         self,
         generation: crate::lexicon::Generation,
     ) -> Option<(&'static str, &'static str)> {
-        match (self, generation) {
-            (Self::MissingZipSegmentType, crate::lexicon::Generation::PyAff4Logical) => {
-                Some((AFF4_L_SPEC_NAME, "§3.8"))
-            }
-            _ => None,
+        // Only a pyaff4-era logical container is governed by the paper. The
+        // registry is keyed by kind alone, so this gate stays here.
+        if !matches!(generation, crate::lexicon::Generation::PyAff4Logical) {
+            return None;
         }
+        let rule = crate::rules::rule_for_kind(self)?;
+        if rule.id.document != crate::rules::Document::Aff4LPaper2019 {
+            return None;
+        }
+        Some((rule.id.document.name(), rule.id.clause))
     }
 }
 
@@ -618,19 +591,25 @@ impl DeviationKind {
 /// Cited in full because an examiner reading a report should be able to find
 /// it: it is not the document `SPEC_NAME` names, and searching the Standard for
 /// these rules finds nothing.
-pub const AFF4_L_SPEC_NAME: &str =
-    "AFF4-L (Schatz, DFRWS USA 2019, Digital Investigation 29, S143-S149)";
+///
+/// A thin alias for [`crate::rules::Document::Aff4LPaper2019`]'s name, so the
+/// registry stays the single place a document is named.
+pub const AFF4_L_SPEC_NAME: &str = crate::rules::Document::Aff4LPaper2019.name();
 
 /// The base specification `aff4tools conformance` checks against.
 ///
 /// v1.0a is an unofficial draft (Schatz, Feb 2022), and it is the fuller
-/// document: it specifies chunk padding (§3.2), the `mapPath` segment (§6.3),
-/// and striped multi-ZIP containers (§7), none of which the v1.0 PDF covers.
+/// document: it specifies chunk padding (v1.0a §3.2), the `mapPath` segment
+/// (v1.0a §6.3), and striped multi-ZIP containers (v1.0a §7), none of which the
+/// v1.0 PDF covers.
 /// Every section number cited in this crate was verified against it.
 ///
 /// It governs the base container for both AFF4 Standard v1.0a containers and
 /// pyaff4-era AFF4-L; see [`crate::lexicon::Generation::governing_spec`].
-pub const SPEC_NAME: &str = "AFF4 Specification 1.0a";
+///
+/// A thin alias for [`crate::rules::Document::Aff4Standard10a`]'s name, so the
+/// registry stays the single place a document is named.
+pub const SPEC_NAME: &str = crate::rules::Document::Aff4Standard10a.name();
 
 /// The AFF4-L Standard v1.0-ALPHA (Schatz, Apple Inc., September 2026).
 ///
@@ -639,7 +618,10 @@ pub const SPEC_NAME: &str = "AFF4 Specification 1.0a";
 /// its Canonical Reference Images take precedence over its own text, and those
 /// images are not yet published — so no rule from it could be validated
 /// against evidence. See `docs/working/AFF4-L-Standard-v1.0-ALPHA-design-phases.md`.
-pub const AFF4_L_STANDARD_NAME: &str = "AFF4-L Standard v1.0-ALPHA";
+///
+/// A thin alias for [`crate::rules::Document::Aff4LStandard10Alpha`]'s name, so
+/// the registry stays the single place a document is named.
+pub const AFF4_L_STANDARD_NAME: &str = crate::rules::Document::Aff4LStandard10Alpha.name();
 
 impl std::fmt::Display for DeviationKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -778,5 +760,129 @@ mod tests {
         assert!(rendered.contains("information.turtle"), "{rendered}");
         assert!(rendered.contains("8688"), "{rendered}");
         assert_eq!(dev.kind, DeviationKind::UntypedNumericLiteral);
+    }
+
+    /// The registry must return exactly what the hand-written match arms did.
+    ///
+    /// This is the phase gate in miniature: every citation the tool has ever
+    /// printed must still be printed, character for character.
+    #[test]
+    fn registry_delegation_preserves_every_citation() {
+        use crate::lexicon::Generation;
+
+        let cases = [
+            (
+                DeviationKind::UnexpectedDatatype,
+                Generation::Standard10,
+                Some("§2.2"),
+            ),
+            (
+                DeviationKind::DigestLengthMismatch,
+                Generation::Standard10,
+                Some("§6.1"),
+            ),
+            (
+                DeviationKind::NulPaddedComment,
+                Generation::Standard10,
+                Some("§5.4"),
+            ),
+            (
+                DeviationKind::InconsistentVolumeArn,
+                Generation::Standard10,
+                Some("§5.4"),
+            ),
+            (
+                DeviationKind::UndeclaredObject,
+                Generation::Standard10,
+                Some("§5.4"),
+            ),
+            (
+                DeviationKind::ByteRangeArn,
+                Generation::Standard10,
+                Some("§5.1"),
+            ),
+            (DeviationKind::MapGap, Generation::Standard10, Some("§4")),
+            (
+                DeviationKind::DuplicateSegmentName,
+                Generation::Standard10,
+                Some("§5"),
+            ),
+            (
+                DeviationKind::ExternalReference,
+                Generation::Standard10,
+                Some("§7.1"),
+            ),
+            (
+                DeviationKind::ConflictingStreamValue,
+                Generation::Standard10,
+                Some("§7.1"),
+            ),
+            (
+                DeviationKind::ContentAddressedSubject,
+                Generation::Standard10,
+                None,
+            ),
+            (
+                DeviationKind::DanglingReference,
+                Generation::Standard10,
+                None,
+            ),
+            (
+                DeviationKind::MissingZipSegmentType,
+                Generation::Standard10,
+                None,
+            ),
+        ];
+
+        for (kind, generation, expected) in cases {
+            assert_eq!(
+                kind.spec_section(generation),
+                expected,
+                "{kind:?} under {generation:?}"
+            );
+        }
+    }
+
+    /// A v2.1 container cites no v1.0a section, which the current code enforces
+    /// by an early return. That behavior must survive the refactor.
+    #[test]
+    fn v2_1_containers_cite_no_v1_0a_section() {
+        use crate::lexicon::Generation;
+
+        for kind in [
+            DeviationKind::NulPaddedComment,
+            DeviationKind::MapGap,
+            DeviationKind::DigestLengthMismatch,
+        ] {
+            assert_eq!(
+                kind.spec_section(Generation::Aff4L10),
+                None,
+                "{kind:?} must cite no v1.0a section in a v2.1 container"
+            );
+        }
+    }
+
+    /// The paper citation appears only for the generation the paper governs.
+    #[test]
+    fn the_paper_is_cited_only_for_pyaff4_logical() {
+        use crate::lexicon::Generation;
+
+        assert_eq!(
+            DeviationKind::MissingZipSegmentType.other_specification(Generation::PyAff4Logical),
+            Some((AFF4_L_SPEC_NAME, "§3.8"))
+        );
+        assert_eq!(
+            DeviationKind::MissingZipSegmentType.other_specification(Generation::Standard10),
+            None
+        );
+    }
+
+    /// Exactly two conditions are routine today, and `--strict` depends on it.
+    #[test]
+    fn routine_kinds_are_unchanged() {
+        assert!(DeviationKind::ExternalReference.is_routine());
+        assert!(DeviationKind::NulPaddedComment.is_routine());
+        assert!(!DeviationKind::MapGap.is_routine());
+        assert!(!DeviationKind::DigestLengthMismatch.is_routine());
     }
 }

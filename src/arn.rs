@@ -4,13 +4,13 @@
 //! container. This module owns three things:
 //!
 //! 1. [`Arn`] — a validated ARN, with the volume/path split.
-//! 2. The URI↔path mapping of spec §5.1, which decides whether an object is
+//! 2. The URI↔path mapping of v1.0a §5.1, which decides whether an object is
 //!    stored under a relative path or an escaped absolute one.
-//! 3. The escaping rules of spec §5.2.
+//! 3. The escaping rules of v1.0a §5.2.
 //!
 //! # Escaping: uppercase, per the spec
 //!
-//! Spec §5.2 rule 2 says escaping MUST use upper case, and the canonical
+//! v1.0a §5.2 rule 2 says escaping MUST use upper case, and the canonical
 //! reference containers agree — `Base-Linear.aff4` stores
 //! `aff4%3A%2F%2Fc215ba20-…`. pyaff4 emits *lowercase* (`escaping.py`, `"%%%02x"`),
 //! so the reference implementation diverges from both the spec and its own
@@ -225,14 +225,15 @@ impl Arn {
     ///   the volume identifier is used, with `%20` decoded back to a space:
     ///   `aff4://f95de329-…//test/x.txt` → `/test/x.txt`
     /// - **Absolute** — the ARN belongs to another volume, so the whole scheme
-    ///   and identifier are escaped into a single directory name (spec §5.2
+    ///   and identifier are escaped into a single directory name (v1.0a §5.2
     ///   rule 1): `aff4://c215ba20-…/00000000` →
     ///   `aff4%3A%2F%2Fc215ba20-…/00000000`
     ///
     /// # Why the relative case does not escape
     ///
-    /// The path is **already escaped**. AFF4-L §3.2 percent-encodes the suspect
-    /// path when the ARN is built — space to `%20`, `%` to `%25` — and §3.4
+    /// The path is **already escaped**. AFF4-L 2019 §3.2 percent-encodes the
+    /// suspect path when the ARN is built — space to `%20`, `%` to `%25` —
+    /// and AFF4-L 2019 §3.4
     /// then defines the segment name as that tail with the volume removed and
     /// "any percent encoded spaces converted back to spaces". Nothing is
     /// re-encoded. The paper states this as a deliberate replacement of the
@@ -244,12 +245,14 @@ impl Arn {
     /// acquisition wrote 312 image streams under names nothing could read back,
     /// and `export` skipped 44,198 of 91,226 files while reporting success.
     ///
-    /// The two rules are a lossless pair, not an ambiguity. Because §3.2 escapes
+    /// The two rules are a lossless pair, not an ambiguity. Because
+    /// AFF4-L 2019 §3.2 escapes
     /// `%` itself, a `%2520` in an ARN means a file literally named `%20`, and
     /// decoding only `%20` here preserves that distinction.
     ///
     /// The absolute case still escapes: its `aff4://` prefix is URI syntax
-    /// rather than a suspect path, and §5.2 rule 1 requires it be encoded into
+    /// rather than a suspect path, and v1.0a §5.2 rule 1 requires it be
+    /// encoded into
     /// one directory name.
     ///
     /// A byte-range suffix names a slice of a stream rather than a stored
@@ -262,7 +265,8 @@ impl Arn {
 
         if self.is_within(volume) {
             // Relative: drop the volume and the URI separator, then apply the
-            // one §3.4 transformation. An ARN equal to the volume itself names
+            // one AFF4-L 2019 §3.4 transformation. An ARN equal to the volume
+            // itself names
             // no member.
             return self.stored_path().map(decode_escaped_spaces);
         }
@@ -322,7 +326,7 @@ fn parse_offset(text: &str) -> Option<u64> {
     }
 }
 
-/// Percent-escape a whole string, including `/` (spec §5.2 rule 1).
+/// Percent-escape a whole string, including `/` (v1.0a §5.2 rule 1).
 ///
 /// Used for the scheme+identifier prefix, which becomes a single directory
 /// name: `aff4://uuid` → `aff4%3A%2F%2Fuuid`.
@@ -330,7 +334,7 @@ fn escape_component(text: &str) -> String {
     text.chars().map(escape_char).collect()
 }
 
-/// Escape one character per spec §5.2, using **uppercase** hex (rule 2).
+/// Escape one character per v1.0a §5.2, using **uppercase** hex (rule 2).
 fn escape_char(c: char) -> String {
     // Control codes, the forbidden set, ':' and '/' (which would otherwise be
     // read as URI syntax), and '%' itself (so escaping round-trips).
@@ -350,11 +354,14 @@ fn escape_char(c: char) -> String {
     }
 }
 
-/// Turn percent-encoded spaces back into spaces — AFF4-L §3.4, and nothing more.
+/// Turn percent-encoded spaces back into spaces — AFF4-L 2019 §3.4, and
+/// nothing more.
 ///
-/// The inverse of [`encode_spaces`], and the only transformation §3.4 applies
-/// to an ARN tail that §3.2 has already escaped. `%20` carries no hex letter,
-/// so the uppercase §5.2 rule 2 spelling and pyaff4's lowercase output are the
+/// The inverse of [`encode_spaces`], and the only transformation
+/// AFF4-L 2019 §3.4 applies to an ARN tail that AFF4-L 2019 §3.2 has already
+/// escaped. `%20`
+/// carries no hex letter, so the uppercase v1.0a §5.2 rule 2 spelling and
+/// pyaff4's lowercase output are the
 /// same three characters and one form matches both.
 fn decode_escaped_spaces(path: &str) -> String {
     path.replace("%20", " ")
@@ -374,7 +381,7 @@ pub fn encode_spaces(name: &str) -> String {
 /// The inverse of `rdf::escape_byte_ranges`, which encodes a pyaff4
 /// `[0x0:0x400]` suffix so a conformant Turtle parser will accept the IRI.
 /// Only that suffix may be decoded: the rest of an ARN carries escapes that
-/// AFF4-L §3.2 put there deliberately, and the ZIP member keeps them.
+/// AFF4-L 2019 §3.2 put there deliberately, and the ZIP member keeps them.
 ///
 /// Decoding the whole IRI instead turned a legitimate `%3E` — the forbidden
 /// `>` in a suspect filename — back into a literal, so the parsed subject and
@@ -492,7 +499,7 @@ mod tests {
         );
     }
 
-    /// Spec §5.2 rule 2: escaping MUST use upper case. pyaff4 emits lowercase;
+    /// v1.0a §5.2 rule 2: escaping MUST use upper case. pyaff4 emits lowercase;
     /// the canonical containers use uppercase, and so do we.
     #[test]
     fn escapes_with_uppercase_hex() {
@@ -569,16 +576,17 @@ mod tests {
         }
     }
 
-    /// AFF4-L §3.4: a relative member name decodes `%20`, and nothing else.
+    /// AFF4-L 2019 §3.4: a relative member name decodes `%20`, and nothing else.
     ///
     /// These vectors are pyaff4's own `escaping_test.py::testARNtoZipSegment`,
     /// which is the reference implementation of the rule for a container
     /// declaring version 1.1. The paper states the mapping as three steps —
     /// drop the volume, drop the separator, turn percent-encoded spaces back
-    /// into spaces — and explicitly replaces the older §5.2 rule that
+    /// into spaces — and explicitly replaces the older v1.0a §5.2 rule that
     /// re-encoded the whole tail.
     ///
-    /// The regression: re-escaping an ARN whose path fragment §3.2 had already
+    /// The regression: re-escaping an ARN whose path fragment AFF4-L 2019 §3.2
+    /// had already
     /// escaped turned `%20` into `%2520`, so a 5 GiB logical acquisition wrote
     /// 312 image streams under double-escaped names that nothing could read
     /// back — and `export` skipped 44,198 of 91,226 files while exiting 0.
@@ -610,7 +618,8 @@ mod tests {
 
     /// A colon in a suspect path is not re-escaped either.
     ///
-    /// `%3A` is what §3.2 writes for a `:` inside a *filename*; §3.4 decodes
+    /// `%3A` is what AFF4-L 2019 §3.2 writes for a `:` inside a *filename*;
+    /// AFF4-L 2019 §3.4 decodes
     /// only `%20`, so the segment keeps the escape. What must never happen is
     /// the `%` itself being escaped again into `%253A`, which is the same
     /// double-escape that lost `Bumper:Opener` from a real acquisition.
@@ -632,7 +641,8 @@ mod tests {
 
     /// A literal percent in a suspect filename survives the round trip.
     ///
-    /// §3.2 escapes `%` to `%25` when the ARN is built, so `%2520` in an ARN
+    /// AFF4-L 2019 §3.2 escapes `%` to `%25` when the ARN is built, so `%2520`
+    /// in an ARN
     /// means a file literally named `%20` — not a space. `%2520` contains no
     /// `%20` to decode, so it survives whole and stays distinguishable from
     /// the space that `%20` alone encodes. That is what makes the two rules a
@@ -723,10 +733,11 @@ mod tests {
         assert!(err.to_string().contains("byte-range"), "{err}");
     }
 
-    /// The volume prefix of a foreign ARN is escaped whole — §5.2 rule 1.
+    /// The volume prefix of a foreign ARN is escaped whole — v1.0a §5.2
+    /// rule 1.
     ///
     /// This is the one place escaping still belongs. A relative member name is
-    /// governed by AFF4-L §3.4 instead and is not re-encoded; see
+    /// governed by AFF4-L 2019 §3.4 instead and is not re-encoded; see
     /// [`Arn::member_name`].
     #[test]
     fn escapes_forbidden_and_control_characters() {
@@ -758,7 +769,7 @@ mod tests {
         assert_eq!(unescape("trailing%"), "trailing%");
     }
 
-    /// §3.2 rule 3: Unicode outside ASCII is carried, never escaped.
+    /// AFF4-L 2019 §3.2 rule 3: Unicode outside ASCII is carried, never escaped.
     ///
     /// Keeping `ネコ.txt` readable in an ordinary ZIP browser is the stated
     /// reason AFF4-L refined the mapping at all, so it is asserted against the

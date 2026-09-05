@@ -287,7 +287,7 @@ fn a_truncated_container_fails_without_panicking() {
 }
 
 /// Damaging the ZIP comment destroys one of the two volume-ARN sources
-/// (spec §5.4). The other survives, so the container still reads — and the
+/// (v1.0a §5.4). The other survives, so the container still reads — and the
 /// disagreement is reported rather than silently resolved.
 ///
 /// In `Base-Linear.aff4` the end-of-central-directory record sits 66 bytes from

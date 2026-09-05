@@ -5,7 +5,7 @@
 //! smaller resident** on identical containers — 115.6 MiB against ~2.5 GB at
 //! 400,000 objects — with both representations agreeing on every triple.
 //!
-//! Nothing is written to disk. The paper this follows (Schatz 2019, §4–§6)
+//! Nothing is written to disk. The paper this follows (AFF4-L 2019 §4–§6)
 //! caches an HDT beside the container; this does not, because H1 showed the
 //! build cost does not justify a derived copy of evidence metadata that could
 //! go stale. See the plan's "Caching is not required".

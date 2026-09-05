@@ -5,7 +5,7 @@
 //! and the generation ([`crate::lexicon`]) into one handle the rest of the
 //! library reads through.
 //!
-//! # Detection order (spec §1)
+//! # Detection order (v1.0a §1)
 //!
 //! 1. An empty archive is not an AFF4 volume.
 //! 2. If `version.txt` present → parse it. `1.0` and `1.1` are the two known
@@ -1130,7 +1130,7 @@ fn build_object(
 
 /// Whether `stored_arn` resolves within the volumes currently open.
 ///
-/// A split set's parts reference each other by design (§7.1): that is what
+/// A split set's parts reference each other by design (v1.0a §7.1): that is what
 /// makes the set reassemblable, and every part necessarily points outside
 /// itself. Noting it is useful when one part is inspected alone, and noise when
 /// the whole set is present and the reference resolves. The distinction is
@@ -1147,7 +1147,7 @@ fn resolves_within(stored_arn: &Arn, volumes: &[Arn]) -> bool {
 /// `siblings` is every volume ARN currently open, `volume` included. A
 /// cross-volume `aff4:stored` is not a spec violation — line 90 defines
 /// `stored` as "the Volume that the Image Stream or Map is stored in" with no
-/// requirement that it be the current one, and §7.1's discovery mechanism
+/// requirement that it be the current one, and v1.0a §7.1's discovery mechanism
 /// depends on pointing at siblings. So the deviation records an *unresolvable*
 /// reference, not a cross-volume one: when the named volume is open, the
 /// reference resolves and there is nothing to tell the examiner.
@@ -2002,7 +2002,7 @@ const BRIEF_CASE_PREDICATES: [&str; 3] = ["caseNumber", "evidenceNumber", "exami
 /// that appears later — deciding in-pass would report a forward reference as
 /// dangling when it is not.
 ///
-/// Symbolic streams (spec §4.4) are described by the standard, not by the
+/// Symbolic streams (v1.0a §4.4) are described by the standard, not by the
 /// container: `aff4://.../SymbolicStreamXX` and the zero/FF streams carry no
 /// triples anywhere and are resolved by name, so an edge to one is well-formed.
 fn resolve_deferred_references(
@@ -2227,10 +2227,11 @@ impl<'a> VolumeContext<'a> {
 }
 
 /// A logical file whose bytes are a plain ZIP member but which omits
-/// `aff4:zip_segment` (AFF4-L §3.8).
+/// `aff4:zip_segment` (AFF4-L 2019 §3.8).
 ///
-/// §3.8's recipe ends by adding the type "to indicate that it is stored as a
-/// Zip Segment". Without it a reader dispatching on type finds neither a
+/// AFF4-L 2019 §3.8's recipe ends by adding the type "to indicate that it is
+/// stored as a Zip Segment". Without it a reader dispatching on type finds
+/// neither a
 /// segment nor an `ImageStream`, and has nothing to read: `verify` declined
 /// `unicode.aff4`'s `README.txt` for naming no data stream, though its bytes
 /// were present and its recorded digests matched.
@@ -2238,7 +2239,7 @@ impl<'a> VolumeContext<'a> {
 /// Deliberately narrow. It fires only when all of these hold, so that a
 /// well-formed container of any other shape stays silent:
 ///
-/// - the object is a `FileImage` — the type §3.8's recipe is about;
+/// - the object is a `FileImage` — the type AFF4-L 2019 §3.8's recipe is about;
 /// - it does not already declare `zip_segment`;
 /// - it declares no `ImageStream` either, since a stream-backed file is
 ///   correctly typed and stores its bytes in bevies, not one member;

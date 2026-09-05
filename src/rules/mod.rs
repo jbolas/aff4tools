@@ -26,7 +26,7 @@ impl Document {
     /// These strings are what `conformance` output contains today, so they are
     /// fixed: changing one changes every report and breaks the phase gate.
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Aff4Standard10a => "AFF4 Specification 1.0a",
             Self::Aff4LPaper2019 => {
@@ -38,7 +38,7 @@ impl Document {
 
     /// A short identifier-safe name, used in rule IDs.
     #[must_use]
-    pub fn short_name(self) -> &'static str {
+    pub const fn short_name(self) -> &'static str {
         match self {
             Self::Aff4Standard10a => "AFF4_V1_0A",
             Self::Aff4LPaper2019 => "AFF4L_PAPER_2019",
@@ -63,7 +63,9 @@ impl std::fmt::Display for Document {
 pub struct RuleId {
     /// The document that states the requirement.
     pub document: Document,
-    /// The clause within it, with its section sign — e.g. `"§5.4"`.
+    /// The clause within it, with its section sign — e.g. v1.0a's `"§5.4"`.
+    ///
+    /// The document is [`Self::document`], so the stored clause is bare.
     ///
     /// Stored with the sign because that is the form a report prints, and
     /// callers require `&'static str`: adding a sign would need an allocation
@@ -222,6 +224,9 @@ macro_rules! declare_rule {
 // `macro_rules!` macro is only in scope textually after its definition, so
 // `catalog` cannot see `declare_rule!` from above it.
 mod catalog;
+mod render;
+
+pub use render::render_catalog;
 
 /// Every declared rule, across all documents.
 ///
@@ -253,6 +258,21 @@ pub fn all_rules() -> &'static [RuleInfo] {
         rules.extend_from_slice(catalog::UNLEGISLATED);
         rules
     })
+}
+
+/// The rule a deviation kind belongs to.
+///
+/// [`None`] only if a kind was added without a declaration, which
+/// `every_deviation_kind_has_exactly_one_rule` prevents.
+///
+/// This answers only "what does this rule say". Whether the document it cites
+/// governs a given container is a separate question, decided by the
+/// container's [`crate::lexicon::Generation`]; see the doc comment on
+/// [`all_rules`]. Any citation built from this lookup must apply that gate
+/// itself.
+#[must_use]
+pub fn rule_for_kind(kind: crate::error::DeviationKind) -> Option<&'static RuleInfo> {
+    all_rules().iter().find(|rule| rule.kind == Some(kind))
 }
 
 #[cfg(test)]

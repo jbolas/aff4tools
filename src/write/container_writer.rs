@@ -1,6 +1,6 @@
 //! Writing a complete AFF4 volume.
 //!
-//! Member order is the point of this module. §5.4 requires
+//! Member order is the point of this module. v1.0a §5.4 requires
 //! `container.description` to be the first file *stored* in the volume, and
 //! because [`ZipWriter`] writes members in call order, satisfying it is simply
 //! a matter of calling it first — which is exactly what pyaff4 fails to do,
@@ -160,7 +160,8 @@ impl ContainerWriter {
         // Bind `:` to the volume so `aff4:stored :` renders as Evimetry does.
         graph.set_volume(volume_arn.as_str());
 
-        // §5.4: `container.description` is the FIRST file stored in the volume.
+        // v1.0a §5.4: `container.description` is the FIRST file stored in the
+        // volume.
         // Writing it here rather than at `finish` is what satisfies the rule
         // while members stream: nothing can precede it, because nothing else
         // has been written yet.
@@ -228,7 +229,8 @@ impl ContainerWriter {
 
     /// Write every member and close the volume.
     ///
-    /// Order is fixed and load-bearing: `container.description` first per §5.4,
+    /// Order is fixed and required: `container.description` first per
+    /// v1.0a §5.4,
     /// then `version.txt`, then queued members, then `information.turtle`.
     /// The metadata goes last because it describes everything before it.
     ///

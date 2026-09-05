@@ -1,4 +1,4 @@
-//! The `version.txt` container version file (spec §1).
+//! The `version.txt` container version file (v1.0a §1).
 //!
 //! Every AFF4 Standard container carries a `version.txt` segment in its root:
 //!
@@ -9,7 +9,7 @@
 //! ```
 //!
 //! Name/value pairs separated by `=`, in arbitrary order, with CRLF, CR, or LF
-//! line endings (spec §1). `major`/`minor` give the standard version; `tool` is
+//! line endings (v1.0a §1). `major`/`minor` give the standard version; `tool` is
 //! vendor-specific and identifies the producing tool.
 //!
 //! Pre-standard containers have no `version.txt` at all — the file was
@@ -45,13 +45,13 @@ pub struct ContainerVersion {
     pub minor: u32,
     /// The producing tool, verbatim, e.g. `Evimetry 2.2.0` or `pyaff4`.
     ///
-    /// Optional: spec §1 shows it in every example but does not require it, and
+    /// Optional: v1.0a §1 shows it in every example but does not require it, and
     /// treating its absence as fatal would reject a container over a field that
     /// carries no format semantics.
     pub tool: Option<String>,
     /// Any other name/value pairs, preserved in full.
     ///
-    /// Spec §1 says vendors should only record information here that signals a
+    /// v1.0a §1 says vendors should only record information here that signals a
     /// deviation from the standard — so an unrecognised key is exactly the kind
     /// of thing an examiner should see, not something to discard.
     pub extra: BTreeMap<String, String>,
@@ -130,8 +130,8 @@ impl ContainerVersion {
 
     /// Whether this is the AFF4-L Standard v1.0-ALPHA.
     ///
-    /// Its §3 fixes the pair: "For AFF4-L Standard v1.0, the Major is 2, Minor
-    /// is 1."
+    /// AFF4-L v1.0-ALPHA §3 fixes the pair: "For AFF4-L Standard v1.0, the
+    /// Major is 2, Minor is 1."
     #[must_use]
     pub fn is_v2_1(&self) -> bool {
         self.major == 2 && self.minor == 1
@@ -162,7 +162,7 @@ impl fmt::Display for ContainerVersion {
     }
 }
 
-/// Split on CRLF, CR, or LF (spec §1 permits all three).
+/// Split on CRLF, CR, or LF (v1.0a §1 permits all three).
 fn split_lines(text: &str) -> impl Iterator<Item = &str> {
     // Normalising CRLF to LF first keeps a CRLF pair from yielding an empty
     // line between records.
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(v.tool.as_deref(), Some("Evimetry 3.0.0"));
     }
 
-    /// Spec §1 permits CRLF, CR, or LF.
+    /// v1.0a §1 permits CRLF, CR, or LF.
     #[test]
     fn accepts_all_three_line_endings() {
         let expected = parse(b"major=1\nminor=0\ntool=t\n").unwrap();
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(parse(b"major=1\nminor=0\ntool=t").unwrap(), expected);
     }
 
-    /// Spec §1: ordering of name/value pairs is arbitrary.
+    /// v1.0a §1: ordering of name/value pairs is arbitrary.
     #[test]
     fn accepts_arbitrary_field_order() {
         let v = parse(b"tool=Evimetry 2.2.0\nminor=0\nmajor=1\n").unwrap();
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(v.tool.as_deref(), Some("weird=tool=name"));
     }
 
-    /// Spec §1 says vendors record deviations from the standard here, so an
+    /// v1.0a §1 says vendors record deviations from the standard here, so an
     /// unrecognised key is worth surfacing rather than dropping.
     #[test]
     fn preserves_unrecognised_fields() {

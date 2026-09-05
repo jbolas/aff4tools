@@ -1,7 +1,10 @@
-//! Deduplicated logical storage, per AFF4-L §4.
+//! Deduplicated logical storage, per AFF4-L 2019 §4.
 //!
 //! > Schatz, B.L. *AFF4-L: A Scalable Open Logical Evidence Container.*
-//! > Digital Investigation 29, S143–S149. DFRWS USA 2019, §4.
+//! > Digital Investigation 29, S143–S149. DFRWS USA 2019.
+//!
+//! **Every bare section number below cites that paper**, not the AFF4
+//! Standard. This module cites no other document.
 //!
 //! # The two-level model
 //!

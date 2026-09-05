@@ -132,8 +132,8 @@ const INDENT: &str = "        ";
 /// 2,000 files and 6.88 s at 16,000 on a synthetic tree — about 3.2× per
 /// doubling, extrapolating to roughly **30 hours at 2 million files**. A
 /// logical acquisition of a large volume is exactly the case that
-/// makes triple count grow with file count, and §6 of the AFF4-L paper warns
-/// this becomes problematic in the millions.
+/// makes triple count grow with file count, and AFF4-L 2019 §6 warns this
+/// becomes problematic in the millions.
 #[derive(Debug, Default)]
 pub struct TurtleWriter {
     triples: Vec<(String, String, TurtleTerm)>,
@@ -498,7 +498,7 @@ mod tests {
         );
     }
 
-    /// The rendered form uses prefixes and groups by subject (§5.2.5).
+    /// The rendered form uses prefixes and groups triples by subject.
     #[test]
     fn output_is_prefixed_and_grouped_by_subject() {
         let mut w = TurtleWriter::new();

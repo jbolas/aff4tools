@@ -219,7 +219,7 @@ pub(crate) fn write_identity_block(
 /// syntax that this replaced.
 ///
 /// `Tool:` is a separate line and is omitted entirely when the container
-/// declares no tool. `version.txt`'s `tool` field is optional (spec §1), so
+/// declares no tool. `version.txt`'s `tool` field is optional (v1.0a §1), so
 /// an empty `Tool:` line would present an absent declaration as a blank value.
 /// Every corpus container that declares a version also declares a tool, so this
 /// path is unexercised there — absence is still a fact about the container, not
@@ -1396,7 +1396,7 @@ fn write_object(
     writeln!(out, "    {:<widest$} {}", "role", object.role)?;
 
     if !object.types.is_empty() {
-        // Spec §2.1 requires multiple types; showing all of them lets a reader
+        // v1.0a §2.1 requires multiple types; showing all of them lets a reader
         // spot a container that declares an incomplete set.
         // A vendor type renders prefixed — `bbt:APFSContainerImage` — because
         // stripping the namespace would make an extension indistinguishable
@@ -1566,7 +1566,7 @@ fn write_block_hashes_header(
 /// - On a `BlockHashes` object: this digest is of the segment as a
 ///   whole, not of the per-block hashes the segment holds (see
 ///   [`write_block_hashes_header`], printed just above this line).
-/// - On the `blockMapHashSHA512`/`blockMapHash` pair spec §6.2
+/// - On the `blockMapHashSHA512`/`blockMapHash` pair v1.0a §6.2
 ///   requires on a `DiskImage`/`Map`: both lines carry the identical value,
 ///   spec-mandated at two locations, not a coincidence or a contradiction.
 fn write_hash(
@@ -1739,7 +1739,7 @@ fn prefixed(iri: &str, prefixes: &[(String, String)]) -> Option<String> {
         .map(|(name, namespace)| format!("{name}:{}", &iri[namespace.len()..]))
 }
 
-/// Describe where the volume ARN came from (spec §5.4 allows two locations).
+/// Describe where the volume ARN came from (v1.0a §5.4 allows two locations).
 pub(crate) fn describe_arn_source(source: &aff4tools::ArnSource) -> String {
     match source {
         aff4tools::ArnSource::ZipComment => "from the ZIP comment".into(),

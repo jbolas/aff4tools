@@ -44,7 +44,7 @@ const BEVIES: u64 = 10_000;
 /// ahead and fill the window, which is the condition under test.
 const CHUNK: usize = 512;
 
-/// The ARN as a ZIP member path prefix, per spec §5's URI→path mapping.
+/// The ARN as a ZIP member path prefix, per v1.0a §5's URI→path mapping.
 fn escaped(arn: &str) -> String {
     arn.replace(':', "%3A").replace('/', "%2F")
 }

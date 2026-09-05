@@ -5,7 +5,7 @@
 //!
 //! # Three choices worth knowing
 //!
-//! **Every `rdf:type` is kept.** Spec §2.1 requires multiple types — a disk
+//! **Every `rdf:type` is kept.** v1.0a §2.1 requires multiple types — a disk
 //! image is `DiskImage` *and* `ContiguousImage` *and* `Image`. Collapsing to a
 //! single "kind" would discard information the standard mandates, so
 //! [`Aff4Object::types`] holds all of them and [`Aff4Object::role`] is a derived
@@ -179,7 +179,7 @@ pub fn has_noteworthy_deviation(deviations: &[Deviation]) -> bool {
 pub struct VolumeInfo {
     /// The volume ARN.
     pub arn: Arn,
-    /// Where that ARN was found (spec §5.4 allows two locations).
+    /// Where that ARN was found (v1.0a §5.4 allows two locations).
     pub arn_source: ArnSource,
 }
 
@@ -242,21 +242,21 @@ pub struct SegmentKindCount {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SegmentKind {
-    /// A bevy: one chunked, compressed run of image-stream data (spec §4).
+    /// A bevy: one chunked, compressed run of image-stream data (v1.0a §4).
     BevyData,
     /// A bevy's chunk index, giving each chunk's offset and length.
     ///
     /// Named `<bevy>.index` in Standard containers and `<bevy>/index` in
     /// pre-standard ones, which store each bevy as a folder.
     BevyIndex,
-    /// Per-chunk block hashes stored beside a bevy (spec §6, optional).
+    /// Per-chunk block hashes stored beside a bevy (v1.0a §6, optional).
     BlockHash,
     /// A map's entry table (`map`), target list (`idx`), or path list
     /// (`mapPath`) — the virtual address space over other streams.
     MapStructure,
     /// `information.turtle`, the RDF metadata describing every object.
     Metadata,
-    /// `container.description`, carrying the volume ARN (spec §5.4).
+    /// `container.description`, carrying the volume ARN (v1.0a §5.4).
     ContainerDescription,
     /// `version.txt`, absent in pre-standard containers.
     Version,
@@ -292,7 +292,7 @@ impl SegmentKind {
 pub struct Aff4Object {
     /// The object's ARN.
     pub arn: Arn,
-    /// Every `rdf:type`, in the order declared (spec §2.1 requires multiple).
+    /// Every `rdf:type`, in the order declared (v1.0a §2.1 requires multiple).
     ///
     /// `Arc<str>` rather than `String`: a container's type IRIs are drawn from
     /// a handful of distinct values — 1,208,001 occurrences across **6**
@@ -554,7 +554,7 @@ pub enum Locality {
     /// No `aff4:stored` property, so the location is not declared.
     ///
     /// Also the state of purely virtual objects such as the `BlockHashes`
-    /// concatenation URI (spec §6.2), which names no stored segment by design.
+    /// concatenation URI (v1.0a §6.2), which names no stored segment by design.
     Undeclared,
 }
 
@@ -571,11 +571,11 @@ pub enum Locality {
 /// [`HashAlgorithm`]'s approach) gives every variant a plain string instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectRole {
-    /// A disk image (spec §2.1).
+    /// A disk image (v1.0a §2.1).
     DiskImage,
     /// A contiguous image that is not declared a disk image.
     ContiguousImage,
-    /// An image whose map may leave holes (spec §4).
+    /// An image whose map may leave holes (v1.0a §4).
     ///
     /// **Not a Standard v1.0 type.** Occurs in aff4-cpp-lite.
     DiscontiguousImage,
@@ -589,7 +589,7 @@ pub enum ObjectRole {
     ImageStream,
     /// A virtual address space over other streams.
     Map,
-    /// The concatenation of per-chunk hashes (spec §6.2).
+    /// The concatenation of per-chunk hashes (v1.0a §6.2).
     BlockHashes,
     /// Case details or notes.
     CaseInfo,
@@ -789,7 +789,7 @@ pub enum HashAlgorithm {
     Sha512,
     /// Blake2b, 512-bit.
     Blake2b,
-    /// The composite block-map hash (spec §6.2), SHA-512 flavour.
+    /// The composite block-map hash (v1.0a §6.2), SHA-512 flavour.
     BlockMapSha512,
     /// The composite block-map hash, SHA-256 flavour.
     BlockMapSha256,
@@ -871,7 +871,7 @@ mod tests {
             .collect()
     }
 
-    /// Spec §2.1: a disk image declares three types. The most specific is what
+    /// v1.0a §2.1: a disk image declares three types. The most specific is what
     /// a reader wants to see, but all three are retained elsewhere.
     #[test]
     fn picks_the_most_specific_role() {
