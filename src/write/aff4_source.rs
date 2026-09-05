@@ -134,7 +134,8 @@ impl Aff4Source {
         };
 
         let lexicon = container.lexicon();
-        let image = Image::open_in_set(&arn, container.volumes_mut(), lexicon, &locus)?;
+        let mapping = container.name_mapping();
+        let image = Image::open_in_set(&arn, container.volumes_mut(), lexicon, mapping, &locus)?;
 
         Ok(Self {
             container,

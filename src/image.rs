@@ -19,7 +19,7 @@
 //! costs one bevy plus one chunk plus a 64 KiB run buffer, and real evidence
 //! reaches terabytes, so this is not an optimisation.
 
-use crate::arn::Arn;
+use crate::arn::{Arn, NameMapping};
 use crate::error::{Deviation, DeviationKind, Error, Locus, Result};
 use crate::lexicon::Lexicon;
 use crate::map::{GapPolicy, IDX_SEGMENT, MAP_SEGMENT, Map, ReadAccounting, StreamSource};
@@ -37,6 +37,11 @@ pub struct Image {
     map: Map,
     /// Every stored stream the map depends on, opened from the metadata.
     streams: Vec<ImageStream>,
+    /// Which ARN-to-segment rules the container's generation puts in force.
+    ///
+    /// Fixed when the image is opened, because it is a property of the
+    /// container rather than of any one read.
+    mapping: NameMapping,
 }
 
 impl Image {
@@ -53,6 +58,7 @@ impl Image {
         volume: &mut dyn Volume,
         graph: &Graph,
         lexicon: &Lexicon,
+        mapping: NameMapping,
         locus: &Locus,
     ) -> Result<Self> {
         let locus = locus.clone().subject(arn.as_str());
@@ -90,7 +96,15 @@ impl Image {
             GapPolicy::Refuse
         };
 
-        let map = open_map(&map_arn, volume, graph, lexicon, &gap_policy, &locus)?;
+        let map = open_map(
+            &map_arn,
+            volume,
+            graph,
+            lexicon,
+            mapping,
+            &gap_policy,
+            &locus,
+        )?;
 
         let mut streams = Vec::new();
         for stream_arn in map.dependent_streams() {
@@ -101,6 +115,7 @@ impl Image {
             arn: arn.clone(),
             map,
             streams,
+            mapping,
         })
     }
 
@@ -125,6 +140,7 @@ impl Image {
         arn: &Arn,
         volumes: &mut ZipVolumeSet,
         lexicon: &Lexicon,
+        mapping: NameMapping,
         locus: &Locus,
     ) -> Result<Self> {
         let locus = locus.clone().subject(arn.as_str());
@@ -168,7 +184,7 @@ impl Image {
         // the volume that declared the image.
         let (map_bytes, idx_bytes) = {
             let volume = volumes.volume_at_mut(declaring);
-            let base = map_arn.member_name(volume.arn()).ok_or_else(|| {
+            let base = map_arn.member_name(volume.arn(), mapping).ok_or_else(|| {
                 Error::malformed(
                     locus.clone(),
                     format!(
@@ -245,6 +261,7 @@ impl Image {
             arn: arn.clone(),
             map,
             streams,
+            mapping,
         })
     }
 
@@ -260,7 +277,7 @@ impl Image {
         sink: &mut dyn FnMut(&[u8]) -> Result<()>,
         locus: &Locus,
     ) -> Result<ReadAccounting> {
-        let mut source = SetStreams::new(&self.streams, volumes);
+        let mut source = SetStreams::new(&self.streams, volumes, self.mapping);
         self.map.read_all(&mut source, sink, locus)
     }
 
@@ -346,7 +363,7 @@ impl Image {
         sink: &mut dyn FnMut(&[u8]) -> Result<()>,
         locus: &Locus,
     ) -> Result<ReadAccounting> {
-        let mut source = VolumeStreams::new(&self.streams, volume);
+        let mut source = VolumeStreams::new(&self.streams, volume, self.mapping);
         self.map.read_all(&mut source, sink, locus)
     }
 
@@ -369,7 +386,7 @@ impl Image {
         buf: &mut [u8],
         locus: &Locus,
     ) -> Result<usize> {
-        let mut source = VolumeStreams::new(&self.streams, volume);
+        let mut source = VolumeStreams::new(&self.streams, volume, self.mapping);
         self.map.read_at(&mut source, offset, buf, locus)
     }
 
@@ -395,7 +412,7 @@ impl Image {
         buf: &mut [u8],
         locus: &Locus,
     ) -> Result<usize> {
-        let mut source = SetStreams::new(&self.streams, volumes);
+        let mut source = SetStreams::new(&self.streams, volumes, self.mapping);
         self.map.read_at(&mut source, offset, buf, locus)
     }
 
@@ -424,7 +441,7 @@ impl Image {
         locus: &Locus,
         resident: &mut Option<(Arn, Residency)>,
     ) -> Result<usize> {
-        let mut source = SetStreams::new(&self.streams, volumes);
+        let mut source = SetStreams::new(&self.streams, volumes, self.mapping);
         source.resident = resident.take();
         let result = self.map.read_at(&mut source, offset, buf, locus);
         *resident = source.resident.take();
@@ -446,7 +463,7 @@ impl Image {
     pub fn reader_in_set<'i, 'v>(&'i self, volumes: &'v mut ZipVolumeSet) -> ImageReader<'i, 'v> {
         ImageReader {
             map: &self.map,
-            source: SetStreams::new(&self.streams, volumes),
+            source: SetStreams::new(&self.streams, volumes, self.mapping),
         }
     }
 }
@@ -497,15 +514,17 @@ struct VolumeStreams<'v> {
     volume: Option<&'v mut dyn Volume>,
     reader: Option<ChunkReader<'v>>,
     open: Option<Arn>,
+    mapping: NameMapping,
 }
 
 impl<'v> VolumeStreams<'v> {
-    fn new(streams: &[ImageStream], volume: &'v mut dyn Volume) -> Self {
+    fn new(streams: &[ImageStream], volume: &'v mut dyn Volume, mapping: NameMapping) -> Self {
         Self {
             streams: streams.to_vec(),
             volume: Some(volume),
             reader: None,
             open: None,
+            mapping,
         }
     }
 
@@ -546,7 +565,7 @@ impl<'v> VolumeStreams<'v> {
             })?,
         };
 
-        self.reader = Some(ChunkReader::new(&found, volume));
+        self.reader = Some(ChunkReader::new(&found, volume, self.mapping));
         self.open = Some(stream.clone());
         Ok(())
     }
@@ -599,14 +618,16 @@ struct SetStreams<'v> {
     volumes: &'v mut ZipVolumeSet,
     /// The stream the cached bevy belongs to, and the bevy itself.
     resident: Option<(Arn, Residency)>,
+    mapping: NameMapping,
 }
 
 impl<'v> SetStreams<'v> {
-    fn new(streams: &[ImageStream], volumes: &'v mut ZipVolumeSet) -> Self {
+    fn new(streams: &[ImageStream], volumes: &'v mut ZipVolumeSet, mapping: NameMapping) -> Self {
         Self {
             streams: streams.to_vec(),
             volumes,
             resident: None,
+            mapping,
         }
     }
 }
@@ -641,17 +662,20 @@ impl StreamSource for SetStreams<'_> {
             _ => None,
         };
 
-        let volume = self.volumes.holding_mut(stream).ok_or_else(|| {
-            Error::malformed(
-                locus.clone().subject(stream.as_str()),
-                format!(
-                    "no volume given holds this stream's data; pass the folder \
+        let volume = self
+            .volumes
+            .holding_mut(stream, self.mapping)
+            .ok_or_else(|| {
+                Error::malformed(
+                    locus.clone().subject(stream.as_str()),
+                    format!(
+                        "no volume given holds this stream's data; pass the folder \
                      holding {stream} with --split-file <dir>"
-                ),
-            )
-        })?;
+                    ),
+                )
+            })?;
 
-        let mut reader = ChunkReader::new(&found, volume);
+        let mut reader = ChunkReader::new(&found, volume, self.mapping);
         if let Some(residency) = carried {
             reader.restore(residency);
         }
@@ -689,10 +713,11 @@ fn open_map(
     volume: &mut dyn Volume,
     graph: &Graph,
     lexicon: &Lexicon,
+    mapping: NameMapping,
     gap_policy: &GapPolicy,
     locus: &Locus,
 ) -> Result<Map> {
-    let base = arn.member_name(volume.arn()).ok_or_else(|| {
+    let base = arn.member_name(volume.arn(), mapping).ok_or_else(|| {
         Error::malformed(
             locus.clone(),
             format!(

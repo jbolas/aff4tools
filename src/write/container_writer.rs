@@ -68,15 +68,48 @@ pub enum VersionProfile {
     /// `originalFileName`, and the filesystem timestamps, none of which exist
     /// in v1.0.
     Logical,
+    /// An AFF4-L Standard v1.0-ALPHA image: `major=2 minor=1`.
+    ///
+    /// The first profile to change the **major** version, which is why
+    /// [`Self::major`] exists at all. AFF4-L v1.0-ALPHA §3 assigns AFF4-L
+    /// major 2, minor 1, and says its versioning extends the v1.0 scheme
+    /// rather than replacing it.
+    LogicalV21,
 }
 
 impl VersionProfile {
+    /// The major version this profile declares.
+    ///
+    /// Constant at 1 until AFF4-L v1.0-ALPHA, which assigns AFF4-L major 2.
+    #[must_use]
+    fn major(self) -> u8 {
+        match self {
+            Self::Physical | Self::Logical => 1,
+            Self::LogicalV21 => 2,
+        }
+    }
+
+    /// Which ARN-to-segment rules this profile puts in force.
+    ///
+    /// The writer must name members by the rule a reader of the finished
+    /// container will apply, so this mirrors
+    /// [`crate::lexicon::Generation::name_mapping`] for the generation each
+    /// profile declares.
+    #[must_use]
+    pub fn name_mapping(self) -> crate::arn::NameMapping {
+        use crate::arn::NameMapping;
+        match self {
+            Self::Physical | Self::Logical => NameMapping::Escaped,
+            Self::LogicalV21 => NameMapping::Literal,
+        }
+    }
+
     /// The minor version this profile declares.
     #[must_use]
     fn minor(self) -> u8 {
         match self {
             Self::Physical => 0,
-            Self::Logical => 1,
+            Self::Logical | Self::LogicalV21 => 1,
         }
     }
 }
@@ -84,7 +117,8 @@ impl VersionProfile {
 /// The `version.txt` this writer emits.
 fn version_text(profile: VersionProfile) -> String {
     format!(
-        "major=1\nminor={}\ntool={}\n",
+        "major={}\nminor={}\ntool={}\n",
+        profile.major(),
         profile.minor(),
         producing_tool()
     )
@@ -113,6 +147,12 @@ pub struct ContainerWriter {
     sink: WriteSink,
     volume_arn: Arn,
     graph: TurtleWriter,
+    /// The version this volume declares, kept past `version.txt`.
+    ///
+    /// A generation decides more than the version line: it also decides how an
+    /// ARN maps to a member name. Retaining it is what lets the writer name
+    /// members by the same rule a reader of the finished container will apply.
+    profile: VersionProfile,
 }
 
 impl ContainerWriter {
@@ -182,6 +222,7 @@ impl ContainerWriter {
             sink,
             volume_arn,
             graph,
+            profile,
         })
     }
 
@@ -189,6 +230,22 @@ impl ContainerWriter {
     #[must_use]
     pub fn volume_arn(&self) -> &Arn {
         &self.volume_arn
+    }
+
+    /// Which ARN-to-segment rules this volume's declared version puts in force.
+    #[must_use]
+    pub fn name_mapping(&self) -> crate::arn::NameMapping {
+        self.profile.name_mapping()
+    }
+
+    /// The file this volume is being written to.
+    ///
+    /// Exposed so a caller minting names for objects can anchor an error to
+    /// the container being written, which is the only file the failure is
+    /// about.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.sink.path()
     }
 
     /// Mutable access to the metadata graph.

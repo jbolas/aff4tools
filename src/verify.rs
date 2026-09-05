@@ -40,7 +40,7 @@
 
 use std::path::PathBuf;
 
-use crate::arn::Arn;
+use crate::arn::{Arn, NameMapping};
 use crate::error::{Locus, Result};
 use crate::hash::{Digest, MultiHasher, digest_of, is_computable};
 use crate::image::Image;
@@ -608,6 +608,30 @@ impl Default for VerifyOptions {
 /// Bundled so that pushing a check and announcing it cannot drift apart: every
 /// completed check is emitted as it lands, which is what lets a caller show
 /// results during a run rather than only at the end.
+/// What the container's generation decides, carried together.
+///
+/// The vocabulary and the ARN-to-segment mapping are both answers to "which
+/// document wrote this", and every function that needs one needs the other.
+/// Passing them as a pair keeps that fact in the type rather than in five
+/// parallel parameter lists.
+#[derive(Clone, Copy)]
+struct Dialect {
+    /// The terms this container's generation uses.
+    lexicon: &'static Lexicon,
+    /// How its resource names map to stored members.
+    mapping: NameMapping,
+}
+
+impl Dialect {
+    /// What this container's generation decides.
+    fn of(container: &crate::container::Container) -> Self {
+        Self {
+            lexicon: container.lexicon(),
+            mapping: container.name_mapping(),
+        }
+    }
+}
+
 struct Session<'o> {
     report: VerificationReport,
     progress: &'o mut dyn ProgressObserver,
@@ -658,7 +682,8 @@ pub fn verify_container_with_progress(
     let path = container.volume().path().to_path_buf();
     let locus = Locus::new(&path);
     let graph = container.graph()?;
-    let lexicon = container.lexicon();
+    let dialect = Dialect::of(container);
+    let Dialect { mapping, .. } = dialect;
 
     // Every volume's declarations, not just the primary's. In a striped set a
     // sibling's stream records its digests only in the volume holding the data;
@@ -688,7 +713,7 @@ pub fn verify_container_with_progress(
     // container's shape allows it. `prepare` refuses whenever image order and
     // part order might differ, leaving that image its own traversal.
     let mut fused =
-        prepare_fused_image(&objects, container, lexicon, &locus, striped, &mut session);
+        prepare_fused_image(&objects, container, dialect, &locus, striped, &mut session);
 
     for object in &objects {
         let announced = matches!(object.role, ObjectRole::ImageStream) || object.role.is_image();
@@ -721,6 +746,7 @@ pub fn verify_container_with_progress(
                         verify_striped_block_map_hash(
                             object,
                             container.volumes_mut(),
+                            mapping,
                             hash,
                             &mut session,
                         );
@@ -744,7 +770,7 @@ pub fn verify_container_with_progress(
                     object,
                     container,
                     &graph,
-                    lexicon,
+                    dialect,
                     &locus,
                     options,
                     striped,
@@ -757,7 +783,7 @@ pub fn verify_container_with_progress(
                 object,
                 container,
                 &graph,
-                lexicon,
+                dialect,
                 &locus,
                 options,
                 striped,
@@ -800,7 +826,7 @@ pub fn verify_container_with_progress(
 fn prepare_fused_image(
     objects: &[crate::model::Aff4Object],
     container: &mut crate::container::Container,
-    lexicon: &Lexicon,
+    dialect: Dialect,
     locus: &Locus,
     striped: bool,
     session: &mut Session,
@@ -829,7 +855,14 @@ fn prepare_fused_image(
         return None;
     }
 
-    let image = Image::open_in_set(&object.arn, container.volumes_mut(), lexicon, locus).ok()?;
+    let image = Image::open_in_set(
+        &object.arn,
+        container.volumes_mut(),
+        dialect.lexicon,
+        dialect.mapping,
+        locus,
+    )
+    .ok()?;
     let fused = FusedImage::prepare(object, &image, &hashes, locus)?;
 
     // The map's holes, which are legal but never silent: the filled bytes were
@@ -858,20 +891,21 @@ fn verify_object(
     object: &crate::model::Aff4Object,
     container: &mut crate::container::Container,
     graph: &Graph,
-    lexicon: &Lexicon,
+    dialect: Dialect,
     locus: &Locus,
     options: VerifyOptions,
     striped: bool,
     fused: Option<&mut FusedImage>,
     session: &mut Session,
 ) {
+    let Dialect { mapping, .. } = dialect;
     match object.role {
         ObjectRole::ImageStream => {
             // Read this stream from whichever volume holds its bevies, and
             // read its *declaration* from the same volume. The primary's
             // graph holds only a stub for a sibling's stream, so passing
             // the primary's graph here would fail on the absent `size`.
-            let held = container.volumes().holding(&object.arn).cloned();
+            let held = container.volumes().holding(&object.arn, mapping).cloned();
             match &held {
                 Some(volume_arn) => {
                     // Split the borrow: the graph and the volume come from
@@ -883,7 +917,7 @@ fn verify_object(
                             object,
                             volume,
                             stream_graph,
-                            lexicon,
+                            dialect,
                             locus,
                             options,
                             fused,
@@ -895,7 +929,7 @@ fn verify_object(
                     object,
                     container.volumes_mut().primary_mut(),
                     graph,
-                    lexicon,
+                    dialect,
                     locus,
                     options,
                     fused,
@@ -905,13 +939,16 @@ fn verify_object(
         }
         ObjectRole::Map => {
             // A map's segments live beside the volume that declares it.
-            let owner = container.volumes().declaring_volume(&object.arn).cloned();
+            let owner = container
+                .volumes()
+                .declaring_volume(&object.arn, mapping)
+                .cloned();
             let volume = match &owner {
                 Some(arn) => container.volumes_mut().get_mut(arn),
                 None => Some(container.volumes_mut().primary_mut()),
             };
             if let Some(volume) = volume {
-                verify_map(object, volume, session);
+                verify_map(object, volume, mapping, session);
             }
         }
         ObjectRole::BlockHashes => {
@@ -920,14 +957,14 @@ fn verify_object(
             // not must still find them rather than declining.
             let owner = container
                 .volumes()
-                .holding_block_hashes(&object.arn)
+                .holding_block_hashes(&object.arn, mapping)
                 .cloned();
             let volume = match &owner {
                 Some(arn) => container.volumes_mut().get_mut(arn),
                 None => Some(container.volumes_mut().primary_mut()),
             };
             if let Some(volume) = volume {
-                verify_block_hash_segment(object, volume, session);
+                verify_block_hash_segment(object, volume, mapping, session);
             }
         }
         _ if object.role.is_image() => {
@@ -935,7 +972,7 @@ fn verify_object(
                 verify_image_in_set(
                     object,
                     container.volumes_mut(),
-                    lexicon,
+                    dialect,
                     locus,
                     options,
                     session,
@@ -945,7 +982,7 @@ fn verify_object(
                     object,
                     container.volume_mut(),
                     graph,
-                    lexicon,
+                    dialect,
                     locus,
                     options,
                     session,
@@ -990,11 +1027,12 @@ fn block_hash_algorithms(
     object: &crate::model::Aff4Object,
     volume: &dyn Volume,
     volume_arn: &Arn,
+    mapping: NameMapping,
     options: VerifyOptions,
 ) -> Vec<HashAlgorithm> {
     let mut block = Vec::new();
     if options.block_hashes
-        && let Some(base) = object.arn.member_name(volume_arn)
+        && let Some(base) = object.arn.member_name(volume_arn, mapping)
     {
         for (suffix, algorithm) in [("md5", HashAlgorithm::Md5), ("sha1", HashAlgorithm::Sha1)] {
             if !block_hash_segments(volume, &base, suffix).is_empty() {
@@ -1019,7 +1057,8 @@ pub fn estimate_work(
 ) -> Result<WorkEstimate> {
     let locus = Locus::new(container.volume().path());
     let graph = container.graph()?;
-    let lexicon = container.lexicon();
+    let dialect = Dialect::of(container);
+    let Dialect { lexicon, mapping } = dialect;
 
     // Every volume's streams, not just the primary's. A split set's parts each
     // declare their own stream, so estimating from the primary alone described
@@ -1051,7 +1090,7 @@ pub fn estimate_work(
         if !has_digest && !options.block_hashes {
             continue;
         }
-        let holding = container.volumes().holding(&object.arn).cloned();
+        let holding = container.volumes().holding(&object.arn, mapping).cloned();
         let Some(stream) =
             open_declared_stream(object, container, holding.as_ref(), &graph, lexicon, &locus)
         else {
@@ -1084,13 +1123,13 @@ pub fn estimate_work(
 
         // What the bevies occupy on disk, which is what the read will cost.
         let bevy_names: Vec<String> = (0..stream.bevy_count())
-            .filter_map(|index| stream.bevy_name(&volume_arn, index))
+            .filter_map(|index| stream.bevy_name(&volume_arn, mapping, index))
             .collect();
         estimate.bytes_on_disk = estimate
             .bytes_on_disk
             .saturating_add(volume.stored_bytes(&bevy_names));
 
-        let block = block_hash_algorithms(object, volume, &volume_arn, options);
+        let block = block_hash_algorithms(object, volume, &volume_arn, mapping, options);
 
         let mut linear = Vec::new();
         let mut not_recomputed = Vec::new();
@@ -1122,7 +1161,7 @@ pub fn estimate_work(
         });
     }
 
-    estimate_segment_stored(&objects, container, &mut estimate);
+    estimate_segment_stored(&objects, container, mapping, &mut estimate);
 
     // Streams are read one after another, so the run's peak cost is the widest
     // single stream rather than the sum. `MultiHasher` starts one thread per
@@ -1172,6 +1211,7 @@ pub fn estimate_work(
 fn estimate_segment_stored(
     objects: &[crate::model::Aff4Object],
     container: &crate::container::Container,
+    mapping: NameMapping,
     estimate: &mut WorkEstimate,
 ) {
     let volume_arn = container.volume().arn().clone();
@@ -1181,16 +1221,20 @@ fn estimate_segment_stored(
         if !object.role.is_image() || !is_zip_segment(object) {
             continue;
         }
-        let Some(member) = object.arn.member_name(&volume_arn) else {
+        let Some(member) = object.arn.member_name(&volume_arn, mapping) else {
             continue;
         };
         // Both spellings, for the same reason `verify_zip_segment_image` tries
-        // both: pyaff4 writes legal characters unescaped.
+        // both: pyaff4 writes legal characters unescaped. Only under the
+        // escaped mapping, though — see `verify_zip_segment_image` for why an
+        // unescaping fallback is wrong when nothing was escaped.
         let found = if volume.uncompressed_bytes(&member).is_some() {
             Some(member)
-        } else {
+        } else if mapping == NameMapping::Escaped {
             let unescaped = crate::arn::unescape(&member);
             volume.uncompressed_bytes(&unescaped).map(|_| unescaped)
+        } else {
+            None
         };
         let Some(name) = found else { continue };
         let Some(size) = volume.uncompressed_bytes(&name) else {
@@ -1207,15 +1251,16 @@ fn estimate_segment_stored(
 fn read_stream(
     stream: &ImageStream,
     volume: &mut crate::zip::ZipVolume,
+    mapping: NameMapping,
     plan: crate::parallel::ThreadPlan,
     sink: &mut dyn FnMut(&[u8]) -> Result<()>,
     on_bevy: &mut dyn FnMut(u64),
     locus: &Locus,
 ) -> Result<()> {
     if plan.is_parallel() && !crate::parallel::too_small_to_parallelise(stream.bevy_count()) {
-        crate::parallel::read_all_parallel(stream, volume, plan, sink, on_bevy, locus)
+        crate::parallel::read_all_parallel(stream, volume, mapping, plan, sink, on_bevy, locus)
     } else {
-        stream.read_all_observed(volume, sink, on_bevy, locus)
+        stream.read_all_observed(volume, mapping, sink, on_bevy, locus)
     }
 }
 
@@ -1524,7 +1569,7 @@ fn verify_stream(
     object: &crate::model::Aff4Object,
     volume: &mut crate::zip::ZipVolume,
     graph: &Graph,
-    lexicon: &Lexicon,
+    dialect: Dialect,
     locus: &Locus,
     options: VerifyOptions,
     fused: Option<&mut FusedImage>,
@@ -1537,7 +1582,7 @@ fn verify_stream(
         .filter(|h| h.predicate == "hash")
         .collect();
 
-    let stream = match ImageStream::open(&object.arn, graph, lexicon, locus) {
+    let stream = match ImageStream::open(&object.arn, graph, dialect.lexicon, locus) {
         Ok(stream) => stream,
         Err(error) => {
             // The fused image traversal was counting on this stream's bytes.
@@ -1563,9 +1608,9 @@ fn verify_stream(
         }
     };
 
-    verify_stream_index_hashes(object, &stream, volume, session);
+    verify_stream_index_hashes(object, &stream, volume, dialect.mapping, session);
 
-    let mut blocks = wanted_block_digests(object, volume, options);
+    let mut blocks = wanted_block_digests(object, volume, dialect.mapping, options);
 
     // A stream's own digest and its per-chunk block hashes are separate claims:
     // the first attests the stored bytes as a whole, the second attests each
@@ -1636,25 +1681,21 @@ fn verify_stream(
         });
     };
 
-    let read = read_stream(&stream, volume, plan, &mut sink, &mut on_bevy, locus);
+    let read = read_stream(
+        &stream,
+        volume,
+        dialect.mapping,
+        plan,
+        &mut sink,
+        &mut on_bevy,
+        locus,
+    );
     // `sink` held a reborrow of `fused`; ending it here frees `fused` for the
     // completion paths below.
     let _ = image;
 
     if let Err(error) = read {
-        if let Some(fused) = fused.as_deref_mut() {
-            fused.abandon(format!("stream {} could not be read: {error}", object.arn));
-        }
-        for hash in &recorded {
-            session.push(HashCheck::from_read_error(
-                &object.arn,
-                object.role.clone(),
-                hash,
-                Coverage::StoredStream,
-                format!("the stream could not be read: {error}"),
-                &error,
-            ));
-        }
+        report_stream_read_failure(object, &recorded, fused.as_deref_mut(), &error, session);
         return;
     }
 
@@ -1666,7 +1707,41 @@ fn verify_stream(
 
     if let Some(mut blocks) = blocks {
         blocks.finish(&mut carry);
-        verify_block_hashes(&object.arn, &stream, &blocks, volume, session);
+        verify_block_hashes(
+            &object.arn,
+            &stream,
+            &blocks,
+            volume,
+            dialect.mapping,
+            session,
+        );
+    }
+}
+
+/// Record that a stream could not be read, against every digest it claimed.
+///
+/// A fused image traversal counting on these bytes is abandoned rather than
+/// finished short: its digest would otherwise cover less than the image while
+/// still being reported as the image's.
+fn report_stream_read_failure(
+    object: &crate::model::Aff4Object,
+    recorded: &[&StoredHash],
+    fused: Option<&mut FusedImage>,
+    error: &crate::error::Error,
+    session: &mut Session,
+) {
+    if let Some(fused) = fused {
+        fused.abandon(format!("stream {} could not be read: {error}", object.arn));
+    }
+    for hash in recorded {
+        session.push(HashCheck::from_read_error(
+            &object.arn,
+            object.role.clone(),
+            hash,
+            Coverage::StoredStream,
+            format!("the stream could not be read: {error}"),
+            error,
+        ));
     }
 }
 
@@ -1679,12 +1754,13 @@ fn verify_stream(
 fn wanted_block_digests(
     object: &crate::model::Aff4Object,
     volume: &mut crate::zip::ZipVolume,
+    mapping: NameMapping,
     options: VerifyOptions,
 ) -> Option<BlockDigests> {
     options.block_hashes.then(|| {
         object
             .arn
-            .member_name(&volume.arn().clone())
+            .member_name(&volume.arn().clone(), mapping)
             .and_then(|base| BlockDigests::wanted(volume, &base))
     })?
 }
@@ -1737,6 +1813,7 @@ fn verify_stream_index_hashes(
     object: &crate::model::Aff4Object,
     stream: &ImageStream,
     volume: &mut dyn Volume,
+    mapping: NameMapping,
     session: &mut Session,
 ) {
     let volume_arn = volume.arn().clone();
@@ -1745,7 +1822,7 @@ fn verify_stream_index_hashes(
         match hash.predicate.as_str() {
             "hash" => {}
             "imageStreamIndexHash" => {
-                let Some(base) = stream.arn().member_name(&volume_arn) else {
+                let Some(base) = stream.arn().member_name(&volume_arn, mapping) else {
                     continue;
                 };
 
@@ -1827,8 +1904,8 @@ fn verify_stream_index_hashes(
 /// So presence of a `.blockHash.*` segment does **not** mean the stream counts,
 /// and a resolver that later makes foreign segments readable must not start
 /// including them. Bevy presence is the test that survives that change.
-fn volume_holds_stream_data(volume: &dyn Volume, stream: &Arn) -> bool {
-    let Some(base) = stream.member_name(volume.arn()) else {
+fn volume_holds_stream_data(volume: &dyn Volume, stream: &Arn, mapping: NameMapping) -> bool {
+    let Some(base) = stream.member_name(volume.arn(), mapping) else {
         return false;
     };
     // A bevy is a plain zero-padded number with no extension; `.index` and
@@ -1948,10 +2025,11 @@ fn verify_block_hashes(
     stream: &ImageStream,
     blocks: &BlockDigests,
     volume: &mut dyn Volume,
+    mapping: NameMapping,
     session: &mut Session,
 ) {
     let volume_arn = volume.arn().clone();
-    let Some(base) = stream_arn.member_name(&volume_arn) else {
+    let Some(base) = stream_arn.member_name(&volume_arn, mapping) else {
         return;
     };
 
@@ -2055,10 +2133,15 @@ fn first_difference(recorded: &[u8], computed: &[u8], width: usize) -> Option<us
 }
 
 /// Verify a `Map`'s segment digests and its composite `mapHash`.
-fn verify_map(object: &crate::model::Aff4Object, volume: &mut dyn Volume, session: &mut Session) {
+fn verify_map(
+    object: &crate::model::Aff4Object,
+    volume: &mut dyn Volume,
+    mapping: NameMapping,
+    session: &mut Session,
+) {
     let volume_arn = volume.arn().clone();
 
-    let Some(base) = object.arn.member_name(&volume_arn) else {
+    let Some(base) = object.arn.member_name(&volume_arn, mapping) else {
         for hash in &object.hashes {
             session.push(HashCheck::declined(
                 &object.arn,
@@ -2096,7 +2179,7 @@ fn verify_map(object: &crate::model::Aff4Object, volume: &mut dyn Volume, sessio
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter_map(|line| Arn::parse(line, &Locus::new(session.report.source_path.clone())).ok())
-        .filter(|arn| volume_holds_stream_data(volume, arn))
+        .filter(|arn| volume_holds_stream_data(volume, arn, mapping))
         .collect();
 
     for hash in &object.hashes {
@@ -2129,7 +2212,7 @@ fn verify_map(object: &crate::model::Aff4Object, volume: &mut dyn Volume, sessio
             // goes unverified. The map's copy is recomputable on its own, so
             // recompute it here rather than depending on the image path.
             None if hash.predicate == "blockMapHash" => {
-                match block_map_hash_input(volume, &local_streams, &segments) {
+                match block_map_hash_input(volume, mapping, &local_streams, &segments) {
                     Ok(input) => push_block_map_check(
                         &object.arn,
                         object.role.clone(),
@@ -2199,6 +2282,7 @@ fn read_map_segments(base: &str, volume: &mut dyn Volume) -> Result<MapSegments>
 fn verify_block_hash_segment(
     object: &crate::model::Aff4Object,
     volume: &mut dyn Volume,
+    mapping: NameMapping,
     session: &mut Session,
 ) {
     let volume_arn = volume.arn().clone();
@@ -2232,7 +2316,7 @@ fn verify_block_hash_segment(
     let locus = Locus::new(session.report.source_path.clone());
     let Some(stream_base) = Arn::parse(stream_iri, &locus)
         .ok()
-        .and_then(|stream| stream.member_name(&volume_arn))
+        .and_then(|stream| stream.member_name(&volume_arn, mapping))
     else {
         for hash in &object.hashes {
             session.push(HashCheck::declined(
@@ -2303,17 +2387,18 @@ fn verify_image(
     object: &crate::model::Aff4Object,
     volume: &mut crate::zip::ZipVolume,
     graph: &Graph,
-    lexicon: &Lexicon,
+    dialect: Dialect,
     locus: &Locus,
     options: VerifyOptions,
     session: &mut Session,
 ) {
+    let Dialect { lexicon, mapping } = dialect;
     // An AFF4-L logical image is often a `zip_segment`: its bytes are one ZIP
     // member, with no map and no ImageStream. `dream.aff4` is the simple case —
     // an 8688-byte file whose recorded MD5 and SHA-1 are digests over the
     // member exactly. Checking for this first avoids reporting "names no data
     // stream" about a container that is perfectly well formed.
-    if is_zip_segment(object) && verify_zip_segment_image(object, volume, session) {
+    if is_zip_segment(object) && verify_zip_segment_image(object, volume, mapping, session) {
         return;
     }
 
@@ -2325,7 +2410,7 @@ fn verify_image(
     // to the map path and be declined for naming no data stream.
     if declares_type(object, "ImageStream") {
         verify_stream(
-            object, volume, graph, lexicon, locus, options, None, session,
+            object, volume, graph, dialect, locus, options, None, session,
         );
         return;
     }
@@ -2348,11 +2433,11 @@ fn verify_image(
     // present and matched. The departure is reported by `conformance` as
     // `MissingZipSegmentType` — the leniency rule: verify the bytes anyway,
     // and record the deviation rather than ignoring it.
-    if verify_zip_segment_image(object, volume, session) {
+    if verify_zip_segment_image(object, volume, mapping, session) {
         return;
     }
 
-    let image = match Image::open(&object.arn, volume, graph, lexicon, locus) {
+    let image = match Image::open(&object.arn, volume, graph, lexicon, mapping, locus) {
         Ok(image) => image,
         Err(error) => {
             for hash in &object.hashes {
@@ -2409,7 +2494,7 @@ fn verify_image(
     for hash in &object.hashes {
         match &hash.algorithm {
             HashAlgorithm::BlockMapSha512 => {
-                verify_block_map_hash(object, &image, volume, hash, session);
+                verify_block_map_hash(object, &image, volume, mapping, hash, session);
             }
             algorithm if is_computable(algorithm) => whole.push(hash),
             algorithm => session.push(HashCheck::declined(
@@ -2456,12 +2541,13 @@ fn records_whole_image_digest(object: &crate::model::Aff4Object) -> bool {
 fn verify_image_in_set(
     object: &crate::model::Aff4Object,
     volumes: &mut crate::zip_volume_set::ZipVolumeSet,
-    lexicon: &Lexicon,
+    dialect: Dialect,
     locus: &Locus,
     _options: VerifyOptions,
     session: &mut Session,
 ) {
-    let image = match Image::open_in_set(&object.arn, volumes, lexicon, locus) {
+    let Dialect { lexicon, mapping } = dialect;
+    let image = match Image::open_in_set(&object.arn, volumes, lexicon, mapping, locus) {
         Ok(image) => image,
         Err(error) => {
             for hash in &object.hashes {
@@ -2508,7 +2594,7 @@ fn verify_image_in_set(
     for hash in &object.hashes {
         match &hash.algorithm {
             HashAlgorithm::BlockMapSha512 => {
-                verify_striped_block_map_hash(object, volumes, hash, session);
+                verify_striped_block_map_hash(object, volumes, mapping, hash, session);
             }
             algorithm if is_computable(algorithm) => whole.push(hash),
             algorithm => session.push(HashCheck::declined(
@@ -2538,11 +2624,12 @@ const DATA_STREAM_IRI: &str = "http://aff4.org/Schema#dataStream";
 fn verify_single_volume_block_map_hash(
     object: &crate::model::Aff4Object,
     volumes: &mut crate::zip_volume_set::ZipVolumeSet,
+    mapping: NameMapping,
     index: usize,
     hash: &StoredHash,
     session: &mut Session,
 ) {
-    match recompute_stripe_digests(volumes, &[index]) {
+    match recompute_stripe_digests(volumes, mapping, &[index]) {
         Ok(stripes) => match stripes.first() {
             // The recorded value is the stripe's own blockMapHash directly.
             Some(stripe) => {
@@ -2647,6 +2734,7 @@ impl Stripe {
 /// built from a partial set would be meaningless.
 fn recompute_stripe_digests(
     volumes: &mut crate::zip_volume_set::ZipVolumeSet,
+    mapping: NameMapping,
     members: &[usize],
 ) -> std::result::Result<Vec<Stripe>, String> {
     let mut stripes = Vec::new();
@@ -2655,7 +2743,7 @@ fn recompute_stripe_digests(
         let path = volumes.path_at(index).to_path_buf();
         let volume_arn = volumes.arn_at(index).clone();
 
-        let Some((map_arn, map_base)) = volumes.local_map(&volume_arn) else {
+        let Some((map_arn, map_base)) = volumes.local_map(&volume_arn, mapping) else {
             return Err(format!("volume {volume_arn} declares no map of its own"));
         };
         let Some(volume) = volumes.get_mut(&volume_arn) else {
@@ -2671,11 +2759,11 @@ fn recompute_stripe_digests(
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .filter_map(|l| Arn::parse(l, &Locus::new(path.clone())).ok())
-            .filter(|arn| volume_holds_stream_data(volume, arn))
+            .filter(|arn| volume_holds_stream_data(volume, arn, mapping))
             .collect();
 
         let stream = local.first().cloned().unwrap_or_else(|| map_arn.clone());
-        let input = block_map_hash_input(volume, &local, &segments)
+        let input = block_map_hash_input(volume, mapping, &local, &segments)
             .map_err(|reason| format!("volume {volume_arn}: block-hash segment {reason}"))?;
 
         // Raw digest bytes, never hex — the rule throughout the AFF4 tree.
@@ -2744,6 +2832,7 @@ impl StripeOrderKey {
 fn verify_striped_block_map_hash(
     object: &crate::model::Aff4Object,
     volumes: &mut crate::zip_volume_set::ZipVolumeSet,
+    mapping: NameMapping,
     hash: &StoredHash,
     session: &mut Session,
 ) {
@@ -2768,12 +2857,12 @@ fn verify_striped_block_map_hash(
         // Not striped. The single-volume path already knows this construction,
         // and it is a different one — pass-through, not a concatenation.
         let index = declaring.first().copied().unwrap_or(PRIMARY);
-        verify_single_volume_block_map_hash(object, volumes, index, hash, session);
+        verify_single_volume_block_map_hash(object, volumes, mapping, index, hash, session);
         return;
     }
 
     // Recompute each stripe's blockMapHash from its own segments.
-    let stripes = match recompute_stripe_digests(volumes, &declaring) {
+    let stripes = match recompute_stripe_digests(volumes, mapping, &declaring) {
         Ok(stripes) => stripes,
         Err(reason) => {
             session.push(HashCheck::declined(
@@ -2991,10 +3080,11 @@ fn is_zip_segment(object: &crate::model::Aff4Object) -> bool {
 fn verify_zip_segment_image(
     object: &crate::model::Aff4Object,
     volume: &mut dyn Volume,
+    mapping: NameMapping,
     session: &mut Session,
 ) -> bool {
     let volume_arn = volume.arn().clone();
-    let Some(member) = object.arn.member_name(&volume_arn) else {
+    let Some(member) = object.arn.member_name(&volume_arn, mapping) else {
         return false;
     };
 
@@ -3003,15 +3093,23 @@ fn verify_zip_segment_image(
     // `dream.aff4` stores `/test_images/AFF4-L/dream.txt` verbatim. Both
     // spellings are tried rather than assuming one, since either produces a
     // container the corpus contains.
+    //
+    // The fallback is confined to the escaped mapping. Under AFF4-L
+    // v1.0-ALPHA §1.2 nothing was escaped on the way in, so there is no second
+    // spelling to try — and unescaping anyway would turn a `%25` that is part
+    // of a name into a literal `%`, resolving to a member that is not this
+    // object's.
     let name = if volume.has_segment(&member) {
         member
-    } else {
+    } else if mapping == NameMapping::Escaped {
         let unescaped = crate::arn::unescape(&member);
         if volume.has_segment(&unescaped) {
             unescaped
         } else {
             return false;
         }
+    } else {
+        return false;
     };
 
     let bytes = match volume.read_segment(&name) {
@@ -3149,6 +3247,7 @@ fn verify_whole_image_digests(
 /// Returns `Err(name)` naming the segment that could not be read.
 fn block_map_hash_input(
     volume: &mut dyn Volume,
+    mapping: NameMapping,
     streams: &[Arn],
     segments: &MapSegments,
 ) -> std::result::Result<Vec<u8>, String> {
@@ -3156,7 +3255,7 @@ fn block_map_hash_input(
     let mut input: Vec<u8> = Vec::new();
 
     for stream in streams {
-        let Some(base) = stream.member_name(&volume_arn) else {
+        let Some(base) = stream.member_name(&volume_arn, mapping) else {
             continue;
         };
         for suffix in BLOCK_HASH_ORDER {
@@ -3194,12 +3293,13 @@ fn verify_block_map_hash(
     object: &crate::model::Aff4Object,
     image: &Image,
     volume: &mut dyn Volume,
+    mapping: NameMapping,
     hash: &StoredHash,
     session: &mut Session,
 ) {
     let volume_arn = volume.arn().clone();
 
-    let Some(map_base) = image.map().arn().member_name(&volume_arn) else {
+    let Some(map_base) = image.map().arn().member_name(&volume_arn, mapping) else {
         session.push(HashCheck::declined(
             &object.arn,
             object.role.clone(),
@@ -3230,11 +3330,11 @@ fn verify_block_map_hash(
     let local: Vec<Arn> = image
         .streams()
         .iter()
-        .filter(|s| volume_holds_stream_data(volume, s.arn()))
+        .filter(|s| volume_holds_stream_data(volume, s.arn(), mapping))
         .map(|s| s.arn().clone())
         .collect();
 
-    let input = match block_map_hash_input(volume, &local, &segments) {
+    let input = match block_map_hash_input(volume, mapping, &local, &segments) {
         Ok(input) => input,
         Err(reason) => {
             session.push(HashCheck::unreadable(

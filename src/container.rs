@@ -109,25 +109,35 @@ pub struct ConformanceScan {
     pub coverage: crate::rules::Coverage,
 }
 
-/// Why an unsupported generation is being declined.
-fn unsupported_generation_detail(generation: Generation, path: &std::path::Path) -> String {
-    match generation {
-        Generation::Aff4L10 => format!(
-            "{} declares version 2.1, the {}; aff4tools recognises it but does \
-             not yet implement its rules, and that standard's Canonical \
-             Reference Images are not published, so no conformance claim about \
-             it would be checkable",
-            path.display(),
-            generation.name()
-        ),
-        _ => format!(
-            "{} declares no version.txt and uses the {} vocabulary; no \
-             specification aff4tools cites describes this container, so it \
-             does not claim to read it",
-            path.display(),
-            generation.name()
-        ),
+/// The generation a sibling volume declares, where it declares one readably.
+///
+/// [`None`] when the volume has no `version.txt`, when it cannot be read, or
+/// when the version names a generation this build does not know. All three are
+/// left to the ordinary open path to report against the volume itself rather
+/// than being turned into a silent refusal here.
+fn sibling_generation(volume: &mut ZipVolume) -> Option<Generation> {
+    if !volume.has_segment(version::SEGMENT_NAME) {
+        return None;
     }
+    let locus = Locus::new(volume.path()).segment(version::SEGMENT_NAME);
+    let bytes = volume.read_segment(version::SEGMENT_NAME).ok()?;
+    let declared = ContainerVersion::parse(&bytes, &locus).ok()?;
+    Generation::from_version(&declared)
+}
+
+/// Why an unsupported generation is being declined.
+///
+/// Only the pre-standard generation reaches here now that v2.1 reads. The
+/// function is kept rather than inlined so a later generation that is
+/// recognized and declined has one place to say why.
+fn unsupported_generation_detail(generation: Generation, path: &std::path::Path) -> String {
+    format!(
+        "{} declares no version.txt and uses the {} vocabulary; no \
+         specification aff4tools cites describes this container, so it \
+         does not claim to read it",
+        path.display(),
+        generation.name()
+    )
 }
 
 impl Container {
@@ -179,7 +189,28 @@ impl Container {
     ///
     /// The volume must not already be present; a repeat is ignored rather than
     /// treated as an error, since naming a file twice is harmless.
-    pub fn add_volume(&mut self, volume: ZipVolume, graph: Graph, origin: VolumeOrigin) -> bool {
+    ///
+    /// # Generations must agree
+    ///
+    /// A volume declaring a different generation than the container is
+    /// refused. The generation decides how a resource name maps to a stored
+    /// member (AFF4-L v1.0-ALPHA §1.2 against v1.0a §5.2), and the set
+    /// resolves every member by the container's own answer. Admitting a
+    /// sibling that disagrees would look up its segments under names it does
+    /// not use, and report the data as absent when it is present.
+    ///
+    /// Refused rather than reported as an error, because that is what this
+    /// signature can say and what the caller already handles: a volume the set
+    /// does not admit is one the caller is told about by the `false` return.
+    pub fn add_volume(
+        &mut self,
+        mut volume: ZipVolume,
+        graph: Graph,
+        origin: VolumeOrigin,
+    ) -> bool {
+        if sibling_generation(&mut volume).is_some_and(|g| g != self.generation) {
+            return false;
+        }
         self.volumes.push(volume, graph, origin)
     }
 
@@ -367,6 +398,15 @@ impl Container {
     #[must_use]
     pub fn lexicon(&self) -> &'static Lexicon {
         self.generation.lexicon()
+    }
+
+    /// Which ARN-to-segment rules this container's generation puts in force.
+    ///
+    /// The companion to [`Self::lexicon`]: that answers what the container's
+    /// terms are called, this answers where its bytes are stored.
+    #[must_use]
+    pub fn name_mapping(&self) -> crate::arn::NameMapping {
+        self.generation.name_mapping()
     }
 
     /// The primary storage volume — the file this container was opened from.
@@ -561,7 +601,12 @@ impl Container {
         let contains = self.lexicon().iri(self.lexicon().contains);
         let bytes = self.metadata_bytes()?;
 
-        let volume_context = VolumeContext::new(&volume_arn, self.volumes.primary(), &locus);
+        let volume_context = VolumeContext::new(
+            &volume_arn,
+            self.volumes.primary(),
+            self.generation.name_mapping(),
+            &locus,
+        );
 
         let mut deviations = self.deviations.clone();
         let mut interner = Interner::default();
@@ -619,6 +664,7 @@ impl Container {
             defer_object_references(&object, &mut deferred);
 
             report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
+            report_v21_identity(&object, &volume_context, &mut deviations);
 
             if matches!(object.locality, Locality::Local) {
                 // The ARN string is already held by `described`; share that
@@ -682,7 +728,9 @@ impl Container {
         let contains = self.lexicon().iri(self.lexicon().contains);
         let bytes = self.metadata_bytes()?;
 
-        let volume_context = VolumeContext::new(&volume_arn, self.volumes.primary(), &locus);
+        let mapping = self.generation.name_mapping();
+        let volume_context =
+            VolumeContext::new(&volume_arn, self.volumes.primary(), mapping, &locus);
 
         // Storage-layer deviations first, then metadata ones, so the order
         // follows the order of discovery.
@@ -748,6 +796,7 @@ impl Container {
                 // this pass has not reached yet.
                 defer_object_references(&object, &mut deferred);
                 report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
+                report_v21_identity(&object, &volume_context, &mut deviations);
                 counts.observe(&object.role, has_bitstream_hash(&object));
                 objects.push(object);
             }
@@ -839,7 +888,12 @@ impl Container {
         let contains = self.lexicon().iri(self.lexicon().contains);
         let bytes = self.metadata_bytes()?;
 
-        let volume_context = VolumeContext::new(&volume_arn, self.volumes.primary(), &locus);
+        let volume_context = VolumeContext::new(
+            &volume_arn,
+            self.volumes.primary(),
+            self.generation.name_mapping(),
+            &locus,
+        );
 
         let mut deviations = self.deviations.clone();
         let mut interner = Interner::default();
@@ -893,6 +947,7 @@ impl Container {
             ) {
                 defer_object_references(&object, &mut deferred);
                 report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
+                report_v21_identity(&object, &volume_context, &mut deviations);
                 counts.observe(&object.role, has_bitstream_hash(&object));
                 if brief_renders(&object, candidates_kept, &mut seen_types) {
                     if has_bitstream_hash(&object) {
@@ -1645,28 +1700,43 @@ mod tests {
         assert!(!Generation::Legacy.is_supported());
     }
 
-    /// `conformance` reads a v2.1 container; `info` and `verify` decline it.
+    /// Every entry point opens a v2.1 container.
     ///
-    /// The three-way split is the whole point of `open_for_conformance`. A
-    /// coverage report names the rules it could not evaluate and claims
-    /// nothing about the evidence, so reading is safe there; `info` and
-    /// `verify` describe and check evidence, and a partial reading of evidence
-    /// misleads in a way a coverage report does not.
+    /// `conformance` admitted v2.1 first, to report what it could not evaluate
+    /// while its identity rules were unimplemented. With those rules in place
+    /// a v2.1 container's members resolve and its files are identifiable, so
+    /// `info` and `verify` read one too. What is still unevaluated stays a
+    /// coverage gap, which is a claim about this build rather than about the
+    /// evidence.
     #[test]
-    fn only_conformance_opens_a_v2_1_container() {
+    fn every_entry_point_opens_a_v2_1_container() {
         let (_d, path) = synth(&[("version.txt", b"major=2\nminor=1\ntool=aff4tools-test\n")]);
 
         let container = Container::open_for_conformance(&path)
             .expect("conformance reads v2.1 to report what it could not check");
         assert_eq!(container.generation(), Generation::Aff4L10);
 
+        assert_eq!(
+            Container::open_without_graph(&path)
+                .expect("verify reads v2.1")
+                .generation(),
+            Generation::Aff4L10
+        );
+    }
+
+    /// A pre-standard container is still declined by every entry point, and
+    /// declining is not a claim that the evidence is damaged.
+    #[test]
+    fn a_pre_standard_container_is_declined_everywhere() {
+        let (_d, path) = synth(&[(METADATA_SEGMENT, &turtle_with(LEGACY_NAMESPACE))]);
+
         for opened in [
             Container::open(&path).err(),
             Container::open_without_graph(&path).err(),
+            Container::open_for_conformance(&path).err(),
         ] {
-            let err = opened.expect("info and verify still decline v2.1");
+            let err = opened.expect("a pre-standard container is declined");
             assert!(matches!(err, Error::Unsupported { .. }), "{err}");
-            // Declining is not a claim that the evidence is damaged.
             assert!(!err.is_integrity_finding());
         }
     }
@@ -2308,6 +2378,8 @@ struct VolumeContext<'a> {
     volume_arn: &'a Arn,
     /// Every member name in the volume.
     segment_present: HashSet<&'a str>,
+    /// Which ARN-to-segment rules the container's generation puts in force.
+    mapping: crate::arn::NameMapping,
     /// Where to anchor a deviation.
     locus: &'a Locus,
 }
@@ -2327,10 +2399,16 @@ impl<'a> VolumeContext<'a> {
     /// `report_missing_zip_segment_type` runs once per described subject, and a
     /// linear probe there would be quadratic on a container with tens of
     /// thousands of members.
-    fn new(volume_arn: &'a Arn, volume: &'a crate::zip::ZipVolume, locus: &'a Locus) -> Self {
+    fn new(
+        volume_arn: &'a Arn,
+        volume: &'a crate::zip::ZipVolume,
+        mapping: crate::arn::NameMapping,
+        locus: &'a Locus,
+    ) -> Self {
         Self {
             volume_arn,
             segment_present: volume.segment_names().iter().map(String::as_str).collect(),
+            mapping,
             locus,
         }
     }
@@ -2363,19 +2441,27 @@ fn report_missing_zip_segment_type(
     let VolumeContext {
         volume_arn,
         segment_present,
+        mapping,
         locus,
     } = volume;
     if !declares_local_type(object, "FileImage") {
         return;
     }
-    if declares_local_type(object, "zip_segment") || declares_local_type(object, "ImageStream") {
+    // Both spellings. The AFF4-L 2019 paper §3.8 writes `aff4:zip_segment`;
+    // AFF4-L v1.0-ALPHA §6.1 writes `aff4:ZipSegment`. A container using the
+    // spelling its own document defines is correctly typed, and reporting it
+    // as untyped would accuse a conforming writer.
+    if declares_local_type(object, "zip_segment")
+        || declares_local_type(object, "ZipSegment")
+        || declares_local_type(object, "ImageStream")
+    {
         return;
     }
 
     // The bytes must actually be there. An object naming no member is a
     // different problem — an image with nothing to read — and reporting it as a
     // missing type would misdescribe it.
-    let Some(member) = object.arn.member_name(volume_arn) else {
+    let Some(member) = object.arn.member_name(volume_arn, *mapping) else {
         return;
     };
     if !segment_present.contains(member.as_str()) {
@@ -2391,6 +2477,151 @@ rdf:type list omits aff4:zip_segment, so a reader dispatching on type cannot \
 tell where its content lives"
         ),
     ));
+}
+
+/// Report the AFF4-L v1.0-ALPHA identity and naming departures.
+///
+/// Four rules, all of them about what an object is called and where its bytes
+/// are therefore stored. They apply only to a v2.1 container: under the
+/// earlier documents a resource name legitimately carries a path, and the
+/// escaped member spelling is the one v1.0a §5.2 requires.
+///
+/// The gate is the [`crate::arn::NameMapping`] rather than the generation
+/// directly, because the mapping *is* the generation's answer to this
+/// question, and reading it from one place keeps the check and the resolution
+/// from drifting apart.
+fn report_v21_identity(
+    object: &Aff4Object,
+    volume: &VolumeContext,
+    deviations: &mut Vec<Deviation>,
+) {
+    let VolumeContext {
+        volume_arn,
+        segment_present,
+        mapping,
+        locus,
+    } = volume;
+    if *mapping != crate::arn::NameMapping::Literal {
+        return;
+    }
+    // The volume itself is named by the same scheme but is not an acquired
+    // object, and a v2.1 volume ARN is already a bare GUID.
+    if object.arn.as_str() == volume_arn.as_str() {
+        return;
+    }
+    let locus = || (*locus).clone().subject(object.arn.as_str());
+
+    // AFF4-L v1.0-ALPHA §2: the name is the scheme plus a GUID. A path after
+    // it is the deprecated AFF4-L v1.0-ALPHA §1.1 scheme rather than an
+    // extensible part: the extensible part AFF4-L v1.0-ALPHA §2 permits
+    // follows the GUID, so what precedes it must be one.
+    let authority = object
+        .arn
+        .volume()
+        .strip_prefix("aff4://")
+        .unwrap_or_default();
+    match guid_case(authority) {
+        GuidCase::NotAGuid => {
+            deviations.push(Deviation::new(
+                locus(),
+                DeviationKind::NonGuidArn,
+                format!(
+                    "this object is named {authority:?}, which is not a GUID; \
+AFF4-L v1.0-ALPHA names objects by GUID and carries the suspect's path in \
+properties, so a name encoding a path cannot be told from an identity"
+                ),
+            ));
+        }
+        GuidCase::Upper => {
+            deviations.push(Deviation::new(
+                locus(),
+                DeviationKind::UppercaseGuidArn,
+                format!(
+                    "this object's GUID {authority:?} is not lower case; \
+resource names are compared as strings, so two spellings of one GUID are two \
+resources to a reader that does not normalize them"
+                ),
+            ));
+        }
+        GuidCase::Lower => {}
+    }
+
+    if !declares_local_type(object, "FileImage") {
+        return;
+    }
+
+    // AFF4-L v1.0-ALPHA §1.1: the path lives in properties now that the name
+    // does not carry it.
+    if object.recorded_path().is_none() {
+        deviations.push(Deviation::new(
+            locus(),
+            DeviationKind::MissingRecordedPath,
+            "this file records neither aff4:fileName nor aff4:originalPathName, so \
+the container holds its bytes but not what they were called"
+                .to_owned(),
+        ));
+    }
+
+    // AFF4-L v1.0-ALPHA §1.2: the member is stored under the unescaped name.
+    // Only reported when the escaped spelling is actually present, so a file
+    // whose bytes live in an ImageStream or another volume is not accused of
+    // storing them in the wrong place.
+    if let Some(member) = object.arn.member_name(volume_arn, *mapping)
+        && !segment_present.contains(member.as_str())
+    {
+        let escaped = object
+            .arn
+            .member_name(volume_arn, crate::arn::NameMapping::Escaped);
+        if let Some(escaped) = escaped
+            && segment_present.contains(escaped.as_str())
+        {
+            deviations.push(Deviation::new(
+                locus(),
+                DeviationKind::EscapedV21MemberName,
+                format!(
+                    "this file's bytes are stored as the ZIP member {escaped}, but \
+AFF4-L v1.0-ALPHA stores them under {member}; a conforming reader looks only at \
+the latter"
+                ),
+            ));
+        }
+    }
+}
+
+/// How a resource name's authority is spelled.
+enum GuidCase {
+    /// A GUID, lower case, as AFF4-L v1.0-ALPHA §2 requires.
+    Lower,
+    /// A GUID whose hex digits are not all lower case.
+    Upper,
+    /// Not a GUID at all.
+    NotAGuid,
+}
+
+/// Classify a resource name's authority as a GUID and its case.
+///
+/// Shape only: eight, four, four, four, then twelve hex digits separated by
+/// hyphens. Version and variant bits are not checked, because AFF4-L
+/// v1.0-ALPHA §2 asks for a GUID rather than for a particular UUID version,
+/// and a conforming producer may mint one any way it likes.
+fn guid_case(authority: &str) -> GuidCase {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let parts: Vec<&str> = authority.split('-').collect();
+    if parts.len() != GROUPS.len() {
+        return GuidCase::NotAGuid;
+    }
+    let mut upper = false;
+    for (part, want) in parts.iter().zip(GROUPS) {
+        if part.len() != want || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return GuidCase::NotAGuid;
+        }
+        upper |= part.chars().any(|c| c.is_ascii_uppercase());
+    }
+    if upper {
+        GuidCase::Upper
+    } else {
+        GuidCase::Lower
+    }
 }
 
 /// Whether an object declares `local`, comparing the IRI's local name.

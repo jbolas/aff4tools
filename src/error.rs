@@ -474,6 +474,37 @@ pub enum DeviationKind {
     /// a matter of course — nor is the volume's own ARN, which does not list
     /// itself.
     UndeclaredObject,
+    /// A v2.1 object's resource name is not the AFF4 scheme plus a GUID.
+    ///
+    /// AFF4-L v1.0-ALPHA §2 fixes the shape, and AFF4-L v1.0-ALPHA §1.1
+    /// deprecates the earlier scheme that encoded a suspect path into the
+    /// name. Such a name still resolves, so the container is read and the
+    /// departure recorded — but a consumer expecting an identity and given a
+    /// location cannot tell which it has.
+    NonGuidArn,
+    /// A v2.1 object's GUID is not spelled in lower case.
+    ///
+    /// AFF4-L v1.0-ALPHA §2 says lower case. Nothing is lost from the
+    /// container, but resource names are compared as strings throughout RDF,
+    /// so two spellings of one GUID are two resources to a reader that does
+    /// not normalize. That can change which object a reference resolves to,
+    /// which is why this is recorded rather than accepted in silence.
+    UppercaseGuidArn,
+    /// A v2.1 object's bytes are stored under the escaped member name the
+    /// base standard required.
+    ///
+    /// AFF4-L v1.0-ALPHA §1.2 stops escaping the scheme and identifier, and
+    /// AFF4-L v1.0-ALPHA §6.1 shows the member stored literally. A container
+    /// using the v1.0a §5.2 spelling instead puts its data where a conforming
+    /// reader does not look for it.
+    EscapedV21MemberName,
+    /// A v2.1 logical file records neither its name nor its path.
+    ///
+    /// AFF4-L v1.0-ALPHA §1.1 requires the path be carried in properties once
+    /// the name is a GUID. Without them the container holds the bytes but not
+    /// what they were called, and no consumer can reconstruct the acquired
+    /// tree.
+    MissingRecordedPath,
 }
 
 impl DeviationKind {
@@ -527,22 +558,16 @@ impl DeviationKind {
     /// document must be part of the question.
     #[must_use]
     pub fn spec_section(self, generation: crate::lexicon::Generation) -> Option<&'static str> {
-        // The AFF4-L v1.0-ALPHA rules are not implemented: a v2.1 container is
-        // declined before any deviation is recorded, so no section of that
-        // document may be cited. Returning None here keeps a v1.0a section
-        // number from being printed against a document that does not contain
-        // it, should a deviation ever reach this path. The registry cannot make
-        // this decision: it is keyed by kind alone and knows no generation.
-        if matches!(generation, crate::lexicon::Generation::Aff4L10) {
-            return None;
-        }
         let rule = crate::rules::rule_for_kind(self)?;
-        // Two cases yield no section in the base document, and they mean
-        // different things. A rule belonging to another document is legislated
-        // elsewhere, and `other_specification` names where. A rule carrying the
-        // "none" clause is an extension no clause legislates at all, reported
-        // so an examiner knows the container uses it.
-        if rule.id.document != crate::rules::Document::Aff4Standard10a || rule.id.clause == "none" {
+        // Three cases yield no section in the base document, and they mean
+        // different things. A rule belonging to the layered document is
+        // legislated elsewhere, and `other_specification` names where. A rule
+        // carrying the "none" clause is an extension no clause legislates at
+        // all, reported so an examiner knows the container uses it. And a rule
+        // from a document that does not govern this generation never applied,
+        // so citing it would misstate what the container was required to do.
+        let (base, _) = generation.governing_spec();
+        if rule.id.document != base || rule.id.clause == "none" {
             return None;
         }
         // Returned as stored: the catalog keeps the section sign, so a report
@@ -561,25 +586,23 @@ impl DeviationKind {
     ///
     /// # Generation
     ///
-    /// Only [`Generation::PyAff4Logical`] is governed by the paper, per the
-    /// mapping table: version 1.1 is v1.0a as base *plus* the 2019 paper for
-    /// logical constructs. A v1.0a container carries no logical layer, so a
-    /// logical citation against one would name a document that does not govern
-    /// it.
-    ///
-    /// [`Generation::PyAff4Logical`]: crate::lexicon::Generation::PyAff4Logical
+    /// Which document layers over the base comes from the mapping table in
+    /// [`crate::lexicon::Generation::governing_spec`]: version 1.1 is v1.0a
+    /// plus the 2019 paper, version 2.1 is v1.0a plus AFF4-L v1.0-ALPHA. A
+    /// v1.0a container carries no logical layer at all, so a logical citation
+    /// against one would name a document that does not govern it.
     #[must_use]
     pub fn other_specification(
         self,
         generation: crate::lexicon::Generation,
     ) -> Option<(&'static str, &'static str)> {
-        // Only a pyaff4-era logical container is governed by the paper. The
-        // registry is keyed by kind alone, so this gate stays here.
-        if !matches!(generation, crate::lexicon::Generation::PyAff4Logical) {
-            return None;
-        }
+        // Which document layers over the base is the mapping table's answer,
+        // not a fact about any one kind: the registry is keyed by kind alone
+        // and knows no generation, so the gate stays here. A rule from a
+        // document that does not govern this generation never applied.
+        let (_, layered) = generation.governing_spec();
         let rule = crate::rules::rule_for_kind(self)?;
-        if rule.id.document != crate::rules::Document::Aff4LPaper2019 {
+        if Some(rule.id.document) != layered {
             return None;
         }
         Some((rule.id.document.name(), rule.id.clause))
@@ -641,6 +664,10 @@ impl std::fmt::Display for DeviationKind {
             Self::ConflictingStreamValue => "volumes disagree about a stream",
             Self::DanglingReference => "reference to an object nothing describes",
             Self::UndeclaredObject => "object outside the volume's own manifest",
+            Self::NonGuidArn => "resource name is not a GUID",
+            Self::UppercaseGuidArn => "resource name GUID is not lower case",
+            Self::EscapedV21MemberName => "member name escaped where v2.1 stores it literally",
+            Self::MissingRecordedPath => "logical file records no name or path",
         };
         f.write_str(s)
     }
@@ -843,10 +870,19 @@ mod tests {
         }
     }
 
-    /// A v2.1 container cites no v1.0a section, which the current code enforces
-    /// by an early return. That behavior must survive the refactor.
+    /// A v2.1 container cites v1.0a for the rules v1.0a still governs.
+    ///
+    /// v2.1 is base-plus-delta: AFF4-L v1.0-ALPHA §3 extends the v1.0
+    /// versioning scheme and AFF4-L v1.0-ALPHA §4.1 supplements the base
+    /// lexicon, so v1.0a remains the base document and `conformance` says so
+    /// in its header.
+    /// Suppressing its section numbers would leave a report naming a document
+    /// it then refuses to cite.
+    ///
+    /// This reverses what the rule held while v2.1 was declined, and
+    /// deliberately: nothing was citable then because nothing was read.
     #[test]
-    fn v2_1_containers_cite_no_v1_0a_section() {
+    fn v2_1_containers_cite_the_base_document() {
         use crate::lexicon::Generation;
 
         for kind in [
@@ -856,10 +892,37 @@ mod tests {
         ] {
             assert_eq!(
                 kind.spec_section(Generation::Aff4L10),
-                None,
-                "{kind:?} must cite no v1.0a section in a v2.1 container"
+                kind.spec_section(Generation::Standard10),
+                "{kind:?} is a v1.0a rule, and v1.0a governs a v2.1 container too"
             );
         }
+    }
+
+    /// The new standard's own rules cite the new standard, and only for the
+    /// generation it governs.
+    ///
+    /// A v1.1 container is governed by the 2019 paper instead, so citing
+    /// v1.0-ALPHA against one would name a document that never applied to it.
+    #[test]
+    fn the_alpha_standard_is_cited_only_for_v2_1() {
+        use crate::lexicon::Generation;
+
+        assert_eq!(
+            DeviationKind::UppercaseGuidArn.other_specification(Generation::Aff4L10),
+            Some(("AFF4-L Standard v1.0-ALPHA", "§2"))
+        );
+        for generation in [Generation::Standard10, Generation::PyAff4Logical] {
+            assert_eq!(
+                DeviationKind::UppercaseGuidArn.other_specification(generation),
+                None,
+                "{generation:?} is not governed by the new standard"
+            );
+        }
+        // And its rules are not v1.0a rules, so they cite no base section.
+        assert_eq!(
+            DeviationKind::UppercaseGuidArn.spec_section(Generation::Aff4L10),
+            None
+        );
     }
 
     /// The paper citation appears only for the generation the paper governs.

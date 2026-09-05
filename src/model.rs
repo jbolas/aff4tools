@@ -338,6 +338,38 @@ impl Aff4Object {
     pub fn property(&self, local_name: &str) -> Option<&Property> {
         self.properties.iter().find(|p| &*p.name == local_name)
     }
+
+    /// The suspect path this object records, if it records one.
+    ///
+    /// Where a logical file's path lives depends on the generation, and this
+    /// is the one place that difference is decided.
+    ///
+    /// Under AFF4-L v1.0-ALPHA §1.1 an object is named by a GUID and its path
+    /// is carried in properties, so the properties are the only source. The
+    /// standard names `originalPathName` for the full path and `fileName` for
+    /// the entry's own name, and the fuller of the two is preferred.
+    ///
+    /// Under the AFF4-L 2019 paper the ARN itself encodes the path, and
+    /// `originalFileName` records it unencoded alongside. The property is
+    /// preferred there too, because it is the path as read rather than the
+    /// path after escaping; [`None`] leaves the caller to fall back to the ARN
+    /// tail, which is what those containers have always been read by.
+    ///
+    /// Returns the recorded lexical form and nothing else. Percent-decoding a
+    /// v2.1 display form is AFF4-L v1.0-ALPHA §5's business, not this
+    /// accessor's.
+    #[must_use]
+    pub fn recorded_path(&self) -> Option<&str> {
+        for name in ["originalPathName", "originalFileName", "fileName"] {
+            if let Some(property) = self.property(name) {
+                let lexical = property.value.lexical();
+                if !lexical.is_empty() {
+                    return Some(lexical);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// What a [`ObjectRole::BlockHashes`] object's per-chunk digests are, and

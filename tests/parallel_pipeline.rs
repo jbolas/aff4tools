@@ -186,6 +186,7 @@ fn ten_thousand_bevies_deliver_in_order_on_every_plan() {
     stream
         .read_all_observed(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes| {
                 serial.push(bytes.to_vec());
                 Ok(())
@@ -216,6 +217,7 @@ fn ten_thousand_bevies_deliver_in_order_on_every_plan() {
         read_all_parallel(
             &stream,
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             plan,
             &mut |bytes| {
                 parallel.push(bytes.to_vec());
@@ -266,6 +268,7 @@ fn a_saturated_reorder_window_does_not_deadlock() {
             let result = read_all_parallel(
                 &stream,
                 container.volume_mut(),
+                aff4tools::arn::NameMapping::Escaped,
                 plan,
                 &mut |bytes| {
                     delivered += bytes.len() as u64;
@@ -315,6 +318,7 @@ fn an_early_stop_unwinds_every_thread() {
             let result = read_all_parallel(
                 &stream,
                 container.volume_mut(),
+                aff4tools::arn::NameMapping::Escaped,
                 plan,
                 &mut |_| {
                     seen += 1;

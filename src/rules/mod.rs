@@ -484,27 +484,59 @@ mod tests {
             .collect();
         assert_eq!(
             alpha.len(),
-            24,
-            "the standard states 24 normative requirements; {} are declared",
+            28,
+            "the standard states 28 normative requirements; {} are declared",
             alpha.len()
         );
     }
 
-    /// Nothing from the new standard is checkable yet: the rules are declared
-    /// and reported as coverage gaps. A `Detected` rule here would claim a
-    /// checker that does not exist.
+    /// A rule that claims a checker must carry the deviation that checker
+    /// raises.
+    ///
+    /// This is what keeps a declared rule and an implemented one from drifting
+    /// apart: `Detected` without a kind would be a rule the report counts as
+    /// evaluated that nothing evaluates.
+    ///
+    /// The converse does not hold, and deliberately so. Two v1.0a rules carry
+    /// a kind while sitting in `NotImplemented`, because the condition is
+    /// recognized but reporting it was judged to bury real findings — see
+    /// [`crate::error::DeviationKind::UntypedNumericLiteral`]. Their variants
+    /// are public and appear in archived reports, so the kinds stay.
     #[test]
-    fn no_alpha_rule_claims_to_be_checked() {
+    fn a_detected_rule_carries_the_deviation_it_raises() {
         for rule in all_rules() {
-            if rule.id.document == Document::Aff4LStandard10Alpha {
-                assert_ne!(
-                    rule.state,
-                    RuleState::Detected,
-                    "{} claims a checker, but none is implemented",
+            if rule.state == RuleState::Detected {
+                assert!(
+                    rule.kind.is_some(),
+                    "{} claims a checker but names no deviation for it to raise",
                     rule.id
                 );
             }
         }
+    }
+
+    /// The identity rules of the new standard are implemented; the rest are
+    /// still coverage gaps. Phase 3 moved exactly four rules, and naming them
+    /// here means a later phase cannot quietly claim one it has not written.
+    #[test]
+    fn only_the_identity_rules_of_the_alpha_standard_are_checked() {
+        let detected: Vec<String> = all_rules()
+            .iter()
+            .filter(|rule| {
+                rule.id.document == Document::Aff4LStandard10Alpha
+                    && rule.state == RuleState::Detected
+            })
+            .map(|rule| rule.id.to_string())
+            .collect();
+        assert_eq!(
+            detected,
+            [
+                "AFF4L_V1_ALPHA/1.1/1",
+                "AFF4L_V1_ALPHA/1.1/2",
+                "AFF4L_V1_ALPHA/1.2/1",
+                "AFF4L_V1_ALPHA/2/1",
+            ]
+        );
     }
 
     /// A container is measured against the documents that govern it, and no

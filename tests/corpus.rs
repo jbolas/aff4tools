@@ -762,6 +762,7 @@ fn assembles_a_real_image_stream_to_its_declared_size() {
     stream
         .read_all(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes| {
                 if chunks == 0 {
                     first_chunk = bytes.to_vec();
@@ -801,6 +802,7 @@ fn reading_a_stream_never_buffers_more_than_a_chunk() {
     stream
         .read_all(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes| {
                 largest = largest.max(bytes.len());
                 Ok(())
@@ -854,6 +856,7 @@ fn assembles_streams_that_span_several_bevies() {
         stream
             .read_all(
                 container.volume_mut(),
+                aff4tools::arn::NameMapping::Escaped,
                 &mut |bytes| {
                     total += bytes.len() as u64;
                     Ok(())
@@ -884,7 +887,12 @@ fn reading_a_stream_does_not_modify_the_container() {
     let arn = aff4tools::Arn::parse("aff4://c215ba20-5648-4209-a793-1f918c723610", &locus).unwrap();
     let stream = ImageStream::open(&arn, &graph, lexicon, &locus).unwrap();
     stream
-        .read_all(container.volume_mut(), &mut |_| Ok(()), &locus)
+        .read_all(
+            container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
+            &mut |_| Ok(()),
+            &locus,
+        )
         .unwrap();
 
     let after = std::fs::metadata(&path).unwrap();
@@ -922,6 +930,7 @@ fn recomputed_digests_match_the_recorded_acquisition_hashes() {
     stream
         .read_all(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes| {
                 hasher.update(bytes);
                 Ok(())
@@ -987,6 +996,7 @@ fn recomputed_digests_match_the_stored_hashes_by_value_and_algorithm() {
     stream
         .read_all(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes| {
                 hasher.update(bytes);
                 Ok(())
@@ -1055,6 +1065,7 @@ fn all_five_recorded_algorithms_verify_in_one_pass() {
     stream
         .read_all(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes| {
                 hasher.update(bytes);
                 Ok(())
@@ -1111,6 +1122,7 @@ fn a_mutated_container_produces_a_digest_mismatch() {
     let mut hasher = MultiHasher::for_algorithms(&[HashAlgorithm::Sha1]);
     let read = stream.read_all(
         container.volume_mut(),
+        aff4tools::arn::NameMapping::Escaped,
         &mut |b| {
             hasher.update(b);
             Ok(())
@@ -1204,6 +1216,7 @@ fn altered_data_that_passes_the_zip_crc_is_caught_by_the_digest() {
     let mut hasher = MultiHasher::for_algorithms(&[HashAlgorithm::Sha1]);
     let read = stream.read_all(
         container.volume_mut(),
+        aff4tools::arn::NameMapping::Escaped,
         &mut |b| {
             hasher.update(b);
             Ok(())
@@ -1520,7 +1533,15 @@ fn reading_base_linear_through_its_map_reproduces_the_whole_image() {
     let image_arn =
         aff4tools::Arn::parse("aff4://cf853d0b-5589-4c7c-8358-2ca1572b87eb", &locus).unwrap();
 
-    let image = Image::open(&image_arn, container.volume_mut(), &graph, lexicon, &locus).unwrap();
+    let image = Image::open(
+        &image_arn,
+        container.volume_mut(),
+        &graph,
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
 
     assert_eq!(image.size(), 268_435_456, "the declared image size");
 
@@ -1601,7 +1622,15 @@ fn described_runs_deliver_the_byte_their_target_names() {
 
     let image_arn =
         aff4tools::Arn::parse("aff4://cf853d0b-5589-4c7c-8358-2ca1572b87eb", &locus).unwrap();
-    let image = Image::open(&image_arn, container.volume_mut(), &graph, lexicon, &locus).unwrap();
+    let image = Image::open(
+        &image_arn,
+        container.volume_mut(),
+        &graph,
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
 
     let mut counts = [0u64; 256];
     image
@@ -1663,6 +1692,7 @@ fn region_reads_agree_with_sequential_reading() {
     stream
         .read_all(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes| {
                 whole.extend_from_slice(bytes);
                 Ok(())
@@ -1685,7 +1715,11 @@ fn region_reads_agree_with_sequential_reading() {
         (1_234_567, 654_321),
     ];
 
-    let mut reader = ChunkReader::new(&stream, container.volume_mut());
+    let mut reader = ChunkReader::new(
+        &stream,
+        container.volume_mut(),
+        aff4tools::arn::NameMapping::Escaped,
+    );
     for (offset, length) in cases {
         let mut got = Vec::new();
         reader
@@ -1743,7 +1777,11 @@ fn a_region_past_the_end_of_a_stream_is_refused() {
 
     let arn = aff4tools::Arn::parse("aff4://c215ba20-5648-4209-a793-1f918c723610", &locus).unwrap();
     let stream = ImageStream::open(&arn, &graph, lexicon, &locus).unwrap();
-    let mut reader = ChunkReader::new(&stream, container.volume_mut());
+    let mut reader = ChunkReader::new(
+        &stream,
+        container.volume_mut(),
+        aff4tools::arn::NameMapping::Escaped,
+    );
 
     let err = reader
         .read_region(3_964_928 - 10, 20, &mut |_| Ok(()), &locus)
@@ -1766,7 +1804,15 @@ fn reading_an_image_does_not_modify_the_container() {
     let lexicon = container.lexicon();
     let image_arn =
         aff4tools::Arn::parse("aff4://cf853d0b-5589-4c7c-8358-2ca1572b87eb", &locus).unwrap();
-    let image = Image::open(&image_arn, container.volume_mut(), &graph, lexicon, &locus).unwrap();
+    let image = Image::open(
+        &image_arn,
+        container.volume_mut(),
+        &graph,
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
     image
         .read(container.volume_mut(), &mut |_| Ok(()), &locus)
         .unwrap();
@@ -2420,8 +2466,15 @@ fn a_map_that_does_not_cover_the_image_is_refused() {
     let image_arn =
         aff4tools::Arn::parse("aff4://cf853d0b-5589-4c7c-8358-2ca1572b87eb", &locus).unwrap();
 
-    let err = Image::open(&image_arn, container.volume_mut(), &graph, lexicon, &locus)
-        .expect_err("a map that covers less than the image must be refused");
+    let err = Image::open(
+        &image_arn,
+        container.volume_mut(),
+        &graph,
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .expect_err("a map that covers less than the image must be refused");
     assert!(err.is_integrity_finding(), "{err}");
     let text = err.to_string();
     assert!(text.contains("268435456"), "{text}");
@@ -2502,6 +2555,7 @@ fn the_parallel_reader_delivers_the_same_slices_as_the_serial_one() {
             let serial_result = stream
                 .read_all_observed(
                     volume,
+                    aff4tools::arn::NameMapping::Escaped,
                     &mut |bytes| {
                         serial.push(bytes.to_vec());
                         Ok(())
@@ -2526,6 +2580,7 @@ fn the_parallel_reader_delivers_the_same_slices_as_the_serial_one() {
                 let parallel_result = read_all_parallel(
                     &stream,
                     volume,
+                    aff4tools::arn::NameMapping::Escaped,
                     plan,
                     &mut |bytes| {
                         parallel.push(bytes.to_vec());
@@ -2601,6 +2656,7 @@ fn the_parallel_reader_truncates_the_final_chunk_identically() {
     read_all_parallel(
         &stream,
         volume,
+        aff4tools::arn::NameMapping::Escaped,
         plan,
         &mut |bytes| {
             total += bytes.len() as u64;
@@ -2665,8 +2721,14 @@ fn both_stripe_maps_reconstruct_the_same_image() {
             .map(|o| o.arn.clone())
             .expect("the striped fixture declares a DiskImage");
 
-        let image =
-            Image::open_in_set(&image_arn, container.volumes_mut(), lexicon, &locus).unwrap();
+        let image = Image::open_in_set(
+            &image_arn,
+            container.volumes_mut(),
+            lexicon,
+            aff4tools::arn::NameMapping::Escaped,
+            &locus,
+        )
+        .unwrap();
 
         let mut hasher = sha2::Sha256::new();
         let mut total: u64 = 0;
@@ -2719,8 +2781,14 @@ fn a_missing_stripe_declines_rather_than_fabricating() {
         .map(|o| o.arn.clone())
         .unwrap();
 
-    let err = Image::open_in_set(&image_arn, container.volumes_mut(), lexicon, &locus)
-        .expect_err("one stripe alone cannot describe the whole image");
+    let err = Image::open_in_set(
+        &image_arn,
+        container.volumes_mut(),
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .expect_err("one stripe alone cannot describe the whole image");
 
     let message = err.to_string();
     assert!(
@@ -2767,11 +2835,17 @@ fn the_volume_set_records_each_stripes_provenance() {
     )
     .unwrap();
     assert_eq!(
-        container.volumes().holding(&a).map(aff4tools::Arn::as_str),
+        container
+            .volumes()
+            .holding(&a, aff4tools::arn::NameMapping::Escaped)
+            .map(aff4tools::Arn::as_str),
         Some("aff4://7cbb47d0-b04c-42bc-8c04-87b7782739ad")
     );
     assert_eq!(
-        container.volumes().holding(&b).map(aff4tools::Arn::as_str),
+        container
+            .volumes()
+            .holding(&b, aff4tools::arn::NameMapping::Escaped)
+            .map(aff4tools::Arn::as_str),
         Some("aff4://51725cd9-3769-4be7-a8ab-94e3ea62bf9a")
     );
 }
@@ -3080,7 +3154,15 @@ fn read_at_agrees_with_sequential_reading() {
     let lexicon = container.lexicon();
     let image_arn =
         aff4tools::Arn::parse("aff4://cf853d0b-5589-4c7c-8358-2ca1572b87eb", &locus).unwrap();
-    let image = Image::open(&image_arn, container.volume_mut(), &graph, lexicon, &locus).unwrap();
+    let image = Image::open(
+        &image_arn,
+        container.volume_mut(),
+        &graph,
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
 
     // Assemble the first 8 MiB sequentially, as the traversal path delivers it.
     const WINDOW: usize = 8 * 1024 * 1024;
@@ -3141,7 +3223,15 @@ fn read_at_is_short_only_at_the_end_of_the_image() {
     let lexicon = container.lexicon();
     let image_arn =
         aff4tools::Arn::parse("aff4://cf853d0b-5589-4c7c-8358-2ca1572b87eb", &locus).unwrap();
-    let image = Image::open(&image_arn, container.volume_mut(), &graph, lexicon, &locus).unwrap();
+    let image = Image::open(
+        &image_arn,
+        container.volume_mut(),
+        &graph,
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
     let size = image.size();
 
     // Straddling the end: half the buffer can be filled.
@@ -3200,7 +3290,15 @@ fn read_at_serves_described_regions_from_their_filler() {
     let mut container = Container::open(&path).unwrap();
     let graph = container.graph().unwrap();
     let lexicon = container.lexicon();
-    let image = Image::open(&image_arn, container.volume_mut(), &graph, lexicon, &locus).unwrap();
+    let image = Image::open(
+        &image_arn,
+        container.volume_mut(),
+        &graph,
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
 
     // Find a described run through the map and read inside it.
     let described = image
@@ -3255,7 +3353,14 @@ fn read_at_in_set_agrees_on_a_striped_container() {
         .find(|o| o.role == ObjectRole::DiskImage)
         .map(|o| o.arn.clone())
         .expect("the striped fixture declares a DiskImage");
-    let image = Image::open_in_set(&image_arn, container.volumes_mut(), lexicon, &locus).unwrap();
+    let image = Image::open_in_set(
+        &image_arn,
+        container.volumes_mut(),
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
 
     const WINDOW: usize = 8 * 1024 * 1024;
     let mut sequential = Vec::with_capacity(WINDOW);
@@ -3312,7 +3417,14 @@ fn read_at_in_set_is_stable_under_seeking() {
         .find(|o| o.role == ObjectRole::DiskImage)
         .map(|o| o.arn.clone())
         .expect("the striped fixture declares a DiskImage");
-    let image = Image::open_in_set(&image_arn, container.volumes_mut(), lexicon, &locus).unwrap();
+    let image = Image::open_in_set(
+        &image_arn,
+        container.volumes_mut(),
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
 
     // Offsets chosen to alternate across a wide span, so consecutive reads are
     // likely to land in different stripes.
@@ -3369,7 +3481,14 @@ fn a_kept_reader_agrees_with_the_one_shot_call() {
         .find(|o| o.role == ObjectRole::DiskImage)
         .map(|o| o.arn.clone())
         .expect("the striped fixture declares a DiskImage");
-    let image = Image::open_in_set(&image_arn, container.volumes_mut(), lexicon, &locus).unwrap();
+    let image = Image::open_in_set(
+        &image_arn,
+        container.volumes_mut(),
+        lexicon,
+        aff4tools::arn::NameMapping::Escaped,
+        &locus,
+    )
+    .unwrap();
 
     // Offsets that move between stripes and back, so the residency is handed
     // across a stream change and then reused.
@@ -3429,7 +3548,14 @@ fn re_acquiring_an_aff4_reproduces_the_source_image() {
             .map(|o| o.arn.clone())
             .expect("a DiskImage");
         let lexicon = container.lexicon();
-        let image = Image::open_in_set(&arn, container.volumes_mut(), lexicon, &locus).unwrap();
+        let image = Image::open_in_set(
+            &arn,
+            container.volumes_mut(),
+            lexicon,
+            aff4tools::arn::NameMapping::Escaped,
+            &locus,
+        )
+        .unwrap();
         let mut hasher = sha2::Sha256::new();
         let mut total = 0u64;
         image

@@ -83,6 +83,7 @@ fn main() {
     }
 
     let lexicon = container.lexicon();
+    let container_mapping = container.name_mapping();
     let summary = match container.summarize() {
         Ok(s) => s,
         Err(e) => {
@@ -100,7 +101,13 @@ fn main() {
         std::process::exit(1);
     };
 
-    let image = match Image::open_in_set(&image_arn, container.volumes_mut(), lexicon, &locus) {
+    let image = match Image::open_in_set(
+        &image_arn,
+        container.volumes_mut(),
+        lexicon,
+        container_mapping,
+        &locus,
+    ) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("opening image: {e}");

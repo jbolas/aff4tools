@@ -3,13 +3,14 @@
 //! > Schatz, B.L. *AFF4-L: A Scalable Open Logical Evidence Container.*
 //! > Digital Investigation 29, S143–S149. DFRWS USA 2019.
 //!
-//! **Every bare section number below cites that paper**, not the AFF4
-//! Standard. Where a rule comes from the Standard instead, the citation names
-//! v1.0a explicitly.
+//! **Two documents govern this module now.** The 2019 paper specifies what
+//! `--aff4l-legacy` writes; the AFF4-L Standard v1.0-ALPHA specifies what
+//! `--aff4l-v1.0` writes. Every citation below therefore names its document,
+//! and no bare section number appears.
 //!
 //! **The paper is the specification here, not pyaff4.** The two disagree: the
 //! paper's Table 3 defines nine lexicon items and pyaff4 writes only five,
-//! omitting the whole §3.6 resource-enumeration model
+//! omitting the whole AFF4-L 2019 §3.6 resource-enumeration model
 //! (`LogicalAcquisitionTask`, `filesystemRoot`, `Folder`, `child`). A consumer
 //! of a pyaff4 logical container therefore cannot tell which paths were the
 //! acquisition roots, or walk the acquired tree. This module implements the
@@ -17,11 +18,11 @@
 //!
 //! # The three encodings
 //!
-//! - **§3.2** suspect path → ARN. Table 1's rows are test vectors below.
-//! - **§3.4** ARN → ZIP segment name, which converts percent-encoded spaces
+//! - **AFF4-L 2019 §3.2** suspect path → ARN. Table 1's rows are test vectors below.
+//! - **AFF4-L 2019 §3.4** ARN → ZIP segment name, which converts percent-encoded spaces
 //!   *back* to spaces so containers browse readably in ordinary ZIP tools.
 //!   The segment name is therefore not simply the escaped ARN tail.
-//! - **§3.3** the size split: a file at or under the threshold is stored as a
+//! - **AFF4-L 2019 §3.3** the size split: a file at or under the threshold is stored as a
 //!   ZIP segment, a larger one as an `ImageStream`. The section argues for the
 //!   hybrid; the specific threshold is the prototype's choice, not a
 //!   requirement — see [`MAX_SEGMENT_RESIDENT_SIZE`].
@@ -32,7 +33,7 @@ use std::path::Path;
 ///
 /// Local names only; the namespace is `aff4:`. **Four of these nine are never
 /// written by pyaff4** — `Folder`, `child`, `LogicalAcquisitionTask`, and
-/// `filesystemRoot`, which together are §3.6's resource-enumeration model.
+/// `filesystemRoot`, which together are AFF4-L 2019 §3.6's resource-enumeration model.
 /// They are what lets a consumer identify acquisition roots and walk the
 /// acquired tree; without them a logical container is a flat bag of files.
 pub mod terms {
@@ -63,20 +64,32 @@ pub mod terms {
     pub const LOGICAL_ACQUISITION_TASK: &str = "LogicalAcquisitionTask";
     /// Points to a Folder or `FileImage` forming an acquisition root.
     pub const FILESYSTEM_ROOT: &str = "filesystemRoot";
-    /// Marks content stored directly as a ZIP segment (§3.8).
+    /// Marks content stored directly as a ZIP segment (AFF4-L 2019 §3.8).
     pub const ZIP_SEGMENT: &str = "zip_segment";
+
+    /// The entry's own name, under AFF4-L v1.0-ALPHA §1.1.
+    ///
+    /// That clause writes both this and [`ORIGINAL_PATH_NAME`] with the
+    /// `aff4:` prefix in the requirement itself, so neither takes the second
+    /// namespace AFF4-L v1.0-ALPHA §4.1 introduces.
+    pub const FILE_NAME: &str = "fileName";
+    /// The entry's full path, under AFF4-L v1.0-ALPHA §1.1.
+    pub const ORIGINAL_PATH_NAME: &str = "originalPathName";
+    /// Marks content stored as one ZIP segment, as AFF4-L v1.0-ALPHA §6.1
+    /// spells it.
+    pub const ZIP_SEGMENT_V21: &str = "ZipSegment";
 }
 
-/// Characters §3.1 forbids in an ARN, which must be percent-encoded.
+/// Characters AFF4-L 2019 §3.1 forbids in an ARN, which must be percent-encoded.
 const FORBIDDEN: &[char] = &['<', '>', '\\', '^', '`', '{', '|', '}'];
 
-/// Characters §3.2 omits that RDF's `IRIREF` production still rejects.
+/// Characters AFF4-L 2019 §3.2 omits that RDF's `IRIREF` production still rejects.
 ///
 /// The paper's forbidden list omits them — it names only angle brackets,
 /// backslash, caret, backquote, brace and pipe — but
 /// RDF 1.1 excludes `[` and `]` from the `IRIREF` production, so an ARN
 /// carrying one raw makes `information.turtle` unparseable by any conformant
-/// reader. §3.7 then spends brackets on its own Slice Map syntax
+/// reader. AFF4-L 2019 §3.7 then spends brackets on its own Slice Map syntax
 /// (`aff4://uuid[0x0:0x8000]`) without saying what a filename containing one
 /// should do.
 ///
@@ -85,8 +98,8 @@ const FORBIDDEN: &[char] = &['<', '>', '\\', '^', '`', '{', '|', '}'];
 /// than a suspect filename's.
 ///
 /// The double quote is here for the same reason and was found the same way:
-/// `IRIREF` excludes it, §3.2 does not name it, and `/Library` holds
-/// `About "Convert" Scripts.scpt`. Together with §3.2's own list, the control
+/// `IRIREF` excludes it, AFF4-L 2019 §3.2 does not name it, and `/Library` holds
+/// `About "Convert" Scripts.scpt`. Together with AFF4-L 2019 §3.2's own list, the control
 /// codes, space and `%`, this closes the set — every character RDF 1.1
 /// forbids in an IRI is now escaped on the way in.
 ///
@@ -97,7 +110,7 @@ const ALSO_ILLEGAL_IN_IRI: &[char] = &['[', ']', '"'];
 
 /// The threshold: at or below this a file is stored as a ZIP segment.
 ///
-/// **The paper chooses this value; it does not require it.** §3.3 reads: "In
+/// **The paper chooses this value; it does not require it.** AFF4-L 2019 §3.3 reads: "In
 /// our prototype implementation we choose to store any bytestreams greater than
 /// 1M in size as Image Streams, and smaller as Zip Segments." There is no MUST
 /// or SHOULD, and the Standard does not cover logical files at all. pyaff4
@@ -106,7 +119,7 @@ const ALSO_ILLEGAL_IN_IRI: &[char] = &['[', ']', '"'];
 /// `allow_large_zipsegments` override that stores a large file as a segment
 /// anyway.
 ///
-/// What §3.3 *does* justify is the hybrid itself, and that reasoning holds: an
+/// What AFF4-L 2019 §3.3 *does* justify is the hybrid itself, and that reasoning holds: an
 /// Image Stream "requires at least two Zip Segments and an extra layer of
 /// indirection", which a large file repays and a small one does not.
 ///
@@ -115,7 +128,7 @@ const ALSO_ILLEGAL_IN_IRI: &[char] = &['[', ']', '"'];
 /// RDF subjects: a tiny file becomes a single chunk with no neighbors to
 /// compress against, so per-member deflate beats chunked compression outright.
 /// Changing the value breaks no conformance rule — readers dispatch on declared
-/// `rdf:type`, not on size — provided §3.8's rule still holds, that
+/// `rdf:type`, not on size — provided AFF4-L 2019 §3.8's rule still holds, that
 /// `aff4:zip_segment` joins the type list only when the file really is stored
 /// that way.
 pub const MAX_SEGMENT_RESIDENT_SIZE: u64 = 1024 * 1024;
@@ -129,7 +142,7 @@ fn percent_encode(out: &mut String, ch: char) {
     }
 }
 
-/// Encode a suspect path as an ARN path fragment, per §3.2.
+/// Encode a suspect path as an ARN path fragment, per AFF4-L 2019 §3.2.
 ///
 /// Rules, verbatim from the paper:
 ///
@@ -179,33 +192,71 @@ pub fn arn_for_path(volume_arn: &str, path: &str) -> String {
     format!("{volume_arn}{}", arn_path_fragment(path))
 }
 
-/// Map an ARN to its ZIP segment name, per §3.4.
+/// The ARN naming one acquired entry.
+///
+/// The two profiles disagree about what an object is called, and this is where
+/// that choice is made once. [`LogicalProfile::Legacy`] encodes the suspect
+/// path per AFF4-L 2019 §3.2; [`LogicalProfile::V1Alpha`] mints a fresh GUID per AFF4-L
+/// v1.0-ALPHA §2, and the path is recorded in properties instead.
+///
+/// # Errors
+///
+/// [`crate::Error::Io`] if the OS entropy source is unavailable while minting
+/// a GUID. That is returned rather than fallen back on: the reasoning on
+/// `container_writer::new_uuid` for a volume ARN applies per object too, since
+/// a predictable or colliding name is unrecoverable confusion about which
+/// evidence is which.
+pub fn arn_for_entry(
+    volume_arn: &str,
+    path: &str,
+    profile: LogicalProfile,
+    output: &Path,
+) -> crate::error::Result<String> {
+    match profile {
+        LogicalProfile::Legacy => Ok(arn_for_path(volume_arn, path)),
+        // `new_uuid` renders lower case, which AFF4-L v1.0-ALPHA §2 requires.
+        LogicalProfile::V1Alpha => Ok(format!(
+            "aff4://{}",
+            crate::write::container_writer::new_uuid(output)?
+        )),
+    }
+}
+
+/// Map an ARN to its ZIP segment name, per AFF4-L 2019 §3.4.
 ///
 /// Strips the volume identifier and the separator that follows it, then
 /// converts percent-encoded spaces back to literal spaces. That last step is
 /// the reason a segment name is not simply the escaped ARN tail: the paper
 /// wants containers to browse readably in `WinRAR` or 7-Zip.
 #[must_use]
-pub fn segment_name_for_arn(volume_arn: &str, arn: &str) -> String {
+pub fn segment_name_for_arn(volume_arn: &str, arn: &str, profile: LogicalProfile) -> String {
+    if profile.is_v1_alpha() {
+        // AFF4-L v1.0-ALPHA §1.2 replaces this mapping rather than amending
+        // it: the member is the ARN itself, colon and slashes intact, as that
+        // AFF4-L v1.0-ALPHA §6.1 example shows. The `%20` decode below is skipped
+        // deliberately rather than relied on to do nothing on a GUID, so a
+        // later extensible part is never silently rewritten.
+        return arn.to_owned();
+    }
     let tail = arn.strip_prefix(volume_arn).unwrap_or(arn);
     // One leading separator is removed; a non-UNC path's second slash is part
     // of the name and stays, which is what makes `/C:/foo` in Table 2.
     let tail = tail.strip_prefix('/').unwrap_or(tail);
-    // The same §3.4 decode `Arn::member_name` applies, so a file written here
+    // The same AFF4-L 2019 §3.4 decode `Arn::member_name` applies, so a file written here
     // and a stream written through the ARN land on one spelling. They drifted
     // once — this one decoding `%20`, that one re-escaping it to `%2520` — and
     // a container was written whose streams nothing could read back.
     tail.replace("%20", " ")
 }
 
-/// Whether a file of `size` bytes is stored as a ZIP segment (§3.3).
+/// Whether a file of `size` bytes is stored as a ZIP segment (AFF4-L 2019 §3.3).
 #[must_use]
 pub fn is_segment_resident(size: u64) -> bool {
     size <= MAX_SEGMENT_RESIDENT_SIZE
 }
 
 /// The paths AFF4 reserves at the volume root, which a logical file must not
-/// collide with (§3.8 via pyaff4's `isAFF4Collision`).
+/// collide with (AFF4-L 2019 §3.8 via pyaff4's `isAFF4Collision`).
 #[must_use]
 pub fn is_reserved_name(name: &str) -> bool {
     matches!(
@@ -307,9 +358,9 @@ pub fn format_rfc3339_utc(secs: u64) -> String {
 /// How a logical acquisition stores what it acquires.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogicalOptions {
-    /// Chunking and compression for files stored as `ImageStream`s (§3.3).
+    /// Chunking and compression for files stored as `ImageStream`s (AFF4-L 2019 §3.3).
     pub stream: crate::write::stream_writer::StreamOptions,
-    /// Whether to deduplicate file content per §4.
+    /// Whether to deduplicate file content per AFF4-L 2019 §4.
     ///
     /// **Off by default, deliberately.** Dedupe replaces each file's own stored
     /// bytes with references into a shared pool, so a single damaged chunk
@@ -317,6 +368,49 @@ pub struct LogicalOptions {
     /// contiguous copy of any file. That is a trade an examiner should opt into
     /// knowingly rather than inherit from a default.
     pub deduplicate: bool,
+    /// Which AFF4-L format to write.
+    pub profile: LogicalProfile,
+}
+
+/// Which AFF4-L format an acquisition writes.
+///
+/// The two are separate code paths from the ARN outward, because the standards
+/// disagree about what an object is called: [`Self::Legacy`] names a file by
+/// its suspect path, [`Self::V1Alpha`] by a GUID. Everything downstream — the
+/// segment name, where the path is recorded, the declared version — follows
+/// from that one choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogicalProfile {
+    /// The AFF4-L 2019 paper, declaring version 1.1. What this tool has always
+    /// written, and what pyaff4 writes.
+    ///
+    /// The default, and the reason is the standard rather than the code: the
+    /// AFF4-L Standard v1.0-ALPHA is a pre-release whose Canonical Reference
+    /// Images, which it says take precedence over its own text, are not
+    /// published. Until they are, the format with containers in the world is
+    /// the safer thing to write by default.
+    #[default]
+    Legacy,
+    /// The AFF4-L Standard v1.0-ALPHA, declaring version 2.1.
+    V1Alpha,
+}
+
+impl LogicalProfile {
+    /// Whether this profile writes AFF4-L Standard v1.0-ALPHA constructs.
+    #[must_use]
+    pub fn is_v1_alpha(self) -> bool {
+        matches!(self, Self::V1Alpha)
+    }
+
+    /// The version this profile's container declares.
+    #[must_use]
+    pub fn version_profile(self) -> crate::write::container_writer::VersionProfile {
+        use crate::write::container_writer::VersionProfile;
+        match self {
+            Self::Legacy => VersionProfile::Logical,
+            Self::V1Alpha => VersionProfile::LogicalV21,
+        }
+    }
 }
 
 /// What deduplication achieved over one acquisition.
@@ -377,7 +471,7 @@ pub struct LogicalAcquisition {
 
 /// Acquire `roots` into `writer` as an AFF4-L logical image.
 ///
-/// Implements §3.8's ordered recipe and §3.6's enumeration model in full.
+/// Implements AFF4-L 2019 §3.8's ordered recipe and §3.6's enumeration model in full.
 ///
 /// # Errors
 ///
@@ -402,7 +496,7 @@ pub fn acquire_logical(
         .deduplicate
         .then(|| crate::write::dedupe::ChunkPool::new(options.stream.chunk_size));
 
-    // §3.6: one acquisition task, naming each root. A named ARN rather than
+    // AFF4-L 2019 §3.6: one acquisition task, naming each root. A named ARN rather than
     // the paper's blank node `_:1` — a blank node cannot be referenced across
     // containers or survive a graph merge, and an acquisition task is exactly
     // the provenance an examiner may need to cite.
@@ -425,7 +519,7 @@ pub fn acquire_logical(
             pool.as_mut(),
             &mut result,
             on_progress,
-        );
+        )?;
         // As with `aff4:child`: the edge is asserted only for a root that was
         // actually acquired. A named root that is a symlink or a special file
         // is reported as skipped, and `filesystemRoot` must not point at a
@@ -566,6 +660,11 @@ pub fn acquire_logical_scanned(
     // this call rather than leaving a detached thread behind.
     run.join();
 
+    // Unwrapped after the join, deliberately. A minting failure must not
+    // leave the scanner thread detached, so the acquisition's own error is
+    // raised only once the thread's lifetime has ended inside this call.
+    let acquired_roots = acquired_roots?;
+
     // As in `acquire_logical`: the edge is asserted only for a root that was
     // actually acquired.
     for root_arn in acquired_roots {
@@ -631,7 +730,7 @@ pub fn acquire_logical_prescanned(
         pool.as_mut(),
         &mut result,
         on_progress,
-    );
+    )?;
 
     for root_arn in acquired_roots {
         writer.graph_mut().add(
@@ -771,7 +870,7 @@ fn acquire_from_items(
     mut pool: Option<&mut crate::write::dedupe::ChunkPool>,
     result: &mut LogicalAcquisition,
     on_progress: &mut dyn FnMut(&LogicalAcquisition),
-) -> Vec<String> {
+) -> crate::error::Result<Vec<String>> {
     use crate::write::scan::ScanItem;
     use crate::write::turtle::TurtleTerm;
 
@@ -786,7 +885,7 @@ fn acquire_from_items(
             }
             ScanItem::Dir { path } => {
                 let display = original_file_name(&path);
-                let arn = arn_for_path(volume_arn, &display);
+                let arn = arn_for_entry(volume_arn, &display, options.profile, writer.path())?;
                 let stamps = match std::fs::symlink_metadata(&path) {
                     Ok(m) => timestamps_of(&m),
                     // The directory was enumerated a moment ago; if its
@@ -794,7 +893,15 @@ fn acquire_from_items(
                     // recorded, without timestamps rather than not at all.
                     Err(_) => FsTimestamps::default(),
                 };
-                write_table_3(writer, &arn, &display, &stamps, volume_arn, true);
+                write_table_3(
+                    writer,
+                    &arn,
+                    &display,
+                    &stamps,
+                    volume_arn,
+                    options.profile,
+                    true,
+                );
                 // Both names, deliberately. The paper's Table 3 defines
                 // `aff4:Folder`; every corpus container writes
                 // `aff4:FolderImage` instead. Writing one would either depart
@@ -820,7 +927,7 @@ fn acquire_from_items(
             }
             ScanItem::DirEnd => {
                 if let Some(done) = stack.pop() {
-                    // §3.6: the containment edge pyaff4 never writes, and what
+                    // AFF4-L 2019 §3.6: the containment edge pyaff4 never writes, and what
                     // lets a consumer reconstruct the tree. Written now, and
                     // only for children that were actually acquired.
                     for child in &done.children {
@@ -839,7 +946,7 @@ fn acquire_from_items(
             }
             ScanItem::File { path, size } => {
                 let display = original_file_name(&path);
-                let arn = arn_for_path(volume_arn, &display);
+                let arn = arn_for_entry(volume_arn, &display, options.profile, writer.path())?;
                 record_file(
                     writer,
                     &path,
@@ -900,13 +1007,13 @@ fn acquire_from_items(
         // as a fully acquired tree.
     }
 
-    roots
+    Ok(roots)
 }
 
-/// Record one regular file: metadata, types, content, and §3.7 hashes, in
-/// §3.8's order.
+/// Record one regular file: metadata, types, content, and AFF4-L 2019 §3.7 hashes, in
+/// AFF4-L 2019 §3.8's order.
 ///
-/// `size` is the size the item stream reported. It is what decides the §3.3
+/// `size` is the size the item stream reported. It is what decides the AFF4-L 2019 §3.3
 /// storage form; the size actually recorded is what the read produced, so a
 /// file that changed underneath the walk is stored at its true length.
 #[allow(clippy::too_many_arguments)]
@@ -944,6 +1051,7 @@ fn record_file(
         display,
         &stamps,
         volume_arn,
+        options.profile,
         !stream_will_record_stored,
     );
 
@@ -954,15 +1062,15 @@ fn record_file(
         .graph_mut()
         .add_type(arn, &lexicon.iri(lexicon.image));
 
-    // §4: with deduplication on, every file becomes a Map over the shared chunk
-    // pool regardless of size — the §3.3 threshold does not apply, because no
+    // AFF4-L 2019 §4: with deduplication on, every file becomes a Map over the shared chunk
+    // pool regardless of size — the AFF4-L 2019 §3.3 threshold does not apply, because no
     // file has its own storage to choose a form for.
     if let Some(pool) = pool {
         record_deduplicated_file(writer, path, arn, size, pool, result);
         return;
     }
 
-    // §3.3: small files are ZIP segments, large ones ImageStreams. The large
+    // AFF4-L 2019 §3.3: small files are ZIP segments, large ones ImageStreams. The large
     // path streams — a file above the threshold must never be read whole into
     // memory, which is the whole reason the threshold exists.
     if !is_segment_resident(size) {
@@ -989,7 +1097,7 @@ fn record_file(
         result.changed.push((path.to_path_buf(), size, actual));
     }
 
-    // §3.7: SHA-1 and MD5 linear bitstream hashes, both.
+    // AFF4-L 2019 §3.7: SHA-1 and MD5 linear bitstream hashes, both.
     {
         use md5::Digest as _;
         let md5 = hex_lower(&md5::Md5::digest(&bytes));
@@ -1012,7 +1120,7 @@ fn record_file(
         );
     }
 
-    let segment = segment_name_for_arn(volume_arn, arn);
+    let segment = segment_name_for_arn(volume_arn, arn, options.profile);
     if is_reserved_name(&segment) {
         result.skipped.push((
             path.to_path_buf(),
@@ -1021,10 +1129,17 @@ fn record_file(
         return;
     }
 
-    // §3.8: zip_segment joins the type list only when so stored.
+    // AFF4-L 2019 §3.8, and AFF4-L v1.0-ALPHA §6.1: the type joins the list only when the
+    // file really is stored that way. The two documents spell it differently,
+    // and each container gets the spelling its own document defines.
+    let zip_segment_term = if options.profile.is_v1_alpha() {
+        terms::ZIP_SEGMENT_V21
+    } else {
+        terms::ZIP_SEGMENT
+    };
     writer
         .graph_mut()
-        .add_type(arn, &lexicon.iri(terms::ZIP_SEGMENT));
+        .add_type(arn, &lexicon.iri(zip_segment_term));
     if let Err(e) = writer.add_deflated_segment(&segment, &bytes) {
         result.skipped.push((path.to_path_buf(), e.to_string()));
         return;
@@ -1033,10 +1148,10 @@ fn record_file(
     result.bytes += actual;
 }
 
-/// Record one file as a deduplicated `Map` over the shared chunk pool (§4).
+/// Record one file as a deduplicated `Map` over the shared chunk pool (AFF4-L 2019 §4).
 ///
 /// The file's chunks go into `pool`; its map is written later, once every file
-/// has contributed and the shared stream's target list is final. The §3.7
+/// has contributed and the shared stream's target list is final. The AFF4-L 2019 §3.7
 /// digests are computed here over the file's **true** bytes — not the NUL-padded
 /// chunks — so a deduplicated container's recorded hashes are the same values a
 /// non-deduplicated one would record, and match what `sha1sum` says of the
@@ -1133,11 +1248,11 @@ impl<R: std::io::Read> std::io::Read for HashingReader<R> {
     }
 }
 
-/// Record a file above the §3.3 threshold as an `ImageStream`.
+/// Record a file above the AFF4-L 2019 §3.3 threshold as an `ImageStream`.
 ///
 /// **Streamed, never buffered.** The file is read in chunks straight into the
 /// bevy builder, which is the point of the threshold: a multi-gigabyte file must
-/// not need multi-gigabyte memory. `write_image_stream_as` computes the §3.7
+/// not need multi-gigabyte memory. `write_image_stream_as` computes the AFF4-L 2019 §3.7
 /// digests in that same pass, so nothing is re-read to hash it.
 ///
 /// # The file ARN *is* the stream
@@ -1151,7 +1266,7 @@ impl<R: std::io::Read> std::io::Read for HashingReader<R> {
 /// own ARN joined by `dataStream`; that reads as a `DiskImage` naming a Map, so
 /// our own reader looked for `map` and `idx` members that a logical file does
 /// not have, and failed with "specified file not found in archive". The corpus
-/// form also keeps §3.4's promise that the container browses readably: the
+/// form also keeps AFF4-L 2019 §3.4's promise that the container browses readably: the
 /// bevies sit exactly where the file does.
 fn record_large_file(
     writer: &mut crate::write::container_writer::ContainerWriter,
@@ -1178,7 +1293,7 @@ fn record_large_file(
         }
     };
 
-    // §3.7: SHA-1 and MD5, the paper's pair, computed over the bytes stored.
+    // AFF4-L 2019 §3.7: SHA-1 and MD5, the paper's pair, computed over the bytes stored.
     let algorithms = [HashAlgorithm::Sha1, HashAlgorithm::Md5];
     let written = match write_image_stream_as(writer, arn, &mut file, options, &algorithms, &locus)
     {
@@ -1210,6 +1325,23 @@ fn record_large_file(
     result.bytes += written.size;
 }
 
+/// The last component of a recorded path — the entry's own name.
+///
+/// AFF4-L v1.0-ALPHA §1.1 records the full path and the name separately, and
+/// this derives the second from the first rather than taking it from the
+/// filesystem again, so the two can never disagree about one entry.
+///
+/// Both separators are split on: a path recorded on Windows carries
+/// backslashes, and the acquiring host is not necessarily the one that
+/// recorded it. A trailing separator yields the component before it, so a
+/// folder path names the folder rather than the empty string.
+fn entry_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+}
+
 /// Write Table 3's common metadata for one entry.
 ///
 /// `record_stored` is false for a file whose bytes become an `ImageStream`:
@@ -1225,17 +1357,35 @@ fn write_table_3(
     display: &str,
     stamps: &FsTimestamps,
     volume_arn: &str,
+    profile: LogicalProfile,
     record_stored: bool,
 ) {
     use crate::write::turtle::{TurtleTerm, XSD_DATE_TIME, XSD_STRING};
 
     let lexicon = crate::lexicon::STANDARD;
     let graph = writer.graph_mut();
-    graph.add(
-        arn,
-        &lexicon.iri(terms::ORIGINAL_FILE_NAME),
-        TurtleTerm::typed(display, XSD_STRING),
-    );
+    if profile.is_v1_alpha() {
+        // AFF4-L v1.0-ALPHA §1.1: the name is a GUID, so the path is carried
+        // here or nowhere. Both properties are written, because the full path
+        // and the entry's own name answer different questions and AFF4-L 2019 §1.1 names
+        // both.
+        graph.add(
+            arn,
+            &lexicon.iri(terms::ORIGINAL_PATH_NAME),
+            TurtleTerm::typed(display, XSD_STRING),
+        );
+        graph.add(
+            arn,
+            &lexicon.iri(terms::FILE_NAME),
+            TurtleTerm::typed(entry_name(display), XSD_STRING),
+        );
+    } else {
+        graph.add(
+            arn,
+            &lexicon.iri(terms::ORIGINAL_FILE_NAME),
+            TurtleTerm::typed(display, XSD_STRING),
+        );
+    }
     for (term, value) in [
         (terms::BIRTH_TIME, &stamps.birth),
         (terms::LAST_WRITTEN, &stamps.written),
@@ -1362,7 +1512,7 @@ mod tests {
 
         for (arn, expected) in cases {
             assert_eq!(
-                segment_name_for_arn(VOLUME, arn),
+                segment_name_for_arn(VOLUME, arn, LogicalProfile::Legacy),
                 expected,
                 "Table 2 vector failed for {arn:?}"
             );
@@ -1398,8 +1548,10 @@ mod tests {
             let arn = format!("{VOLUME}{tail}");
             let parsed = crate::arn::Arn::parse(&arn, &locus).unwrap();
             assert_eq!(
-                parsed.member_name(&volume).as_deref(),
-                Some(segment_name_for_arn(VOLUME, &arn).as_str()),
+                parsed
+                    .member_name(&volume, crate::arn::NameMapping::Escaped)
+                    .as_deref(),
+                Some(segment_name_for_arn(VOLUME, &arn, LogicalProfile::Legacy).as_str()),
                 "the two naming paths disagree for {tail:?}"
             );
         }
@@ -1407,11 +1559,11 @@ mod tests {
 
     /// A bracket in a suspect filename must be percent-encoded.
     ///
-    /// `[` and `]` are not in §3.2's forbidden list — which names only angle
+    /// `[` and `]` are not in AFF4-L 2019 §3.2's forbidden list — which names only angle
     /// brackets, backslash, caret, backquote, brace and pipe — but they are
     /// excluded from Turtle's `IRIREF` production,
     /// so an ARN carrying one raw makes `information.turtle` unparseable. The
-    /// paper never reconciles this: §3.7's Slice Map syntax
+    /// paper never reconciles this: AFF4-L 2019 §3.7's Slice Map syntax
     /// (`aff4://uuid[0x0:0x8000]`) puts brackets inside an IRI without saying
     /// how a *filename* containing one should be written.
     ///
@@ -1434,7 +1586,7 @@ mod tests {
 
     /// Every character RDF 1.1 forbids in an IRI must be escaped.
     ///
-    /// Asserted as a set rather than one case at a time: §3.2's list predates
+    /// Asserted as a set rather than one case at a time: AFF4-L 2019 §3.2's list predates
     /// the containers this tool writes, and each character missing from it
     /// surfaced only when a real acquisition hit it — `[` from `man1/[.1`,
     /// then `"` from `About "Convert" Scripts.scpt`, one after the other, each
@@ -1460,7 +1612,7 @@ mod tests {
 
     /// The escape must round-trip to the original name.
     ///
-    /// The member keeps the escape — §3.4 decodes only `%20` — so what proves
+    /// The member keeps the escape — AFF4-L 2019 §3.4 decodes only `%20` — so what proves
     /// the acquisition faithful is that the recorded path still names the file.
     #[test]
     fn a_bracketed_name_round_trips_through_its_arn() {
@@ -1478,7 +1630,7 @@ mod tests {
         }
     }
 
-    /// Unicode is preserved, not escaped — §3.2 rule 3, and what makes a
+    /// Unicode is preserved, not escaped — AFF4-L 2019 §3.2 rule 3, and what makes a
     /// container readable in an ordinary ZIP browser.
     #[test]
     fn unicode_survives_unescaped() {
@@ -1490,7 +1642,7 @@ mod tests {
         );
     }
 
-    /// Forbidden characters and controls are encoded; the set is §3.1's.
+    /// Forbidden characters and controls are encoded; the set is AFF4-L 2019 §3.1's.
     #[test]
     fn forbidden_characters_are_encoded() {
         let arn = arn_for_path(VOLUME, "/tmp/a<b>c|d");
@@ -1542,7 +1694,7 @@ mod tests {
         );
     }
 
-    /// The §3.3 split threshold.
+    /// The AFF4-L 2019 §3.3 split threshold.
     #[test]
     fn the_segment_threshold_is_one_mebibyte() {
         assert!(is_segment_resident(0));
@@ -1566,7 +1718,7 @@ mod tests {
     fn paths_with_spaces_round_trip() {
         let arn = arn_for_path(VOLUME, "/foo/some file");
         assert!(arn.contains("%20"), "the ARN escapes the space: {arn}");
-        let segment = segment_name_for_arn(VOLUME, &arn);
+        let segment = segment_name_for_arn(VOLUME, &arn, LogicalProfile::Legacy);
         assert_eq!(segment, "/foo/some file", "the segment name restores it");
     }
 
@@ -1644,7 +1796,8 @@ mod tests {
             None,
             &mut result,
             &mut noop,
-        );
+        )
+        .expect("minting cannot fail with a working entropy source");
 
         // 1. Both unclosed directories are reported, so the acquisition is
         //    known to be incomplete instead of passing for a clean run.
@@ -1727,7 +1880,8 @@ mod tests {
             None,
             &mut result,
             &mut noop,
-        );
+        )
+        .expect("minting cannot fail with a working entropy source");
 
         assert!(
             result.skipped.is_empty(),
@@ -1787,7 +1941,8 @@ mod tests {
             None,
             &mut result,
             &mut noop,
-        );
+        )
+        .expect("minting cannot fail with a working entropy source");
         writer.finish().unwrap();
 
         assert_eq!(

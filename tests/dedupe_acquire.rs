@@ -182,8 +182,14 @@ fn deduplicated_files_read_back_byte_identically() {
         }
 
         let lexicon = container.lexicon();
-        let image = aff4tools::Image::open_in_set(&arn, container.volumes_mut(), lexicon, &locus)
-            .unwrap_or_else(|e| panic!("{name} must resolve through its map: {e}"));
+        let image = aff4tools::Image::open_in_set(
+            &arn,
+            container.volumes_mut(),
+            lexicon,
+            aff4tools::arn::NameMapping::Escaped,
+            &locus,
+        )
+        .unwrap_or_else(|e| panic!("{name} must resolve through its map: {e}"));
 
         let mut back = Vec::new();
         image

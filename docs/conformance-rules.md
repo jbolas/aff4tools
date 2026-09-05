@@ -42,7 +42,11 @@ registry in `src/rules/catalog.rs`.
 
 | Rule | Level | State | Requirement |
 |---|---|---|---|
-| `AFF4L_V1_ALPHA/1.1/1` (§1.1) | MUST | not implemented | AFF4 objects are named by ARN, with the suspect's path and file name carried in properties rather than encoded into the name. |
+| `AFF4L_V1_ALPHA/1.1/1` (§1.1) | MUST | detected | AFF4 objects are named by ARN, with the suspect's path and file name carried in properties rather than encoded into the name. |
+| `AFF4L_V1_ALPHA/1.1/2` (§1.1) | MUST | detected | A logical file records its name and path in properties, since its resource name no longer carries them. |
+| `AFF4L_V1_ALPHA/1.2/1` (§1.2) | MUST | detected | A segment name derived from an object's resource name leaves the scheme and authority unescaped. |
+| `AFF4L_V1_ALPHA/2/1` (§2) | MUST | detected | An object's resource name is the AFF4 scheme followed by a lower-case GUID. |
+| `AFF4L_V1_ALPHA/2/2` (§2) | MAY | not checkable | A resource name may carry a further part after its GUID, provided the whole remains a valid IRI. |
 | `AFF4L_V1_ALPHA/4.1/1` (§4.1) | MUST | not implemented | A writer emits new lexicon terms under the namespace its governing standard assigns them. |
 | `AFF4L_V1_ALPHA/4.1/2` (§4.1) | MAY | not implemented | A reader may accept either namespace prefix for a lexicon term, so that containers written against the earlier schema still read. |
 | `AFF4L_V1_ALPHA/6/1` (§6) | MUST | not implemented | A reader handles every storage stream form this section describes, not a chosen subset. |
@@ -69,4 +73,4 @@ registry in `src/rules/catalog.rs`.
 
 ## Coverage
 
-13 of 39 declared rules are checked.
+17 of 43 declared rules are checked.

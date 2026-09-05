@@ -77,8 +77,9 @@ pub fn write_map_as(
     let map_arn = map_arn.to_owned();
     let image_arn = image_arn.to_owned();
 
+    let mapping = writer.name_mapping();
     let base = crate::arn::Arn::parse(&map_arn, locus)?
-        .member_name(&volume)
+        .member_name(&volume, mapping)
         .ok_or_else(|| {
             crate::error::Error::malformed(
                 locus.clone(),
@@ -251,8 +252,9 @@ pub fn write_slice_map(
     let volume = writer.volume_arn().clone();
     let volume_arn = volume.as_str().to_owned();
 
+    let mapping = writer.name_mapping();
     let base = crate::arn::Arn::parse(file_arn, locus)?
-        .member_name(&volume)
+        .member_name(&volume, mapping)
         .ok_or_else(|| {
             crate::error::Error::malformed(
                 locus.clone(),
@@ -405,9 +407,14 @@ mod tests {
         // And it must reproduce the source through the map.
         let lexicon = container.lexicon();
         let arn = crate::arn::Arn::parse(&written.image_arn, &locus).unwrap();
-        let image =
-            crate::image::Image::open_in_set(&arn, container.volumes_mut(), lexicon, &locus)
-                .expect("the image must resolve through its map");
+        let image = crate::image::Image::open_in_set(
+            &arn,
+            container.volumes_mut(),
+            lexicon,
+            crate::arn::NameMapping::Escaped,
+            &locus,
+        )
+        .expect("the image must resolve through its map");
 
         let mut back = Vec::new();
         image

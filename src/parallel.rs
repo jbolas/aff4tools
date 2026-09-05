@@ -598,6 +598,8 @@ impl Drop for WorkerExit<'_> {
 struct ReadLimits {
     /// The volume's ARN, for naming bevy members.
     volume_arn: crate::arn::Arn,
+    /// Which ARN-to-segment rules the container's generation puts in force.
+    mapping: crate::arn::NameMapping,
     /// How many bevies the stream declares.
     bevy_count: u64,
     /// The most readers the governor may admit.
@@ -617,13 +619,8 @@ fn read_bevies(
     limits: &ReadLimits,
     ordinal: usize,
 ) {
-    let ReadLimits {
-        volume_arn,
-        bevy_count,
-        ceiling,
-        lookahead,
-    } = limits;
-    let (bevy_count, ceiling, lookahead) = (*bevy_count, *ceiling, *lookahead);
+    let (volume_arn, mapping) = (&limits.volume_arn, limits.mapping);
+    let (bevy_count, ceiling, lookahead) = (limits.bevy_count, limits.ceiling, limits.lookahead);
     // Wait for admission before paying for a handle: a reader the governor
     // never admits should not open a file or parse a central directory.
     if !shared.governor.admits(ordinal) {
@@ -690,7 +687,7 @@ fn read_bevies(
             return;
         }
 
-        let Some(name) = shared.stream.bevy_name(volume_arn, seq) else {
+        let Some(name) = shared.stream.bevy_name(volume_arn, mapping, seq) else {
             shared.failure.record(
                 seq,
                 Error::malformed(
@@ -946,6 +943,7 @@ struct Shared<'a> {
 pub fn read_all_parallel(
     stream: &ImageStream,
     volume: &(impl ParallelVolume + ?Sized),
+    mapping: crate::arn::NameMapping,
     plan: ThreadPlan,
     sink: &mut dyn FnMut(&[u8]) -> Result<()>,
     on_bevy: &mut dyn FnMut(u64),
@@ -1017,6 +1015,7 @@ pub fn read_all_parallel(
 
     let limits = ReadLimits {
         volume_arn,
+        mapping,
         bevy_count,
         ceiling: reader_ceiling,
         lookahead,

@@ -36,7 +36,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::arn::Arn;
+use crate::arn::{Arn, NameMapping};
 use crate::codec::{Codec, decompress_chunk};
 use crate::error::{Error, Locus, Result};
 use crate::lexicon::Lexicon;
@@ -187,8 +187,8 @@ impl ImageStream {
     /// Returns `None` when the ARN names no member of this volume — a stream
     /// stored in a sibling container, as striped volumes have.
     #[must_use]
-    pub fn bevy_name(&self, volume_arn: &Arn, index: u64) -> Option<String> {
-        let base = self.arn.member_name(volume_arn)?;
+    pub fn bevy_name(&self, volume_arn: &Arn, mapping: NameMapping, index: u64) -> Option<String> {
+        let base = self.arn.member_name(volume_arn, mapping)?;
         Some(format!("{base}/{index:08}"))
     }
 
@@ -205,10 +205,11 @@ impl ImageStream {
     pub fn read_all(
         &self,
         volume: &mut dyn Volume,
+        mapping: NameMapping,
         sink: &mut dyn FnMut(&[u8]) -> Result<()>,
         locus: &Locus,
     ) -> Result<()> {
-        self.read_all_observed(volume, sink, &mut |_| {}, locus)
+        self.read_all_observed(volume, mapping, sink, &mut |_| {}, locus)
     }
 
     /// Decompress one bevy into its chunks, in chunk order.
@@ -260,6 +261,7 @@ impl ImageStream {
     pub fn read_all_observed(
         &self,
         volume: &mut dyn Volume,
+        mapping: NameMapping,
         sink: &mut dyn FnMut(&[u8]) -> Result<()>,
         on_bevy: &mut dyn FnMut(u64),
         locus: &Locus,
@@ -273,16 +275,18 @@ impl ImageStream {
                 break;
             }
 
-            let bevy_name = self.bevy_name(&volume_arn, bevy_index).ok_or_else(|| {
-                Error::malformed(
-                    locus.clone(),
-                    format!(
-                        "stream {} names no member of volume {volume_arn}; its data \
+            let bevy_name = self
+                .bevy_name(&volume_arn, mapping, bevy_index)
+                .ok_or_else(|| {
+                    Error::malformed(
+                        locus.clone(),
+                        format!(
+                            "stream {} names no member of volume {volume_arn}; its data \
                          is stored elsewhere, which this build cannot follow",
-                        self.arn
-                    ),
-                )
-            })?;
+                            self.arn
+                        ),
+                    )
+                })?;
 
             let index_name = format!("{bevy_name}{INDEX_SUFFIX}");
             let bevy_locus = locus.clone().segment(&bevy_name);
@@ -359,6 +363,8 @@ pub struct ChunkReader<'v> {
     stream: ImageStream,
     volume: &'v mut dyn Volume,
     volume_arn: Arn,
+    /// Which ARN-to-segment rules the container's generation puts in force.
+    mapping: NameMapping,
     /// The bevies currently resident, most-recently-used last.
     ///
     /// Holding more than one amortizes a member read across the chunks taken
@@ -465,12 +471,13 @@ struct Bevy {
 impl<'v> ChunkReader<'v> {
     /// Open a reader over `stream`, drawing segments from `volume`.
     #[must_use]
-    pub fn new(stream: &ImageStream, volume: &'v mut dyn Volume) -> Self {
+    pub fn new(stream: &ImageStream, volume: &'v mut dyn Volume, mapping: NameMapping) -> Self {
         let volume_arn = volume.arn().clone();
         Self {
             stream: stream.clone(),
             volume,
             volume_arn,
+            mapping,
             resident: Vec::new(),
             chunk: HashMap::new(),
             chunk_order: VecDeque::new(),
@@ -722,7 +729,10 @@ impl<'v> ChunkReader<'v> {
         within_bevy: usize,
         locus: &Locus,
     ) -> Result<Option<Vec<u8>>> {
-        let Some(bevy_name) = self.stream.bevy_name(&self.volume_arn, bevy_index) else {
+        let Some(bevy_name) = self
+            .stream
+            .bevy_name(&self.volume_arn, self.mapping, bevy_index)
+        else {
             return Ok(None);
         };
 
@@ -809,7 +819,7 @@ impl<'v> ChunkReader<'v> {
 
         let bevy_name = self
             .stream
-            .bevy_name(&self.volume_arn, bevy_index)
+            .bevy_name(&self.volume_arn, self.mapping, bevy_index)
             .ok_or_else(|| {
                 Error::malformed(
                     locus.clone(),
@@ -1218,11 +1228,11 @@ mod tests {
         };
 
         assert_eq!(
-            stream.bevy_name(&volume, 0).unwrap(),
+            stream.bevy_name(&volume, NameMapping::Escaped, 0).unwrap(),
             "aff4%3A%2F%2Fc215ba20-5648-4209-a793-1f918c723610/00000000"
         );
         assert_eq!(
-            stream.bevy_name(&volume, 42).unwrap(),
+            stream.bevy_name(&volume, NameMapping::Escaped, 42).unwrap(),
             "aff4%3A%2F%2Fc215ba20-5648-4209-a793-1f918c723610/00000042"
         );
     }

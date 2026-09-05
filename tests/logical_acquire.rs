@@ -358,6 +358,7 @@ fn a_large_logical_file_reads_back_byte_identically() {
     stream
         .read_all(
             container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes: &[u8]| {
                 back.extend_from_slice(bytes);
                 Ok(())

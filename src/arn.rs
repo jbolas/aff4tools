@@ -39,6 +39,38 @@ const SCHEME: &str = "aff4://";
 /// characters excluded from RFC 3987 IRIs.
 const FORBIDDEN: &[char] = &['<', '>', '\\', '^', '`', '{', '|', '}', '"', ' '];
 
+/// Which ARN-to-segment rules a container's generation puts in force.
+///
+/// The two generations disagree only about an ARN naming an authority other
+/// than the volume's own. Under [`Self::Escaped`] the scheme and identifier
+/// become a single percent-escaped directory name; under [`Self::Literal`]
+/// they are stored as they are written.
+///
+/// # Why this is a parameter rather than a second method
+///
+/// Every caller resolving an ARN to a member must decide which rule applies,
+/// and the answer comes from the container's
+/// [`crate::lexicon::Generation`]. Passing it makes the compiler enumerate the
+/// call sites: a site that has not been considered does not build. A separate
+/// `member_name_v21` would have let every existing site keep the old rule
+/// silently, and a missed site is a misresolution rather than an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameMapping {
+    /// AFF4 Standard v1.0a §5.2 rule 1: the scheme and identifier of a foreign
+    /// authority are percent-escaped into one directory name.
+    ///
+    /// In force for v1.0 and v1.1 containers.
+    Escaped,
+    /// AFF4-L Standard v1.0-ALPHA §1.2: that prefix is no longer escaped.
+    ///
+    /// In force for v2.1 containers. AFF4-L v1.0-ALPHA §1.2 states only that
+    /// the escaping stops, not what replaces it. AFF4-L v1.0-ALPHA §6.1
+    /// settles it by example, showing a stored member named
+    /// `aff4://28617d0f-…` with its colon and slashes intact at the root of
+    /// the archive.
+    Literal,
+}
+
 /// A byte range attached to an ARN by pyaff4's `ByteRangeARN` extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ByteRange {
@@ -250,33 +282,54 @@ impl Arn {
     /// `%` itself, a `%2520` in an ARN means a file literally named `%20`, and
     /// decoding only `%20` here preserves that distinction.
     ///
-    /// The absolute case still escapes: its `aff4://` prefix is URI syntax
-    /// rather than a suspect path, and v1.0a §5.2 rule 1 requires it be
-    /// encoded into
-    /// one directory name.
+    /// Under [`NameMapping::Escaped`] the absolute case still escapes: its
+    /// `aff4://` prefix is URI syntax rather than a suspect path, and
+    /// v1.0a §5.2 rule 1 requires it be encoded into one directory name.
+    ///
+    /// # The v2.1 mapping
+    ///
+    /// Under [`NameMapping::Literal`] that prefix is kept as written, per
+    /// AFF4-L v1.0-ALPHA §1.2, so `aff4://28617d0f-…` names the member
+    /// `aff4://28617d0f-…`.
+    ///
+    /// The `%20` decode is skipped there too. It exists to implement
+    /// AFF4-L 2019 §3.4, which v1.0-ALPHA §1.2 replaces rather than amends; a
+    /// v2.1 name is a GUID and carries no encoded space to decode. Skipping it
+    /// deliberately rather than relying on it to do nothing is what keeps a
+    /// later extensible part — which AFF4-L v1.0-ALPHA §2 permits, and which
+    /// may contain anything IRI-legal — from being silently rewritten.
     ///
     /// A byte-range suffix names a slice of a stream rather than a stored
     /// segment, so it never maps to a member; this returns [`None`] for one.
     #[must_use]
-    pub fn member_name(&self, volume: &Arn) -> Option<String> {
+    pub fn member_name(&self, volume: &Arn, mapping: NameMapping) -> Option<String> {
         if self.is_byte_range() {
             return None;
         }
 
         if self.is_within(volume) {
-            // Relative: drop the volume and the URI separator, then apply the
-            // one AFF4-L 2019 §3.4 transformation. An ARN equal to the volume
-            // itself names
-            // no member.
-            return self.stored_path().map(decode_escaped_spaces);
+            // Relative: drop the volume and the URI separator. An ARN equal to
+            // the volume itself names no member.
+            let path = self.stored_path()?;
+            return Some(match mapping {
+                // The one AFF4-L 2019 §3.4 transformation.
+                NameMapping::Escaped => decode_escaped_spaces(path),
+                NameMapping::Literal => path.to_owned(),
+            });
         }
 
-        // Absolute: escape the volume into one directory name, then append the
-        // stored path separated by a single '/'.
-        let mut name = escape_component(self.volume());
+        // Absolute: the volume prefix, escaped or not per the generation, then
+        // the stored path separated by a single '/'.
+        let mut name = match mapping {
+            NameMapping::Escaped => escape_component(self.volume()),
+            NameMapping::Literal => self.volume().to_owned(),
+        };
         if let Some(path) = self.stored_path() {
             name.push('/');
-            name.push_str(&decode_escaped_spaces(path));
+            match mapping {
+                NameMapping::Escaped => name.push_str(&decode_escaped_spaces(path)),
+                NameMapping::Literal => name.push_str(path),
+            }
         }
         Some(name)
     }
@@ -494,7 +547,7 @@ mod tests {
         let volume = Arn::parse(STD_VOLUME, &locus()).unwrap();
         let stream = Arn::parse(&format!("{STD_STREAM}/00000000"), &locus()).unwrap();
         assert_eq!(
-            stream.member_name(&volume).unwrap(),
+            stream.member_name(&volume, NameMapping::Escaped).unwrap(),
             "aff4%3A%2F%2Fc215ba20-5648-4209-a793-1f918c723610/00000000"
         );
     }
@@ -524,7 +577,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            file.member_name(&volume).unwrap(),
+            file.member_name(&volume, NameMapping::Escaped).unwrap(),
             "/test_images/AFF4Std/Base-Linear.aff4/00000000"
         );
     }
@@ -551,7 +604,12 @@ mod tests {
             ),
         ] {
             let parsed = Arn::parse(&arn, &locus()).unwrap();
-            assert_eq!(parsed.member_name(&std_volume).as_deref(), Some(expected));
+            assert_eq!(
+                parsed
+                    .member_name(&std_volume, NameMapping::Escaped)
+                    .as_deref(),
+                Some(expected)
+            );
         }
 
         // AFF4-L/unicode.aff4 — the local volume, relative form.
@@ -570,7 +628,9 @@ mod tests {
         ] {
             let parsed = Arn::parse(&arn, &locus()).unwrap();
             assert_eq!(
-                parsed.member_name(&logical_volume).as_deref(),
+                parsed
+                    .member_name(&logical_volume, NameMapping::Escaped)
+                    .as_deref(),
                 Some(expected)
             );
         }
@@ -609,7 +669,7 @@ mod tests {
         ] {
             let arn = Arn::parse(&format!("{LOGICAL_VOLUME}{tail}"), &locus()).unwrap();
             assert_eq!(
-                arn.member_name(&volume).as_deref(),
+                arn.member_name(&volume, NameMapping::Escaped).as_deref(),
                 Some(expected),
                 "pyaff4 vector failed for {tail:?}"
             );
@@ -631,7 +691,7 @@ mod tests {
             &locus(),
         )
         .unwrap();
-        let name = arn.member_name(&volume).unwrap();
+        let name = arn.member_name(&volume, NameMapping::Escaped).unwrap();
         assert!(
             !name.contains("%25"),
             "an already-escaped ARN must not be escaped again, got {name}"
@@ -657,17 +717,19 @@ mod tests {
         let spaced = Arn::parse(&format!("{LOGICAL_VOLUME}//foo/some%20file"), &locus()).unwrap();
 
         assert_eq!(
-            literal.member_name(&volume).as_deref(),
+            literal
+                .member_name(&volume, NameMapping::Escaped)
+                .as_deref(),
             Some("/foo/some%2520file"),
             "a file named `some%20file` keeps its escape"
         );
         assert_eq!(
-            spaced.member_name(&volume).as_deref(),
+            spaced.member_name(&volume, NameMapping::Escaped).as_deref(),
             Some("/foo/some file")
         );
         assert_ne!(
-            literal.member_name(&volume),
-            spaced.member_name(&volume),
+            literal.member_name(&volume, NameMapping::Escaped),
+            spaced.member_name(&volume, NameMapping::Escaped),
             "the two must never collide on one member name"
         );
     }
@@ -675,7 +737,7 @@ mod tests {
     #[test]
     fn a_volume_arn_names_no_member_of_itself() {
         let volume = Arn::parse(STD_VOLUME, &locus()).unwrap();
-        assert_eq!(volume.member_name(&volume), None);
+        assert_eq!(volume.member_name(&volume, NameMapping::Escaped), None);
     }
 
     #[test]
@@ -723,7 +785,7 @@ mod tests {
     fn byte_range_arns_map_to_no_member() {
         let volume = Arn::parse(STD_VOLUME, &locus()).unwrap();
         let ranged = Arn::parse("aff4://6a1e6a1a-8d78-43c7-bd5a[0x0:0x8000]", &locus()).unwrap();
-        assert_eq!(ranged.member_name(&volume), None);
+        assert_eq!(ranged.member_name(&volume, NameMapping::Escaped), None);
     }
 
     /// A malformed range must be reported, not silently treated as a path.
@@ -784,7 +846,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            arn.member_name(&volume).as_deref(),
+            arn.member_name(&volume, NameMapping::Escaped).as_deref(),
             Some("/tmp/\u{30cd}\u{30b3}.txt")
         );
     }

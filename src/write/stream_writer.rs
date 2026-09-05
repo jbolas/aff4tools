@@ -167,12 +167,14 @@ pub fn write_image_stream_observed(
     // write are by construction the names it will look for. Re-implementing the
     // escaping here would be a second source of truth, and the two could drift.
     let parsed = crate::arn::Arn::parse(&stream_arn, locus)?;
-    let base = parsed.member_name(&volume).ok_or_else(|| {
-        crate::error::Error::malformed(
-            locus.clone(),
-            format!("stream {stream_arn} names no member of volume {volume_arn}"),
-        )
-    })?;
+    let base = parsed
+        .member_name(&volume, writer.name_mapping())
+        .ok_or_else(|| {
+            crate::error::Error::malformed(
+                locus.clone(),
+                format!("stream {stream_arn} names no member of volume {volume_arn}"),
+            )
+        })?;
 
     let mut hasher = MultiHasher::for_algorithms(algorithms);
     let mut builder = BevyBuilder::new(
@@ -306,12 +308,14 @@ pub fn write_image_stream_bounded(
     let volume_arn = volume.as_str().to_owned();
     let stream_arn = stream_arn.to_owned();
     let parsed = crate::arn::Arn::parse(&stream_arn, locus)?;
-    let base = parsed.member_name(&volume).ok_or_else(|| {
-        crate::error::Error::malformed(
-            locus.clone(),
-            format!("stream {stream_arn} names no member of volume {volume_arn}"),
-        )
-    })?;
+    let base = parsed
+        .member_name(&volume, writer.name_mapping())
+        .ok_or_else(|| {
+            crate::error::Error::malformed(
+                locus.clone(),
+                format!("stream {stream_arn} names no member of volume {volume_arn}"),
+            )
+        })?;
 
     let mut builder = BevyBuilder::new(
         options.codec,

@@ -259,6 +259,29 @@ enum Command {
         /// one-to-one. That is a trade worth making knowingly, not by default.
         #[arg(long, requires = "logical", conflicts_with_all = ["images", "device"])]
         deduplicate: bool,
+
+        /// Write the AFF4-L format aff4tools has always written. `--logical`
+        /// only. The default.
+        ///
+        /// The format of the AFF4-L 2019 paper, which pyaff4 also writes: a
+        /// container declaring version 1.1 whose files are named by their
+        /// suspect path.
+        #[arg(long = "aff4l-legacy", requires = "logical",
+              conflicts_with_all = ["images", "device", "aff4l_v1_0"])]
+        aff4l_legacy: bool,
+
+        /// Write an AFF4-L Standard v1.0-ALPHA container. `--logical` only.
+        ///
+        /// A container declaring version 2.1, whose files are named by GUID
+        /// with their paths recorded in properties.
+        ///
+        /// **Not the default yet.** The standard is a pre-release whose
+        /// Canonical Reference Images, which it says take precedence over its
+        /// own text, are not published. The default moves here once they are;
+        /// naming either flag explicitly keeps working across that change.
+        #[arg(long = "aff4l-v1.0", requires = "logical",
+              conflicts_with_all = ["images", "device", "aff4l_legacy"])]
+        aff4l_v1_0: bool,
     },
 
     /// Write a disk image out as raw dd; or, export logical files to a directory.
@@ -521,6 +544,8 @@ fn run() -> ExitCode {
             deduplicate,
             log,
             scan_first,
+            aff4l_legacy,
+            aff4l_v1_0,
         } => run_acquire(
             &images,
             &logical,
@@ -536,6 +561,16 @@ fn run() -> ExitCode {
                 deduplicate,
                 split_after: split_file.map(SplitSize::bytes),
                 scan_first,
+                // Clap enforces the exclusion, so the two flags cannot both be
+                // set. `--aff4l-legacy` is named for symmetry and to let a
+                // script pin today's format across the change of default; it
+                // selects what the absent case already selects.
+                logical_profile: if aff4l_v1_0 {
+                    aff4tools::write::logical::LogicalProfile::V1Alpha
+                } else {
+                    let _ = aff4l_legacy;
+                    aff4tools::write::logical::LogicalProfile::Legacy
+                },
             },
         ),
         Command::Export {
@@ -698,9 +733,15 @@ fn open_disk_image(
     };
 
     let lexicon = container.lexicon();
-    let image =
-        aff4tools::image::Image::open_in_set(&arn, container.volumes_mut(), lexicon, &locus)
-            .map_err(|e| format!("opening image {arn}: {e}"))?;
+    let mapping = container.name_mapping();
+    let image = aff4tools::image::Image::open_in_set(
+        &arn,
+        container.volumes_mut(),
+        lexicon,
+        mapping,
+        &locus,
+    )
+    .map_err(|e| format!("opening image {arn}: {e}"))?;
     Ok((container, image, primary))
 }
 
@@ -843,6 +884,7 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
     println!();
 
     let volume_arn = container.volume().arn().clone();
+    let mapping = container.name_mapping();
     let mut written = 0u64;
     let mut bytes_out = 0u64;
     // Every file the export could not write, with why. Counted rather than
@@ -855,15 +897,39 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
     let mut graph: Option<aff4tools::rdf::Graph> = None;
 
     for object in &files {
-        // The ARN's path portion is the file's recorded location. Everything
-        // after the volume's authority is that path.
-        let recorded = object
-            .arn
-            .as_str()
-            .strip_prefix(volume_arn.as_str())
-            .unwrap_or(object.arn.as_str())
-            .trim_start_matches('/');
-        let recorded = percent_decode(recorded);
+        // Where the file's recorded location comes from depends on the
+        // generation.
+        //
+        // The properties are asked first for every generation. Under AFF4-L
+        // v1.0-ALPHA §1.1 they are the only source, because the ARN is a GUID
+        // and carries no path at all. Under the 2019 paper the ARN does encode
+        // the path, but `aff4:originalFileName` holds it as read rather than
+        // as escaped, so preferring it is right there too. The property's
+        // lexical form is already the recorded path, so it is not decoded.
+        let recorded = if let Some(path) = object.recorded_path() {
+            path.to_owned()
+        } else if mapping == aff4tools::arn::NameMapping::Escaped {
+            // The 2019 fallback: everything after the volume's authority is
+            // the path, percent-encoded on the way in by AFF4-L 2019 §3.2.
+            percent_decode(
+                object
+                    .arn
+                    .as_str()
+                    .strip_prefix(volume_arn.as_str())
+                    .unwrap_or(object.arn.as_str())
+                    .trim_start_matches('/'),
+            )
+        } else {
+            // A v2.1 file whose name no property records. Its bytes could be
+            // written under its GUID, but a file named by a UUID is not the
+            // evidence the examiner asked for, and writing one would let a run
+            // that lost the acquired tree still report success. Recorded as a
+            // gap instead, which the closing count and the exit code honour.
+            let arn = object.arn.as_str().to_owned();
+            eprintln!("  skipped {arn}: no recorded file name or path");
+            skipped.push((arn, "no recorded file name or path".to_owned()));
+            continue;
+        };
 
         let (destination, alteration) = rebase(target, &recorded);
         if let Some(alteration) = alteration {
@@ -906,7 +972,7 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
                 }
             }
         } else {
-            let Some(segment) = object.arn.member_name(&volume_arn) else {
+            let Some(segment) = object.arn.member_name(&volume_arn, mapping) else {
                 eprintln!("  skipped {recorded}: names no member of this volume");
                 skipped.push((
                     recorded.clone(),
@@ -1060,10 +1126,12 @@ fn read_logical_stream(
     locus: &aff4tools::Locus,
 ) -> Result<Vec<u8>, aff4tools::Error> {
     let lexicon = container.lexicon();
+    let mapping = container.name_mapping();
     let stream = aff4tools::stream::ImageStream::open(&object.arn, graph, lexicon, locus)?;
     let mut out = Vec::with_capacity(usize::try_from(stream.size()).unwrap_or_default());
     stream.read_all(
         container.volume_mut(),
+        mapping,
         &mut |bytes| {
             out.extend_from_slice(bytes);
             Ok(())
@@ -1332,6 +1400,7 @@ fn verify(
 /// reassemble identically.
 fn describe_split_layout(container: &mut Container, summary: &ContainerSummary) -> Option<String> {
     let lexicon = container.lexicon();
+    let mapping = container.name_mapping();
     let images: Vec<Aff4Object> = summary
         .objects
         .iter()
@@ -1341,8 +1410,13 @@ fn describe_split_layout(container: &mut Container, summary: &ContainerSummary) 
 
     for object in images {
         let locus = Locus::new(container.volume().path());
-        let Ok(image) = Image::open_in_set(&object.arn, container.volumes_mut(), lexicon, &locus)
-        else {
+        let Ok(image) = Image::open_in_set(
+            &object.arn,
+            container.volumes_mut(),
+            lexicon,
+            mapping,
+            &locus,
+        ) else {
             continue;
         };
         let layout = image.map().split_layout();
@@ -2716,6 +2790,8 @@ struct AcquireOptions {
     /// Whether a logical acquisition inventories the tree to completion before
     /// acquiring, so the progress total is exact from the start.
     scan_first: bool,
+    /// Which AFF4-L format a logical acquisition writes.
+    logical_profile: aff4tools::write::logical::LogicalProfile,
 }
 
 /// Whether a path names the first segment of a split-raw set, e.g. `img.001`.
@@ -3497,6 +3573,7 @@ fn run_acquire_logical(
         // worded error, so it never reaches here.
         split_after: _,
         scan_first,
+        logical_profile,
     } = settings;
     let options = LogicalOptions {
         stream: StreamOptions {
@@ -3506,6 +3583,7 @@ fn run_acquire_logical(
             block_hashes: true,
         },
         deduplicate,
+        profile: logical_profile,
     };
 
     let _ = writeln!(out, "Acquiring:   {} root(s)", roots.len());
@@ -3550,7 +3628,11 @@ fn run_acquire_logical(
     };
 
     let locus = aff4tools::Locus::new(output);
-    let mut writer = match ContainerWriter::create_logical(output, &registry) {
+    let mut writer = match ContainerWriter::create_with_profile(
+        output,
+        &registry,
+        logical_profile.version_profile(),
+    ) {
         Ok(w) => w,
         Err(e) => return ExitCode::from(report_error(&e)),
     };

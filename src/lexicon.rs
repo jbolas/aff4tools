@@ -75,11 +75,17 @@ pub enum Generation {
     PyAff4Logical,
     /// AFF4-L Standard v1.0-ALPHA. `version.txt` declares `major=2 minor=1`.
     ///
-    /// Recognised and named so a report can say what the container is, then
-    /// declined: the v2.1 rules are not implemented, and the standard is a
-    /// pre-release whose Canonical Reference Images — which it says take
-    /// precedence over its own text — are not yet published. See
-    /// [`Generation::is_supported`].
+    /// Read by every command. Its identity and naming rules are implemented:
+    /// objects are named by GUID and carry their paths in properties, and the
+    /// scheme and identifier are no longer escaped into a member name. See
+    /// AFF4-L v1.0-ALPHA §1.1, §1.2 and §2.
+    ///
+    /// The standard remains a pre-release whose Canonical Reference Images —
+    /// which it says take precedence over its own text — are not yet
+    /// published. That is why rules this build cannot yet evaluate are
+    /// reported as coverage gaps rather than silently omitted, and why a
+    /// capability this build lacks is [`crate::Error::Unsupported`] rather
+    /// than an integrity finding.
     Aff4L10,
     /// Pre-standard Evimetry/Wirespeed. No `version.txt`, and its own namespace.
     ///
@@ -128,13 +134,13 @@ impl Generation {
     pub fn lexicon(self) -> &'static Lexicon {
         match self {
             Self::Standard10 | Self::PyAff4Logical => &STANDARD,
-            // The v2.1 lexicon is not modelled: AFF4-L v1.0-ALPHA §4.1 adds a
-            // second namespace
-            // and nineteen properties this build does not implement. The base
-            // vocabulary is returned so the type is total, never so a v2.1
-            // container can be read — `is_supported` declines first. Kept as
-            // its own arm because merging it would assert that v2.1 *uses*
-            // the base vocabulary, which is exactly what is not yet known.
+            // v2.1 is base-plus-delta: AFF4-L v1.0-ALPHA §4.1 says its
+            // classes supplement the base lexicon rather than replacing it, so
+            // the base vocabulary is the right answer for every term this
+            // build reads today. The second namespace and the properties that
+            // section adds are not modelled yet. Kept as its own arm because
+            // merging it would hide that this is a deliberate subset rather
+            // than the whole v2.1 vocabulary.
             #[allow(clippy::match_same_arms)]
             Self::Aff4L10 => &STANDARD,
             Self::Legacy => &LEGACY,
@@ -143,35 +149,38 @@ impl Generation {
 
     /// Whether this build can interpret the generation.
     ///
-    /// Two are detected but not supported, for different reasons.
-    ///
-    /// [`Self::Legacy`] predates the standard. Its containers are read by no
-    /// specification this tool cites, so any behaviour would be reverse
-    /// engineering presented as conformance.
-    ///
-    /// [`Self::Aff4L10`] is the AFF4-L Standard v1.0-ALPHA. Its rules are not
-    /// implemented, and the standard is a pre-release stating that its
-    /// Canonical Reference Images take precedence over its own text — those
-    /// images are unpublished, so no rule could be validated against evidence.
-    ///
-    /// In both cases the container is named accurately and declined. Claiming
+    /// One generation is detected and not supported. [`Self::Legacy`] predates
+    /// the standard, and its containers are read by no specification this tool
+    /// cites, so any behaviour would be reverse engineering presented as
+    /// conformance. It is named accurately and declined, because claiming
     /// untested support for evidence is worse than declining.
+    ///
+    /// [`Self::Aff4L10`] is supported for reading. Its identity and naming
+    /// rules — AFF4-L v1.0-ALPHA §1.1, §1.2 and §2 — are implemented, so a
+    /// v2.1 container's members resolve and its files are identifiable.
+    ///
+    /// **Supported for reading is not the same as fully implemented.** A v2.1
+    /// container using a capability this build lacks — a digest algorithm from
+    /// AFF4-L v1.0-ALPHA §4.4, say — is [`crate::Error::Unsupported`] at the
+    /// point that capability is met, never an integrity finding. What
+    /// `conformance` has not evaluated is reported as a coverage gap rather
+    /// than as conformance, so nothing here lets an unchecked rule read as a
+    /// clean one.
     #[must_use]
     pub fn is_supported(self) -> bool {
-        matches!(self, Self::Standard10 | Self::PyAff4Logical)
+        matches!(self, Self::Standard10 | Self::PyAff4Logical | Self::Aff4L10)
     }
 
     /// Whether `conformance` will read a container of this generation.
     ///
-    /// Wider than [`Self::is_supported`] by exactly one generation. A v2.1
-    /// container is read so `conformance` can report which of its rules went
-    /// unevaluated; `info` and `verify` still decline it, because those
-    /// commands describe and check evidence, and a partial reading of evidence
-    /// misleads in a way a coverage report does not.
+    /// Identical to [`Self::is_supported`] now that v2.1 reads. The two were
+    /// separate while `conformance` alone admitted v2.1, and the distinction
+    /// is kept as its own predicate because the question it answers is not the
+    /// same one: a later generation may again be readable for coverage
+    /// reporting before it is readable for evidence.
     ///
-    /// Pre-standard containers stay refused here too: no document aff4tools
-    /// cites describes them, so there is no rule set to report coverage
-    /// against.
+    /// Pre-standard containers stay refused here: no document aff4tools cites
+    /// describes them, so there is no rule set to report coverage against.
     #[must_use]
     pub fn is_conformance_readable(self) -> bool {
         self.is_supported() || matches!(self, Self::Aff4L10)
@@ -217,6 +226,28 @@ impl Generation {
             // opposite: that v1.0a genuinely governs it.
             #[allow(clippy::match_same_arms)]
             Self::Legacy => (Document::Aff4Standard10a, None),
+        }
+    }
+
+    /// Which ARN-to-segment rules this generation puts in force.
+    ///
+    /// The second half of the mapping table, alongside
+    /// [`Self::governing_spec`]: which document governs, and which naming rule
+    /// that document states. AFF4-L v1.0-ALPHA §1.2 stops escaping the scheme
+    /// and identifier of a foreign authority, which v1.0a §5.2 rule 1
+    /// requires, so the same ARN names different members under the two.
+    #[must_use]
+    pub fn name_mapping(self) -> crate::arn::NameMapping {
+        use crate::arn::NameMapping;
+        match self {
+            Self::Standard10 | Self::PyAff4Logical => NameMapping::Escaped,
+            Self::Aff4L10 => NameMapping::Literal,
+            // Declined before any name is resolved. The escaped rule is named
+            // only so the match is total, and kept in its own arm because
+            // merging it would assert that v1.0a §5.2 governs a container no
+            // document this tool cites describes.
+            #[allow(clippy::match_same_arms)]
+            Self::Legacy => NameMapping::Escaped,
         }
     }
 }
@@ -406,38 +437,61 @@ mod tests {
         assert_eq!(Generation::from_namespace("http://example.com/#"), None);
     }
 
-    /// Legacy and the AFF4-L v1.0-ALPHA standard are named accurately and
-    /// refused. Legacy is described by no specification this tool cites;
-    /// v2.1's rules are unimplemented and its reference images unpublished.
+    /// Only the pre-standard generation is named accurately and refused. It is
+    /// described by no specification this tool cites, so any behaviour would be
+    /// reverse engineering presented as conformance.
     #[test]
-    fn unsupported_generations_are_named_but_refused() {
+    fn the_pre_standard_generation_is_named_but_refused() {
         assert!(!Generation::Legacy.is_supported());
         assert!(Generation::Legacy.name().contains("pre-standard"));
 
-        assert!(!Generation::Aff4L10.is_supported());
-        assert!(Generation::Aff4L10.name().contains("v1.0-ALPHA"));
-
-        for g in [Generation::Standard10, Generation::PyAff4Logical] {
+        for g in [
+            Generation::Standard10,
+            Generation::PyAff4Logical,
+            Generation::Aff4L10,
+        ] {
             assert!(g.is_supported(), "{g} must be supported");
         }
     }
 
-    /// `conformance` reads a v2.1 container to report what it could not check.
-    /// `info` and `verify` still decline it, because a partial read of evidence
-    /// could mislead in a way a coverage report cannot.
+    /// v2.1 reads under every command once its identity and naming rules are
+    /// implemented. What is not yet checkable is reported as a coverage gap,
+    /// which is a separate question from whether the container can be read.
     #[test]
-    fn v2_1_is_readable_by_conformance_only() {
-        assert!(!Generation::Aff4L10.is_supported());
+    fn v2_1_is_read_by_every_command() {
+        assert!(Generation::Aff4L10.is_supported());
         assert!(Generation::Aff4L10.is_conformance_readable());
+        assert!(Generation::Aff4L10.name().contains("v1.0-ALPHA"));
 
         // Pre-standard stays refused by everything: no document describes it.
         assert!(!Generation::Legacy.is_supported());
         assert!(!Generation::Legacy.is_conformance_readable());
 
-        // Everything already supported is readable by conformance too.
-        for generation in [Generation::Standard10, Generation::PyAff4Logical] {
+        // Everything supported is readable by conformance too.
+        for generation in [
+            Generation::Standard10,
+            Generation::PyAff4Logical,
+            Generation::Aff4L10,
+        ] {
             assert!(generation.is_conformance_readable());
         }
+    }
+
+    /// The two generations that read evidence today resolve member names by
+    /// the escaped rule; v2.1 does not. A regression here would silently
+    /// misresolve every member of an existing container.
+    #[test]
+    fn name_mappings_follow_the_generation() {
+        use crate::arn::NameMapping;
+
+        for generation in [Generation::Standard10, Generation::PyAff4Logical] {
+            assert_eq!(
+                generation.name_mapping(),
+                NameMapping::Escaped,
+                "{generation} must keep the v1.0a §5.2 mapping"
+            );
+        }
+        assert_eq!(Generation::Aff4L10.name_mapping(), NameMapping::Literal);
     }
 
     /// The mapping table from the design, as a function.

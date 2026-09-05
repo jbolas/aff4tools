@@ -9,7 +9,6 @@ use std::path::Path;
 /// so at the top of the file. Adding an entry here is a claim about the whole
 /// file, so `single_document_modules_cite_only_their_document` re-checks it.
 const SINGLE_DOCUMENT_MODULES: &[&str] = &[
-    "src/write/logical.rs",
     "src/write/dedupe.rs",
     "tests/logical_acquire.rs",
     "tests/dedupe_acquire.rs",

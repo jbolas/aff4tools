@@ -180,7 +180,11 @@ fn each_generated_stripe_holds_its_own_streams() {
 
     let mut holders: Vec<String> = streams
         .iter()
-        .filter_map(|s| container.volumes().holding(&s.arn))
+        .filter_map(|s| {
+            container
+                .volumes()
+                .holding(&s.arn, aff4tools::arn::NameMapping::Escaped)
+        })
         .map(|a| a.as_str().to_owned())
         .collect();
     holders.sort();

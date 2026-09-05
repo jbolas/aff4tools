@@ -40,7 +40,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::arn::Arn;
+use crate::arn::{Arn, NameMapping};
 use crate::error::{Locus, Result};
 use crate::rdf::Graph;
 use crate::zip::{Volume, ZipVolume};
@@ -238,12 +238,12 @@ impl ZipVolumeSet {
     /// striped set each volume has its own map, so the primary's is not always
     /// the one being verified.
     #[must_use]
-    pub fn declaring_volume(&self, subject: &Arn) -> Option<&Arn> {
+    pub fn declaring_volume(&self, subject: &Arn, mapping: NameMapping) -> Option<&Arn> {
         self.members
             .iter()
             .find(|m| {
                 subject
-                    .member_name(m.volume.arn())
+                    .member_name(m.volume.arn(), mapping)
                     .is_some_and(|base| m.volume.has_segment(&format!("{base}/map")))
             })
             .map(|m| m.volume.arn())
@@ -256,7 +256,7 @@ impl ZipVolumeSet {
     /// block hashes, so this is normally the primary — but a set where it is
     /// not must still find them rather than declining.
     #[must_use]
-    pub fn holding_block_hashes(&self, object: &Arn) -> Option<&Arn> {
+    pub fn holding_block_hashes(&self, object: &Arn, mapping: NameMapping) -> Option<&Arn> {
         let (stream_iri, suffix) = object.as_str().rsplit_once("/blockhash.")?;
         self.members
             .iter()
@@ -265,7 +265,7 @@ impl ZipVolumeSet {
                 let Ok(stream) = Arn::parse(stream_iri, &locus) else {
                     return false;
                 };
-                let Some(base) = stream.member_name(m.volume.arn()) else {
+                let Some(base) = stream.member_name(m.volume.arn(), mapping) else {
                     return false;
                 };
                 m.volume
@@ -282,7 +282,7 @@ impl ZipVolumeSet {
     /// striped root digest is built from each stripe's *own* map segments — so
     /// the map wanted here is the local one, not the primary's.
     #[must_use]
-    pub fn local_map(&self, volume_arn: &Arn) -> Option<(Arn, String)> {
+    pub fn local_map(&self, volume_arn: &Arn, mapping: NameMapping) -> Option<(Arn, String)> {
         let index = *self.by_arn.get(volume_arn.as_str())?;
         let member = &self.members[index];
         let map_type = "http://aff4.org/Schema#Map";
@@ -292,7 +292,7 @@ impl ZipVolumeSet {
             let Ok(arn) = Arn::parse(subject, &locus) else {
                 continue;
             };
-            let Some(base) = arn.member_name(member.volume.arn()) else {
+            let Some(base) = arn.member_name(member.volume.arn(), mapping) else {
                 continue;
             };
             if member.volume.has_segment(&format!("{base}/map")) {
@@ -324,26 +324,26 @@ impl ZipVolumeSet {
     /// `.blockHash.*` and index segments while holding none of its bevies, so
     /// name resolvability would give the wrong volume. See decision 36.
     #[must_use]
-    pub fn holding(&self, stream: &Arn) -> Option<&Arn> {
-        let index = self.holder_index(stream)?;
+    pub fn holding(&self, stream: &Arn, mapping: NameMapping) -> Option<&Arn> {
+        let index = self.holder_index(stream, mapping)?;
         self.members.get(index).map(|m| m.volume.arn())
     }
 
     /// Mutable access to the volume holding `stream`'s data.
-    pub fn holding_mut(&mut self, stream: &Arn) -> Option<&mut ZipVolume> {
-        let index = self.holder_index(stream)?;
+    pub fn holding_mut(&mut self, stream: &Arn, mapping: NameMapping) -> Option<&mut ZipVolume> {
+        let index = self.holder_index(stream, mapping)?;
         self.members.get_mut(index).map(|m| &mut m.volume)
     }
 
     /// The index in `members` holding `stream`, memoized.
-    fn holder_index(&self, stream: &Arn) -> Option<usize> {
+    fn holder_index(&self, stream: &Arn, mapping: NameMapping) -> Option<usize> {
         if let Some(known) = self.holder.borrow().get(stream.as_str()) {
             return *known;
         }
         let found = self
             .members
             .iter()
-            .position(|m| holds_stream_data(&m.volume, stream));
+            .position(|m| holds_stream_data(&m.volume, stream, mapping));
         self.holder
             .borrow_mut()
             .insert(stream.as_str().to_owned(), found);
@@ -536,8 +536,8 @@ impl ZipVolumeSet {
 ///
 /// Shared with `verify::volume_holds_stream_data`; see decision 36 for why the
 /// test is bevy presence rather than name resolvability.
-fn holds_stream_data(volume: &ZipVolume, stream: &Arn) -> bool {
-    let Some(base) = stream.member_name(volume.arn()) else {
+fn holds_stream_data(volume: &ZipVolume, stream: &Arn, mapping: NameMapping) -> bool {
+    let Some(base) = stream.member_name(volume.arn(), mapping) else {
         return false;
     };
     volume

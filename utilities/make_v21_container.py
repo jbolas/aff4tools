@@ -57,8 +57,8 @@ def write_conformant(path: Path) -> None:
     a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;
     aff4:hash               "{sha1}"^^aff4:SHA1 , "{md5}"^^aff4:MD5 ;
     aff4:size               "{len(content)}"^^xsd:long ;
-    aff4l:fileName          "test.txt" ;
-    aff4l:originalPathName  "/test.txt" .
+    aff4:fileName           "test.txt" ;
+    aff4:originalPathName   "/test.txt" .
 """
     turtle_bytes = turtle.encode()
     hashes = TURTLE_PREFIXES + f"""
@@ -76,6 +76,115 @@ def write_conformant(path: Path) -> None:
         z.comment = VOLUME.encode()
 
 
+def _file_subject(arn: str, name: str, path: str, content: bytes) -> str:
+    """One FileImage subject, stored as a ZIP segment."""
+    return f"""
+<{arn}>
+    a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;
+    aff4:hash               "{hashlib.sha1(content).hexdigest()}"^^aff4:SHA1 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "{name}" ;
+    aff4:originalPathName   "{path}" .
+"""
+
+
+def _write(path: Path, turtle: str, members: dict) -> None:
+    """Assemble a v2.1 container from a turtle body and its stored members."""
+    body = TURTLE_PREFIXES + turtle
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("container.description", VOLUME)
+        z.writestr("version.txt", "major=2\nminor=1\ntool=aff4tools-test 0.1\n")
+        for name, content in members.items():
+            z.writestr(name, content)
+        z.writestr("information.turtle", body)
+        z.comment = VOLUME.encode()
+
+
+def write_tree(path: Path) -> None:
+    """Several files in a nested tree.
+
+    Exercises AFF4-L v1.0-ALPHA §1.1: every path is carried in properties, so
+    a reader that recovers the tree from anything but those properties gets
+    a flat bag of UUIDs.
+    """
+    files = {
+        "aff4://11111111-1111-4111-8111-111111111111": (
+            "notes.txt", "/case/notes.txt", b"top level\n"),
+        "aff4://22222222-2222-4222-8222-222222222222": (
+            "a.txt", "/case/sub/a.txt", b"nested one\n"),
+        "aff4://33333333-3333-4333-8333-333333333333": (
+            "b.txt", "/case/sub/deeper/b.txt", b"nested two\n"),
+    }
+    turtle = f"""
+<{VOLUME}>
+    a           aff4:ZipVolume ;
+    aff4:stored "{path.name}" .
+"""
+    members = {}
+    for arn, (name, full, content) in files.items():
+        turtle += _file_subject(arn, name, full, content)
+        members[arn] = content
+    _write(path, turtle, members)
+
+
+def write_uppercase_guid(path: Path) -> None:
+    """A file whose ARN spells its GUID in upper case.
+
+    AFF4-L v1.0-ALPHA §2 requires lower case. The container is otherwise
+    well formed, so a reader must accept it and record the departure rather
+    than refusing the evidence.
+    """
+    content = b"upper case guid\n"
+    arn = "aff4://4A7B2C91-8D3E-4F05-9A6B-1C2D3E4F5061"
+    turtle = f"""
+<{VOLUME}>
+    a           aff4:ZipVolume ;
+    aff4:stored "{path.name}" .
+""" + _file_subject(arn, "upper.txt", "/upper.txt", content)
+    _write(path, turtle, {arn: content})
+
+
+def write_escaped_member(path: Path) -> None:
+    """A file whose bytes are stored under the old escaped member name.
+
+    AFF4-L v1.0-ALPHA §1.2 stops escaping the scheme and identifier, and its
+    §6.1 example shows the member stored literally. A v2.1 container using
+    the v1.0a §5.2 spelling instead departs from that rule.
+    """
+    content = b"escaped member name\n"
+    arn = "aff4://5b8c3d02-9e4f-4106-ab7c-2d3e4f506172"
+    escaped = arn.replace(":", "%3A").replace("/", "%2F")
+    turtle = f"""
+<{VOLUME}>
+    a           aff4:ZipVolume ;
+    aff4:stored "{path.name}" .
+""" + _file_subject(arn, "escaped.txt", "/escaped.txt", content)
+    _write(path, turtle, {escaped: content})
+
+
+def write_nameless(path: Path) -> None:
+    """A FileImage carrying neither fileName nor originalPathName.
+
+    AFF4-L v1.0-ALPHA §1.1 requires the path be carried in properties once
+    the name is a GUID. Without them the file cannot be exported under any
+    meaningful name, and the export must record the gap rather than inventing
+    one.
+    """
+    content = b"no recorded name\n"
+    arn = "aff4://6c9d4e13-af50-4217-bc8d-3e4f50617283"
+    turtle = f"""
+<{VOLUME}>
+    a           aff4:ZipVolume ;
+    aff4:stored "{path.name}" .
+
+<{arn}>
+    a           aff4:FileImage , aff4:Image , aff4:ZipSegment ;
+    aff4:hash   "{hashlib.sha1(content).hexdigest()}"^^aff4:SHA1 ;
+    aff4:size   "{len(content)}"^^xsd:long .
+"""
+    _write(path, turtle, {arn: content})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("outdir", type=Path)
@@ -84,7 +193,11 @@ def main() -> None:
 
     write_minimal(args.outdir / "minimal.aff4l")
     write_conformant(args.outdir / "conformant.aff4l")
-    print(f"wrote 2 v2.1 containers to {args.outdir}")
+    write_tree(args.outdir / "tree.aff4l")
+    write_uppercase_guid(args.outdir / "uppercase-guid.aff4l")
+    write_escaped_member(args.outdir / "escaped-member.aff4l")
+    write_nameless(args.outdir / "nameless.aff4l")
+    print(f"wrote 6 v2.1 containers to {args.outdir}")
 
 
 if __name__ == "__main__":

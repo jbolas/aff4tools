@@ -66,6 +66,7 @@ fn acquire_and_read_back(dir: &Path, name: &str, body: &[u8], options: StreamOpt
     stream
         .read_all(
             volume,
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes: &[u8]| {
                 back.extend_from_slice(bytes);
                 Ok(())
@@ -261,6 +262,7 @@ fn a_device_with_bad_sectors_records_them_and_still_verifies() {
     stream
         .read_all(
             volume,
+            aff4tools::arn::NameMapping::Escaped,
             &mut |bytes: &[u8]| {
                 back.extend_from_slice(bytes);
                 Ok(())
