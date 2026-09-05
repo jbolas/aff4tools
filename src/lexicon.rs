@@ -161,6 +161,22 @@ impl Generation {
         matches!(self, Self::Standard10 | Self::PyAff4Logical)
     }
 
+    /// Whether `conformance` will read a container of this generation.
+    ///
+    /// Wider than [`Self::is_supported`] by exactly one generation. A v2.1
+    /// container is read so `conformance` can report which of its rules went
+    /// unevaluated; `info` and `verify` still decline it, because those
+    /// commands describe and check evidence, and a partial reading of evidence
+    /// misleads in a way a coverage report does not.
+    ///
+    /// Pre-standard containers stay refused here too: no document aff4tools
+    /// cites describes them, so there is no rule set to report coverage
+    /// against.
+    #[must_use]
+    pub fn is_conformance_readable(self) -> bool {
+        self.is_supported() || matches!(self, Self::Aff4L10)
+    }
+
     /// A short name for messages.
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -403,6 +419,24 @@ mod tests {
 
         for g in [Generation::Standard10, Generation::PyAff4Logical] {
             assert!(g.is_supported(), "{g} must be supported");
+        }
+    }
+
+    /// `conformance` reads a v2.1 container to report what it could not check.
+    /// `info` and `verify` still decline it, because a partial read of evidence
+    /// could mislead in a way a coverage report cannot.
+    #[test]
+    fn v2_1_is_readable_by_conformance_only() {
+        assert!(!Generation::Aff4L10.is_supported());
+        assert!(Generation::Aff4L10.is_conformance_readable());
+
+        // Pre-standard stays refused by everything: no document describes it.
+        assert!(!Generation::Legacy.is_supported());
+        assert!(!Generation::Legacy.is_conformance_readable());
+
+        // Everything already supported is readable by conformance too.
+        for generation in [Generation::Standard10, Generation::PyAff4Logical] {
+            assert!(generation.is_conformance_readable());
         }
     }
 

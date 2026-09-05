@@ -116,8 +116,12 @@ impl std::fmt::Display for RuleId {
 pub enum Requirement {
     /// The document requires it.
     Must,
+    /// The document prohibits it.
+    MustNot,
     /// The document recommends it.
     Should,
+    /// The document recommends against it.
+    ShouldNot,
     /// The document permits it.
     May,
 }
@@ -128,7 +132,9 @@ impl Requirement {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Must => "MUST",
+            Self::MustNot => "MUST NOT",
             Self::Should => "SHOULD",
+            Self::ShouldNot => "SHOULD NOT",
             Self::May => "MAY",
         }
     }
@@ -224,8 +230,10 @@ macro_rules! declare_rule {
 // `macro_rules!` macro is only in scope textually after its definition, so
 // `catalog` cannot see `declare_rule!` from above it.
 mod catalog;
+mod coverage;
 mod render;
 
+pub use coverage::Coverage;
 pub use render::render_catalog;
 
 /// Every declared rule, across all documents.
@@ -235,17 +243,11 @@ pub use render::render_catalog;
 /// [`crate::lexicon::Generation`], not by the deviation that was raised, so a
 /// citation needs both. The registry answers "what does this rule say"; the
 /// generation answers "does that document apply here". They are separate
-/// questions and the second one has no answer in this module.
+/// questions, and [`rules_for_generation`] answers the second.
 ///
-/// Concretely: `DeviationKind::spec_section` returns [`None`] for every
-/// deviation on a [`crate::lexicon::Generation::Aff4L10`] container, before it
-/// looks at the kind at all. That container is governed by the AFF4-L Standard
-/// v1.0-ALPHA, whose rules are not yet implemented, so no section number may be
-/// printed against it yet.
-///
-/// Any future lookup that maps a kind to a rule for the purpose of citation
-/// must therefore take the generation as a parameter and reproduce that gate.
-/// This is the whole reason such a lookup does not already exist here.
+/// So this function is the whole catalog and not a scoped view of it. A rule
+/// it returns may cite a document that does not govern the container in hand:
+/// a caller building a citation narrows by generation first.
 #[must_use]
 pub fn all_rules() -> &'static [RuleInfo] {
     // Concatenated at first use rather than as a const, because slice
@@ -255,9 +257,26 @@ pub fn all_rules() -> &'static [RuleInfo] {
         let mut rules = Vec::new();
         rules.extend_from_slice(catalog::AFF4_V1_0A);
         rules.extend_from_slice(catalog::AFF4L_PAPER_2019);
+        rules.extend_from_slice(catalog::AFF4L_V1_ALPHA);
         rules.extend_from_slice(catalog::UNLEGISLATED);
         rules
     })
+}
+
+/// Every rule in scope for a container of this generation.
+///
+/// Scope follows [`crate::lexicon::Generation::governing_spec`]: the base
+/// document always, plus the layered document where one applies. A rule from a
+/// document that does not govern the container is not merely unevaluated — it
+/// never applied, and citing it would misstate what the container was required
+/// to do.
+pub fn rules_for_generation(
+    generation: crate::lexicon::Generation,
+) -> impl Iterator<Item = &'static RuleInfo> {
+    let (base, layered) = generation.governing_spec();
+    all_rules()
+        .iter()
+        .filter(move |rule| rule.id.document == base || Some(rule.id.document) == layered)
 }
 
 /// The rule a deviation kind belongs to.
@@ -455,23 +474,80 @@ mod tests {
         }
     }
 
-    /// No rule may yet cite the AFF4-L Standard v1.0-ALPHA until the generation
-    /// gate that governs it is implemented.
-    ///
-    /// This asserts the constraint that `all_rules`' doc comment describes,
-    /// because a comment cannot fail a build. `DeviationKind::spec_section`
-    /// suppresses every citation on a `Generation::Aff4L10` container.
+    /// The catalog is a complete inventory of the standard, not only of what is
+    /// implemented. A rule missing here would understate the coverage gap.
     #[test]
-    fn no_rule_cites_the_alpha_standard_yet() {
+    fn the_alpha_standard_is_fully_declared() {
+        let alpha: Vec<_> = all_rules()
+            .iter()
+            .filter(|rule| rule.id.document == Document::Aff4LStandard10Alpha)
+            .collect();
+        assert_eq!(
+            alpha.len(),
+            24,
+            "the standard states 24 normative requirements; {} are declared",
+            alpha.len()
+        );
+    }
+
+    /// Nothing from the new standard is checkable yet: the rules are declared
+    /// and reported as coverage gaps. A `Detected` rule here would claim a
+    /// checker that does not exist.
+    #[test]
+    fn no_alpha_rule_claims_to_be_checked() {
         for rule in all_rules() {
-            assert!(
-                rule.id.document != Document::Aff4LStandard10Alpha,
-                "rule {} cites the AFF4-L Standard v1.0-ALPHA, but nothing yet \
-                 decides when that spec applies. Implement the generation-aware lookup \
-                 first (see the doc comment on all_rules), make it reproduce \
-                 that gate, then delete this test in the same change.",
-                rule.id
-            );
+            if rule.id.document == Document::Aff4LStandard10Alpha {
+                assert_ne!(
+                    rule.state,
+                    RuleState::Detected,
+                    "{} claims a checker, but none is implemented",
+                    rule.id
+                );
+            }
         }
+    }
+
+    /// A container is measured against the documents that govern it, and no
+    /// others. Citing a rule from a document that does not apply would misstate
+    /// what the container was required to do.
+    #[test]
+    fn rules_in_scope_follow_the_governing_documents() {
+        use crate::lexicon::Generation;
+
+        let standard: Vec<_> = rules_for_generation(Generation::Standard10).collect();
+        assert!(
+            standard
+                .iter()
+                .all(|r| r.id.document == Document::Aff4Standard10a),
+            "a v1.0 container is governed by v1.0a alone"
+        );
+
+        let logical: Vec<_> = rules_for_generation(Generation::PyAff4Logical).collect();
+        assert!(
+            logical
+                .iter()
+                .any(|r| r.id.document == Document::Aff4LPaper2019),
+            "a v1.1 container is also governed by the 2019 paper"
+        );
+        assert!(
+            !logical
+                .iter()
+                .any(|r| r.id.document == Document::Aff4LStandard10Alpha),
+            "the new standard does not govern a pyaff4-era container"
+        );
+
+        let alpha: Vec<_> = rules_for_generation(Generation::Aff4L10).collect();
+        assert!(
+            alpha
+                .iter()
+                .any(|r| r.id.document == Document::Aff4LStandard10Alpha),
+            "a v2.1 container is governed by the new standard"
+        );
+        assert!(
+            alpha
+                .iter()
+                .any(|r| r.id.document == Document::Aff4Standard10a),
+            "v2.1 is base-plus-delta: v1.0a still governs the container layer"
+        );
     }
 }

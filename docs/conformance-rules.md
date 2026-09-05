@@ -38,6 +38,35 @@ registry in `src/rules/catalog.rs`.
 |---|---|---|---|
 | `AFF4L_PAPER_2019/3.8/1` (§3.8) | MUST | detected | A file stored directly as a ZIP segment declares aff4:zip_segment in its type list. |
 
+## AFF4-L Standard v1.0-ALPHA
+
+| Rule | Level | State | Requirement |
+|---|---|---|---|
+| `AFF4L_V1_ALPHA/1.1/1` (§1.1) | MUST | not implemented | AFF4 objects are named by ARN, with the suspect's path and file name carried in properties rather than encoded into the name. |
+| `AFF4L_V1_ALPHA/4.1/1` (§4.1) | MUST | not implemented | A writer emits new lexicon terms under the namespace its governing standard assigns them. |
+| `AFF4L_V1_ALPHA/4.1/2` (§4.1) | MAY | not implemented | A reader may accept either namespace prefix for a lexicon term, so that containers written against the earlier schema still read. |
+| `AFF4L_V1_ALPHA/6/1` (§6) | MUST | not implemented | A reader handles every storage stream form this section describes, not a chosen subset. |
+| `AFF4L_V1_ALPHA/6/2` (§6) | MUST | not implemented | A writer implements at least one of the storage stream forms this section describes. |
+| `AFF4L_V1_ALPHA/6.1/1` (§6.1) | MUST | not implemented | A stream held as a ZIP segment is compressed with Stored or Deflate and no other method. |
+| `AFF4L_V1_ALPHA/6.1/2` (§6.1) | SHOULD NOT | not implemented | A ZIP segment storage stream holds no stream of one gibibyte or more. |
+| `AFF4L_V1_ALPHA/6.1/3` (§6.1) | MUST | not implemented | A writer records a linear digest of each ZIP segment storage stream in that stream's hash property. |
+| `AFF4L_V1_ALPHA/6.2/1` (§6.2) | MUST NOT | not implemented | An in-metadata storage stream holds no stream larger than one kilobyte. |
+| `AFF4L_V1_ALPHA/6.2/2` (§6.2) | MAY | not implemented | A stream carried inside the metadata need not record its own digests, since the metadata integrity hash covers it. |
+| `AFF4L_V1_ALPHA/6.3.1/1` (§6.3.1) | MUST | not implemented | A writer computes and records a block map digest for every map, under either of the two property spellings the standard allows. |
+| `AFF4L_V1_ALPHA/6.3.1/2` (§6.3.1) | MUST | not implemented | A reader accepts either block map digest spelling and can verify the block map digests of every map and dependent image stream. |
+| `AFF4L_V1_ALPHA/9/1` (§9) | MUST | not checkable | Triples from the primary metadata segment and from every store it imports are read as one graph. |
+| `AFF4L_V1_ALPHA/9a/1` (§9a) | MAY | not checkable | A container may carry an accelerated metadata store beside the primary one, holding everything the primary and any secondary stores hold. |
+| `AFF4L_V1_ALPHA/9a/2` (§9a) | MAY | not checkable | A reader may take its metadata from the accelerated store in place of the primary and secondary stores. |
+| `AFF4L_V1_ALPHA/9a.1/1` (§9a.1) | MUST | not checkable | An implementation of the accelerated serialization confines itself to the triple, dictionary, and dictionary-section encodings the standard names. |
+| `AFF4L_V1_ALPHA/10.1/1` (§10.1) | MUST | not implemented | The digest of the primary metadata segment is recorded in a companion segment beside it, written in the turtle datatype syntax. |
+| `AFF4L_V1_ALPHA/10.1/2` (§10.1) | MUST | not implemented | That digest uses SHA-256, SHA-512, or a stronger algorithm the standard supports. |
+| `AFF4L_V1_ALPHA/10.2/1` (§10.2) | MAY | not checkable | A container may carry an X509 signature of the primary metadata segment in a companion segment beside it. |
+| `AFF4L_V1_ALPHA/10.2/2` (§10.2) | MUST | not checkable | A signature is PEM encoded, and the certificate chain stored with it is complete down to the root and likewise PEM encoded. |
+| `AFF4L_V1_ALPHA/10.2/3` (§10.2) | MUST | not checkable | Where several keys sign the metadata, each signature and certificate segment is named by the pattern the standard fixes. |
+| `AFF4L_V1_ALPHA/10.2/4` (§10.2) | MUST | not checkable | A signature and its certificate chain share one extensible name part, itself valid UTF-8. |
+| `AFF4L_V1_ALPHA/10.3/1` (§10.3) | MUST | not checkable | The digest of each secondary metadata store is recorded in the primary store, against that secondary store's own resource name. |
+| `AFF4L_V1_ALPHA/10.3/2` (§10.3) | MUST | not checkable | A digest recorded for a secondary metadata store uses SHA-256, SHA-512, or a stronger algorithm the standard supports. |
+
 ## Coverage
 
-13 of 15 declared rules are checked.
+13 of 39 declared rules are checked.

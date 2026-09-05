@@ -100,6 +100,13 @@ pub struct ConformanceScan {
     pub version: Option<ContainerVersion>,
     /// Every departure recorded, routine or not.
     pub deviations: Vec<Deviation>,
+    /// Which rules in scope for this generation went unevaluated.
+    ///
+    /// Separate from `deviations` because the two claims differ. A deviation
+    /// is an observed departure; an unevaluated rule is an absence of
+    /// evidence, and folding either into the other would misstate what the
+    /// scan found.
+    pub coverage: crate::rules::Coverage,
 }
 
 /// Why an unsupported generation is being declined.
@@ -418,7 +425,9 @@ impl Container {
     /// Open a container without parsing its metadata graph.
     ///
     /// [`Container::open`] parses `information.turtle` eagerly and keeps the
-    /// result. For `info` and `conformance` that copy is never read —
+    /// result. For `info` — and, via
+    /// [`Container::open_for_conformance`], for `conformance` — that copy is
+    /// never read —
     /// [`Container::summarize`] parses its own — so on a large container it is
     /// pure cost, and **freeing it afterwards does not help**: peak RSS is a
     /// high-water mark, and by then both graphs have been live at once.
@@ -435,12 +444,46 @@ impl Container {
     ///
     /// As [`Container::open`].
     pub fn open_without_graph(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_ungraphed(path, Generation::is_supported)
+    }
+
+    /// [`Container::open_without_graph`], for `conformance` alone.
+    ///
+    /// Differs from every other entry point by exactly one generation: it
+    /// admits a container whose governing document aff4tools has declared
+    /// rules for but cannot yet check. See [`Generation::is_conformance_readable`].
+    ///
+    /// **The wider gate belongs to the command, not to the graph-free open.**
+    /// `open_without_graph` is a memory optimization that `info` shares, so
+    /// widening the gate there would let `info` read a generation it cannot
+    /// describe. The split is by what the command claims: `conformance`
+    /// produces a coverage report, which says which rules were evaluated and
+    /// which were not, and an unevaluated rule asserts nothing about the
+    /// evidence. `info` and `verify` describe and check evidence, so a
+    /// generation whose storage streams cannot yet be read stays declined for
+    /// them — a partial reading of evidence misleads in a way a coverage
+    /// report does not. Widen those only when those streams can be read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Container::open`], except that a v2.1 container is admitted.
+    pub fn open_for_conformance(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_ungraphed(path, Generation::is_conformance_readable)
+    }
+
+    /// Open without parsing the graph, admitting the generations `admits`
+    /// accepts.
+    ///
+    /// The gate is a parameter rather than duplicated, so the two callers
+    /// above cannot drift apart in anything but the one predicate that is
+    /// meant to differ.
+    fn open_ungraphed(path: impl AsRef<Path>, admits: fn(Generation) -> bool) -> Result<Self> {
         let mut volume = ZipVolume::open(path)?;
         let mut deviations = volume.deviations().to_vec();
 
         let (generation, version) = identify(&mut volume, &mut deviations)?;
 
-        if !generation.is_supported() {
+        if !admits(generation) {
             return Err(Error::unsupported(
                 Feature::Generation {
                     named: generation.name().to_string(),
@@ -617,6 +660,7 @@ impl Container {
             generation: self.generation,
             version: self.version.clone(),
             deviations,
+            coverage: crate::rules::Coverage::for_generation(self.generation),
         })
     }
 
@@ -1599,6 +1643,72 @@ mod tests {
             );
         }
         assert!(!Generation::Legacy.is_supported());
+    }
+
+    /// `conformance` reads a v2.1 container; `info` and `verify` decline it.
+    ///
+    /// The three-way split is the whole point of `open_for_conformance`. A
+    /// coverage report names the rules it could not evaluate and claims
+    /// nothing about the evidence, so reading is safe there; `info` and
+    /// `verify` describe and check evidence, and a partial reading of evidence
+    /// misleads in a way a coverage report does not.
+    #[test]
+    fn only_conformance_opens_a_v2_1_container() {
+        let (_d, path) = synth(&[("version.txt", b"major=2\nminor=1\ntool=aff4tools-test\n")]);
+
+        let container = Container::open_for_conformance(&path)
+            .expect("conformance reads v2.1 to report what it could not check");
+        assert_eq!(container.generation(), Generation::Aff4L10);
+
+        for opened in [
+            Container::open(&path).err(),
+            Container::open_without_graph(&path).err(),
+        ] {
+            let err = opened.expect("info and verify still decline v2.1");
+            assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+            // Declining is not a claim that the evidence is damaged.
+            assert!(!err.is_integrity_finding());
+        }
+    }
+
+    /// The scan carries coverage alongside deviations, and the two are
+    /// separate claims: a deviation is an observed departure, an unevaluated
+    /// rule is an absence of evidence. A v2.1 scan finding no deviations does
+    /// not mean the container conforms — almost none of its rules were checked.
+    #[test]
+    fn a_scan_reports_coverage_separately_from_deviations() {
+        let (_d, path) = synth(&[
+            ("version.txt", b"major=2\nminor=1\ntool=aff4tools-test\n"),
+            (METADATA_SEGMENT, &turtle_with(STANDARD_NAMESPACE)),
+        ]);
+        let mut container = Container::open_for_conformance(&path).unwrap();
+        let scan = container.deviations_only().unwrap();
+
+        assert_eq!(scan.generation, Generation::Aff4L10);
+        assert!(
+            !scan.coverage.is_complete(),
+            "a v2.1 scan evaluates almost none of the rules in scope"
+        );
+        assert!(
+            scan.coverage.has_unevaluated_must(),
+            "binding rules went unevaluated, so conformance was not shown"
+        );
+    }
+
+    /// Neither gate admits a pre-standard container. No document aff4tools
+    /// cites describes one, so there is no rule set to report coverage against.
+    #[test]
+    fn no_gate_opens_a_pre_standard_container() {
+        let (_d, path) = synth(&[(METADATA_SEGMENT, &turtle_with(LEGACY_NAMESPACE))]);
+
+        for opened in [
+            Container::open(&path).err(),
+            Container::open_without_graph(&path).err(),
+            Container::open_for_conformance(&path).err(),
+        ] {
+            let err = opened.expect("pre-standard is refused by every entry point");
+            assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+        }
     }
 
     /// A future standard version is intact, not damaged.

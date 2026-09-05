@@ -76,6 +76,17 @@ fi
 
 count=$(find "$DEST" -name '*.aff4' -o -name '*.af4' | wc -l | tr -d ' ')
 
+# Phase 2 needs a v2.1 container to read, and none is published anywhere: the
+# AFF4-L Standard v1.0-ALPHA reference images do not exist yet. These are
+# generated rather than downloaded, and are NOT canonical reference images.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$(dirname "$0")/make_v21_container.py" "$DEST/aff4tools-v2.1"
+    count=$((count + 2))
+else
+    echo "warning: python3 not found; v2.1 test containers were not generated" >&2
+    echo "         the corpus suite's v2.1 tests will fail until they exist" >&2
+fi
+
 DEFAULT="$HOME/.cache/aff4tools/corpus"
 
 echo

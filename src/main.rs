@@ -21,6 +21,10 @@ use aff4tools::{
 // Re-exported at `pub(crate)` visibility so `report.rs` can keep referring to
 // it as `crate::human_bytes`, unchanged from when the function lived here.
 pub(crate) use aff4tools::human_bytes;
+// `RuleInfo` only; `aff4tools::rules::Coverage` is deliberately left
+// path-qualified, because `Coverage` in this module already names
+// `verify::Coverage` — what a hash check covered, a different question.
+use aff4tools::rules::RuleInfo;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 /// `info`'s human-readable report: object ordering, the manifest
@@ -4354,7 +4358,7 @@ fn verify_written(path: &std::path::Path) -> aff4tools::Result<VerificationRepor
 fn conformance_findings(
     paths: &[PathBuf],
 ) -> std::result::Result<aff4tools::ConformanceScan, OpenError> {
-    let mut container = open_striped_for_summary(paths)?;
+    let mut container = open_striped_for_conformance(paths)?;
     Ok(container.deviations_only()?)
 }
 
@@ -4376,9 +4380,20 @@ fn run_conformance(sets: &[Vec<PathBuf>], format: Format, strict: bool) -> ExitC
         match conformance_findings(set) {
             Ok(scan) => {
                 let deviations = &scan.deviations;
-                if strict && aff4tools::model::has_noteworthy_deviation(deviations) {
-                    // Same rule --strict follows everywhere else: routine
-                    // conditions are reported but do not set the exit code.
+                // Two ways a container fails --strict, and they share an exit
+                // code because they answer the same question the same way: the
+                // container was not shown to conform. One is an observed
+                // departure; the other is a binding rule nobody checked.
+                //
+                // Same rule --strict follows everywhere else: routine
+                // conditions are reported but do not set the exit code. An
+                // unevaluated SHOULD, SHOULD NOT, or MAY is likewise reported
+                // and likewise ignored here — it says aff4tools is
+                // incomplete, not that the container is questionable.
+                if strict
+                    && (aff4tools::model::has_noteworthy_deviation(deviations)
+                        || scan.coverage.has_unevaluated_must())
+                {
                     worst = worst.max(EXIT_STRICT_DEVIATION);
                 }
                 match format {
@@ -4473,29 +4488,58 @@ fn write_conformance(
     }
     writeln!(out)?;
 
+    let unevaluated: Vec<_> = scan.coverage.unevaluated().collect();
+
     if deviations.is_empty() {
-        // Stated as what was checked, not as a clean bill of health: this
-        // command reads metadata and recomputes nothing, so "conforms" here
-        // must not be read as "the evidence is intact".
-        writeln!(
-            out,
-            "No deviations. This container's metadata conforms to {base_spec}."
-        )?;
+        if unevaluated.is_empty() {
+            // Stated as what was checked, not as a clean bill of health: this
+            // command reads metadata and recomputes nothing, so "conforms" here
+            // must not be read as "the evidence is intact".
+            writeln!(
+                out,
+                "No deviations. This container's metadata conforms to {base_spec}."
+            )?;
+        } else {
+            // Finding nothing is not the same as having looked. Claiming
+            // conformance here would rest the claim on rules the scan never
+            // evaluated, which is the one thing a conformance report must not
+            // do.
+            writeln!(
+                out,
+                "No deviations found, but {} rule(s) were not evaluated — see below.",
+                unevaluated.len()
+            )?;
+        }
         writeln!(
             out,
             "(Metadata only — no digest was recomputed. Run `aff4tools verify` \
              to check the stored bytes against their recorded hashes.)"
         )?;
-        return Ok(());
+        // Deliberately no early return: the coverage block below is exactly
+        // what a container with nothing to report most needs printed.
+    } else {
+        writeln!(out, "Deviations ({})", deviations.len())?;
+        write_deviations(out, deviations, scan.generation, base_spec)?;
     }
 
-    writeln!(out, "Deviations ({})", deviations.len())?;
+    write_coverage(out, &unevaluated)?;
+
+    Ok(())
+}
+
+/// Write the deviation list, each entry cited to the clause it departs from.
+fn write_deviations(
+    out: &mut impl Write,
+    deviations: &[Deviation],
+    generation: aff4tools::Generation,
+    base_spec: aff4tools::rules::Document,
+) -> std::io::Result<()> {
     for deviation in deviations {
         writeln!(out)?;
         writeln!(out, "  [{}] {}", deviation.kind, deviation.locus)?;
         match (
-            deviation.kind.spec_section(scan.generation),
-            deviation.kind.other_specification(scan.generation),
+            deviation.kind.spec_section(generation),
+            deviation.kind.other_specification(generation),
         ) {
             (Some(section), _) => writeln!(out, "      {base_spec} {section}")?,
             // AFF4-L rules are specified in the paper, not the Standard.
@@ -4512,6 +4556,45 @@ fn write_conformance(
             )?,
         }
         writeln!(out, "      {}", deviation.detail)?;
+    }
+
+    Ok(())
+}
+
+/// Write the rules the scan did not evaluate.
+///
+/// Kept apart from the deviation list because the two claims differ. A
+/// deviation is an observed departure from the standard; an unevaluated rule
+/// is an absence of evidence about one, and a reader who conflated them would
+/// either read the container as broken or read the tool as complete. The
+/// heading says which of the two this is, and the note beneath it says so
+/// again in words, because this is the block most likely to be skimmed.
+///
+/// Nothing is printed when coverage is complete: a report that appended an
+/// empty "Not evaluated (0)" to every conforming container would train the
+/// reader to skip the heading.
+fn write_coverage(out: &mut impl Write, unevaluated: &[&'static RuleInfo]) -> std::io::Result<()> {
+    if unevaluated.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(out)?;
+    writeln!(out, "Not evaluated ({})", unevaluated.len())?;
+    writeln!(
+        out,
+        "  These rules apply to this container but aff4tools did not check them."
+    )?;
+    writeln!(out, "  Nothing here says the container departs from them.")?;
+    for rule in unevaluated {
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  [{}] {} {}",
+            rule.requirement.as_str(),
+            rule.id,
+            rule.state.as_str()
+        )?;
+        writeln!(out, "      {}", rule.statement)?;
     }
 
     Ok(())
@@ -4550,12 +4633,25 @@ struct ConformanceReport {
     /// specified in a paper rather than in the Standard.
     #[serde(skip_serializing_if = "Option::is_none")]
     logical_specification: Option<&'static str>,
-    /// Whether anything at all departed from the standard. Routine conditions
-    /// count here — this is [`ContainerSummary::is_conformant`], not the
-    /// narrower question `--strict` asks.
+    /// Whether the container was *shown* to conform: nothing departed from the
+    /// standard, and every rule in scope was actually evaluated.
+    ///
+    /// Both halves are required. Routine conditions count as departures here —
+    /// this is the broad question [`ContainerSummary::is_conformant`] asks, not
+    /// the narrower one `--strict` asks. But an empty deviation list from a
+    /// scan that checked only a dozen of a container's rules is not evidence of
+    /// conformance, and a script reading this field is asking whether the
+    /// container was shown to conform, not whether the checks that happened to
+    /// run found anything. When this is `false` for want of coverage rather
+    /// than for a deviation, `coverage` below names every rule responsible.
     conformant: bool,
     /// Every deviation, each with its spec citation.
     deviations: Vec<ConformanceDeviation>,
+    /// Every rule in scope that no checker evaluated.
+    ///
+    /// Empty when coverage is complete. An entry is not a finding against the
+    /// container: it records that aff4tools has nothing to say about that rule.
+    coverage: Vec<ConformanceCoverage>,
 }
 
 impl ConformanceReport {
@@ -4571,14 +4667,53 @@ impl ConformanceReport {
             tool: scan.version.as_ref().and_then(|v| v.tool.clone()),
             specification: base_spec.name(),
             logical_specification: logical_spec.map(aff4tools::rules::Document::name),
-            // `is_conformant` is "no deviation at all", routine ones included —
-            // deliberately not the narrower question `--strict` asks.
-            conformant: scan.deviations.is_empty(),
+            // "No deviation at all", routine ones included — deliberately not
+            // the narrower question `--strict` asks — *and* a scan that
+            // evaluated every rule in scope. Deviations alone would report
+            // `true` for a container whose rules were never checked, which is
+            // the reading this field exists to prevent.
+            conformant: scan.deviations.is_empty() && scan.coverage.is_complete(),
             deviations: scan
                 .deviations
                 .iter()
                 .map(|d| ConformanceDeviation::from(d, scan.generation))
                 .collect(),
+            coverage: scan
+                .coverage
+                .unevaluated()
+                .map(ConformanceCoverage::from)
+                .collect(),
+        }
+    }
+}
+
+/// One rule the scan did not evaluate.
+///
+/// The text report's "Not evaluated" block, in machine-readable form.
+#[derive(Debug, serde::Serialize)]
+struct ConformanceCoverage {
+    /// The rule's stable identifier, e.g. `"AFF4L_V1_ALPHA/6.1/1"`. Assigned
+    /// once and never reused, so it keeps its meaning in an archived report.
+    rule: String,
+    /// How binding the rule is, as [`Requirement`] serializes it. Only `must`
+    /// and `must_not` affect the `--strict` exit code when unevaluated.
+    requirement: aff4tools::rules::Requirement,
+    /// Why it went unchecked, as [`RuleState`] serializes it:
+    /// `not_implemented` is work this project has not done, `not_checkable` a
+    /// question the standard has not answered. Never `detected`, since a rule
+    /// with a checker is not a coverage gap.
+    state: aff4tools::rules::RuleState,
+    /// What the rule requires, in this project's own words.
+    statement: &'static str,
+}
+
+impl ConformanceCoverage {
+    fn from(rule: &'static RuleInfo) -> Self {
+        Self {
+            rule: rule.id.to_string(),
+            requirement: rule.requirement,
+            state: rule.state,
+            statement: rule.statement,
         }
     }
 }
@@ -4783,6 +4918,9 @@ fn summarize_for(
     // Opened without parsing the primary's graph: both summarize paths stream
     // their own, so a retained copy would never be read. `verify` still uses
     // `open_striped`, because it reads the retained graph afterwards.
+    //
+    // The narrow gate is deliberate here. `info` describes evidence, so it
+    // declines a generation whose storage streams cannot yet be read.
     let mut container = open_striped_for_summary(paths)?;
     if brief {
         return Ok(container.summarize_brief()?);
@@ -4846,26 +4984,51 @@ fn announce_metadata_parse(path: &std::path::Path) {
 /// image that order is an input to the root digest, not a presentation detail.
 ///
 fn open_striped(paths: &[PathBuf]) -> std::result::Result<Container, OpenError> {
-    open_striped_inner(paths, true)
+    open_striped_inner(paths, OpenMode::Full)
 }
 
 /// [`open_striped`], without parsing the primary's metadata graph.
 ///
-/// For `info` and `conformance`, which build a summary and never read the
-/// retained graph. See `Container::open_without_graph`.
+/// For `info`, which builds a summary and never reads the retained graph.
+/// `conformance` shares the graph-free open but not this gate; see
+/// [`open_striped_for_conformance`].
 fn open_striped_for_summary(paths: &[PathBuf]) -> std::result::Result<Container, OpenError> {
-    open_striped_inner(paths, false)
+    open_striped_inner(paths, OpenMode::Summary)
+}
+
+/// [`open_striped_for_summary`], for `conformance` alone.
+///
+/// Kept separate from the `info` path they otherwise share, because
+/// `conformance` reads one generation the other commands decline. See
+/// `Container::open_for_conformance` for why the two differ.
+fn open_striped_for_conformance(paths: &[PathBuf]) -> std::result::Result<Container, OpenError> {
+    open_striped_inner(paths, OpenMode::Conformance)
+}
+
+/// Which library entry point opens the primary volume.
+///
+/// Named rather than a bare bool: the three differ in what they admit as well
+/// as in what they retain, and a `true`/`false` at the call site said neither.
+#[derive(Clone, Copy)]
+enum OpenMode {
+    /// `verify`: retains the parsed graph, which it reads afterwards.
+    Full,
+    /// `info`: skips the graph, and admits only supported generations.
+    Summary,
+    /// `conformance`: skips the graph, and additionally admits a generation
+    /// whose rules are declared but not yet checkable.
+    Conformance,
 }
 
 fn open_striped_inner(
     paths: &[PathBuf],
-    retain_graph: bool,
+    mode: OpenMode,
 ) -> std::result::Result<Container, OpenError> {
     announce_metadata_parse(&paths[0]);
-    let mut container = if retain_graph {
-        Container::open(&paths[0])?
-    } else {
-        Container::open_without_graph(&paths[0])?
+    let mut container = match mode {
+        OpenMode::Full => Container::open(&paths[0])?,
+        OpenMode::Summary => Container::open_without_graph(&paths[0])?,
+        OpenMode::Conformance => Container::open_for_conformance(&paths[0])?,
     };
 
     for path in &paths[1..] {
