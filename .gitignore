@@ -6,4 +6,5 @@ __pycache__/
 docs/working/
 docs/superpowers/
 utilities/language-review/
+utilities/capture-conformance-baseline.sh
 CLAUDE.md

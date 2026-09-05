@@ -1,41 +1,27 @@
-//! Read-only inspection and validation of AFF4 forensic evidence containers.
+//! Reading, writing, and validation of AFF4 forensic evidence containers.
 //!
-//! This crate is the authoritative implementation of AFF4 handling in this
-//! project; the `aff4tools` binary is a thin command-line layer over it.
+//! This crate is the authoritative implementation; the `aff4tools` binary is a
+//! thin command-line layer over it.
 //!
-//! # Read-only
+//! # Never alter evidence
 //!
-//! aff4tools never modifies evidence: nothing here opens a write handle, and
-//! every container is opened through a single [`std::fs::File::open`] call
-//! site.
-//!
-//! This is enforced by the `disallowed-methods` and `disallowed-types` lists in
-//! `clippy.toml` — covering the `std::fs` mutators and `zip::ZipWriter` — which
-//! the crate-root lints below raise to deny. Note that the `zip` crate compiles
-//! its writer unconditionally, so it cannot be excluded via Cargo features;
-//! those lists are what keep write code out of this crate.
+//! [`mod@write`] is the only module permitted to create files, and every write goes
+//! through `write::sink`. Acquisition sources and containers being inspected are
+//! never written to. See that module and `write::guard` for how it is enforced.
 //!
 //! # Errors are values
 //!
-//! Nothing in this crate prints to stdout or stderr, and nothing terminates the
-//! process. Every fallible operation returns [`Result`]; deciding what a user
-//! sees is the binary's job. See [`error`] for the failure taxonomy and for why
-//! [`Error::Unsupported`] must never be reported as damaged evidence.
+//! Nothing here prints or terminates the process. Every fallible operation
+//! returns [`Result`]; presentation is the binary's job. See [`error`] for the
+//! failure taxonomy and why [`Error::Unsupported`] must never be reported as
+//! damaged evidence.
 
-// Read-only enforcement. `deny`, with exactly ONE audited exception:
-// `write::device::block_device_size` calls two read-only macOS ioctls to learn
-// a block device's geometry. The ioctl is required because `lseek` returns
-// zero for a block device, so `--device` cannot otherwise learn its size.
-//
-// `deny` still fails the build on any new `unsafe`, and the single `#[allow]`
-// is greppable. If a second exception is ever proposed, that is the moment to
-// reconsider a safe wrapper crate instead.
+// One audited exception: `write::device::block_device_size` needs two read-only
+// ioctls, because `lseek` returns zero for a block device.
 #![deny(unsafe_code)]
-// The write-blocking lints are deny, not warn: the disallowed lists in
-// clippy.toml (std::fs mutators and zip::ZipWriter) must fail the build rather
-// than scroll past in a wall of output. Note the zip crate compiles its writer
-// unconditionally, so this list — not Cargo features — is what keeps write
-// code out of aff4tools.
+// clippy.toml disallows the std::fs mutators and zip::ZipWriter. Denied rather
+// than warned so an unaudited write fails the build; `src/write/` opts out at
+// each audited site.
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 // Nothing is swallowed: a discarded Result or a panic on malformed input would
 // both violate this crate's contract. Test modules relax these individually.
@@ -65,6 +51,8 @@ pub mod model;
 pub mod parallel;
 pub mod progress;
 pub mod rdf;
+/// The conformance rule registry.
+pub mod rules;
 /// Finding and ordering the parts of a split AFF4 set.
 pub mod split_set;
 pub mod stream;
@@ -95,6 +83,7 @@ pub use model::{
 };
 pub use parallel::{ThreadPlan, cpu_budget};
 pub use rdf::{Graph, Statement, Value};
+pub use rules::Document;
 pub use stream::{ChunkLocation, ChunkReader, ImageStream};
 pub use verify::{
     Coverage, Declined, HashCheck, NoProgress, Outcome, Progress, ProgressObserver,
@@ -111,9 +100,6 @@ pub fn version() -> &'static str {
 }
 
 /// Render a byte count with a binary-prefix approximation.
-///
-/// The exact figure is always shown alongside; this is a reading aid, never a
-/// replacement for the real number.
 ///
 /// Shared by the `verify` report, the `info` report, and the progress
 /// display, all in the `aff4tools` binary.
