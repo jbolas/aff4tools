@@ -51,12 +51,12 @@ pub struct WrittenMap {
 /// Write a Map and its `DiskImage` under caller-chosen ARNs.
 ///
 /// [`write_map`] derives both names from the volume, which is right when one
-/// volume holds the whole image. A split set cannot do that: every part shares
+/// volume holds the whole image. A multi-part set cannot do that: every part shares
 /// **one** `DiskImage`, so its ARN is minted once by the caller and passed here
 /// (v1.0a §7.1, the point of commonality).
 ///
 /// `targets` are the ARNs a map entry's `target_id` indexes into. They need not
-/// name streams in `writer`'s own volume; in a split set most of them do not.
+/// name streams in `writer`'s own volume; in a multi-part set most of them do not.
 ///
 /// # Errors
 ///
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(back, data, "the image must reproduce the source bytes");
     }
 
-    /// A split set's `DiskImage` is shared across parts, so its ARN cannot be
+    /// A multi-part set's `DiskImage` is shared across parts, so its ARN cannot be
     /// derived from the volume that happens to hold the map.
     #[test]
     fn the_image_arn_may_come_from_the_caller() {
@@ -540,7 +540,7 @@ mod tests {
         .unwrap();
 
         // Both stored targets carry the back-pointer, including one living in
-        // another volume — a split set's normal case.
+        // another volume — a multi-part set's normal case.
         //
         // Matched on the subject at the start of a line: the same ARN also
         // appears as an *object* inside the map's `dependentStream`, and a

@@ -1,6 +1,6 @@
-//! Finding and ordering the parts of a split AFF4 set.
+//! Finding and ordering the parts of a multi-part AFF4 set.
 //!
-//! A *part* is one file of a split set; a *segment* is a member inside a volume
+//! A *part* is one file of a multi-part set; a *segment* is a member inside a volume
 //! (see `docs/glossary.md`). This module is read-only and lives outside
 //! `src/write/` for that reason.
 
@@ -75,7 +75,7 @@ const AFF4_EXTENSIONS: [&str; 3] = ["aff4", "af4", "aff4l"];
 /// # The ambiguity this resolves
 ///
 /// AFF4-L v1.0-ALPHA §8 names the second file of a set `foo.aff4.1`, whose
-/// extension is `1` — digits only. That is also the shape of a raw split image
+/// extension is `1` — digits only. That is also the shape of a raw multi-part image
 /// (`image.001`, `image.002`), so extension alone cannot tell them apart.
 ///
 /// **The stem decides.** A digits-only extension whose stem already ends in a
@@ -163,7 +163,7 @@ pub fn part_number(name: &str) -> Option<u32> {
         }
     }
 
-    // pyaff4's, and a raw split image's: a digit run at the end of the stem.
+    // pyaff4's, and a raw multi-part image's: a digit run at the end of the stem.
     let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
     trailing_number(stem)
 }
@@ -199,20 +199,20 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Locus, Result};
 
-/// What kind of split set a folder holds.
+/// What kind of multi-part set a folder holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitKind {
+pub enum PartKind {
     /// AFF4 volumes: `.aff4` or `.af4`.
     Aff4,
-    /// A raw split set: `.001`, `.002`, …
-    RawSplit,
+    /// A raw multi-part set: `.001`, `.002`, …
+    RawImage,
 }
 
-/// The parts of a split set, in read order.
+/// The parts of a multi-part set, in read order.
 #[derive(Debug, Clone)]
-pub struct SplitSet {
+pub struct MultiPartSet {
     /// Which kind of files the folder holds.
-    pub kind: SplitKind,
+    pub kind: PartKind,
     /// Every part, ordered by [`natural_cmp`].
     pub parts: Vec<PathBuf>,
     /// The first part's number, when the names carry one.
@@ -221,7 +221,7 @@ pub struct SplitSet {
     pub last: Option<u32>,
 }
 
-impl SplitSet {
+impl MultiPartSet {
     /// The line both `acquire` and `verify` print after ordering.
     ///
     /// Widths come from the file names themselves, so a set named `_001` reads
@@ -236,7 +236,7 @@ impl SplitSet {
                     .and_then(|p| numbered(p, self.kind))
                     .map_or(0, |(_, w)| w);
                 format!(
-                    "Found {} split files, numbered {first:0width$} through {last:0width$}.",
+                    "Found {} parts, numbered {first:0width$} through {last:0width$}.",
                     self.parts.len(),
                 )
             }
@@ -256,16 +256,16 @@ impl SplitSet {
 /// Value and width are returned together because they must be read off the
 /// same digit run. Deriving them separately is what let `discovery_line` and
 /// the gap check disagree about where a raw part's number lives.
-fn numbered(path: &Path, kind: SplitKind) -> Option<(u32, usize)> {
+fn numbered(path: &Path, kind: PartKind) -> Option<(u32, usize)> {
     match kind {
-        SplitKind::RawSplit => {
+        PartKind::RawImage => {
             let ext = path.extension().and_then(|e| e.to_str())?;
             if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_digit()) {
                 return None;
             }
             Some((ext.parse().ok()?, ext.len()))
         }
-        SplitKind::Aff4 => {
+        PartKind::Aff4 => {
             let name = path.file_name().and_then(|n| n.to_str())?;
             let value = part_number(name)?;
             let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
@@ -275,13 +275,13 @@ fn numbered(path: &Path, kind: SplitKind) -> Option<(u32, usize)> {
     }
 }
 
-/// Find the parts of a split set in `dir`.
+/// Find the parts of a multi-part set in `dir`.
 ///
 /// # Errors
 ///
-/// [`Error::Malformed`] if the folder holds no split set, holds both an AFF4
+/// [`Error::Malformed`] if the folder holds no multi-part set, holds both an AFF4
 /// set and a raw set, or has a gap in its part numbering.
-pub fn discover(dir: &Path) -> Result<SplitSet> {
+pub fn discover(dir: &Path) -> Result<MultiPartSet> {
     let locus = Locus::new(dir);
     let entries = std::fs::read_dir(dir).map_err(|e| Error::io(dir.to_path_buf(), e))?;
 
@@ -297,7 +297,7 @@ pub fn discover(dir: &Path) -> Result<SplitSet> {
             continue;
         };
         // `is_aff4_part` resolves the one ambiguity here: an AFF4-L
-        // v1.0-ALPHA §8 ordinal and a raw split image's extension are both
+        // v1.0-ALPHA §8 ordinal and a raw multi-part image's extension are both
         // digits, and only the stem tells them apart.
         if is_aff4_part(name) {
             aff4.push(path);
@@ -313,7 +313,7 @@ pub fn discover(dir: &Path) -> Result<SplitSet> {
     if !aff4.is_empty() && !raw.is_empty() {
         return Err(Error::malformed(
             locus,
-            "this folder holds both an AFF4 set and a raw split set; \
+            "this folder holds both an AFF4 set and a raw multi-part set; \
              name one file explicitly rather than the folder",
         ));
     }
@@ -322,13 +322,13 @@ pub fn discover(dir: &Path) -> Result<SplitSet> {
         if raw.is_empty() {
             return Err(Error::malformed(
                 locus,
-                "no split set here: expected .aff4 or .aff4l parts, or a raw \
+                "no multi-part set here: expected .aff4 or .aff4l parts, or a raw \
                  set (.001, .002, …)",
             ));
         }
-        (SplitKind::RawSplit, raw)
+        (PartKind::RawImage, raw)
     } else {
-        (SplitKind::Aff4, aff4)
+        (PartKind::Aff4, aff4)
     };
 
     parts.sort_by(|a, b| {
@@ -352,7 +352,7 @@ pub fn discover(dir: &Path) -> Result<SplitSet> {
                 return Err(Error::malformed(
                     Locus::new(dir),
                     format!(
-                        "split set has a gap: part {a} is followed by part {b}; \
+                        "multi-part set has a gap: part {a} is followed by part {b}; \
                          reassembly would silently omit data"
                     ),
                 ));
@@ -363,7 +363,7 @@ pub fn discover(dir: &Path) -> Result<SplitSet> {
     let first = numbers.first().copied().flatten();
     let last = numbers.last().copied().flatten();
 
-    Ok(SplitSet {
+    Ok(MultiPartSet {
         kind,
         parts,
         first,
@@ -405,7 +405,7 @@ mod tests {
     /// A name whose digits are part of a word is not a part number.
     ///
     /// Without this rule `part_number("lz4.aff4")` answers `Some(4)`, taking
-    /// `lz4.aff4` for part 4 of a split set. Sibling discovery then pulls in
+    /// `lz4.aff4` for part 4 of a multi-part set. Sibling discovery then pulls in
     /// unrelated containers, and an error can name a file the caller never
     /// asked about. Content is not at risk, but a diagnostic pointing at the
     /// wrong evidence is its own kind of defect.
@@ -422,8 +422,8 @@ mod tests {
         assert_eq!(part_number("lz4.aff4"), Some(0));
         assert_eq!(part_number("evidence_004.aff4"), Some(4));
         assert_eq!(part_number("evidence-004.aff4"), Some(4));
-        // `evidence.004` is a *raw* split part: the number is the extension,
-        // which `numbered(.., SplitKind::RawSplit)` reads. `part_number`
+        // `evidence.004` is a *raw* part: the number is the extension,
+        // which `numbered(.., PartKind::RawImage)` reads. `part_number`
         // strips the extension, so it correctly sees no suffix here.
         assert_eq!(part_number("evidence.004"), None);
         // A bare numeric stem is still a part: `001.aff4`.
@@ -453,7 +453,7 @@ mod tests {
         touch(dir.path(), "e_002.aff4");
 
         let set = discover(dir.path()).unwrap();
-        assert_eq!(set.kind, SplitKind::Aff4);
+        assert_eq!(set.kind, PartKind::Aff4);
         assert_eq!(set.parts.len(), 3);
         let names: Vec<_> = set
             .parts
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(names, vec!["e_001.aff4", "e_002.aff4", "e_003.aff4"]);
         assert_eq!(
             set.discovery_line(),
-            "Found 3 split files, numbered 001 through 003."
+            "Found 3 parts, numbered 001 through 003."
         );
     }
 
@@ -484,7 +484,7 @@ mod tests {
         touch(dir.path(), "img.002");
 
         let set = discover(dir.path()).unwrap();
-        assert_eq!(set.kind, SplitKind::RawSplit);
+        assert_eq!(set.kind, PartKind::RawImage);
         assert_eq!(set.parts.len(), 2);
     }
 
@@ -504,10 +504,10 @@ mod tests {
     fn an_empty_folder_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let err = discover(dir.path()).unwrap_err();
-        assert!(err.to_string().contains("no split set"), "{err}");
+        assert!(err.to_string().contains("no multi-part set"), "{err}");
     }
 
-    /// One unnumbered container is a single container, not a split set.
+    /// One unnumbered container is a single container, not a multi-part set.
     #[test]
     fn a_single_unnumbered_container_needs_no_numbering() {
         let dir = tempfile::tempdir().unwrap();
@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_in_a_raw_split_set_is_refused() {
+    fn a_gap_in_a_raw_multi_part_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         touch(dir.path(), "img.001");
         touch(dir.path(), "img.003");
@@ -530,20 +530,20 @@ mod tests {
     }
 
     #[test]
-    fn a_contiguous_raw_split_set_is_numbered() {
+    fn a_contiguous_raw_multi_part_is_numbered() {
         let dir = tempfile::tempdir().unwrap();
         touch(dir.path(), "img.002");
         touch(dir.path(), "img.001");
 
         let set = discover(dir.path()).unwrap();
-        assert_eq!(set.kind, SplitKind::RawSplit);
+        assert_eq!(set.kind, PartKind::RawImage);
         assert_eq!(set.first, Some(1));
         assert_eq!(set.last, Some(2));
     }
 
     /// A raw part's number is its extension, so the width comes from there too.
     #[test]
-    fn a_raw_split_set_names_its_range_with_padding() {
+    fn a_raw_multi_part_names_its_range_with_padding() {
         let dir = tempfile::tempdir().unwrap();
         touch(dir.path(), "img.001");
         touch(dir.path(), "img.002");
@@ -551,11 +551,11 @@ mod tests {
         let set = discover(dir.path()).unwrap();
         assert_eq!(
             set.discovery_line(),
-            "Found 2 split files, numbered 001 through 002."
+            "Found 2 parts, numbered 001 through 002."
         );
     }
 
-    /// An AFF4-L v1.0-ALPHA §8 ordinal and a raw split image's extension are
+    /// An AFF4-L v1.0-ALPHA §8 ordinal and a raw multi-part image's extension are
     /// both digits; only the stem tells them apart.
     ///
     /// This is the ambiguity the AFF4-L v1.0-ALPHA §8 naming introduced, and getting it wrong
@@ -631,7 +631,7 @@ mod tests {
             touch(dir.path(), name);
         }
         let set = discover(dir.path()).unwrap();
-        assert_eq!(set.kind, SplitKind::Aff4);
+        assert_eq!(set.kind, PartKind::Aff4);
         assert_eq!(set.parts.len(), 3);
         assert_eq!(set.first, Some(0));
         assert_eq!(set.last, Some(2));
@@ -653,7 +653,7 @@ mod tests {
         assert!(err.to_string().contains("gap"), "{err}");
     }
 
-    /// A raw split set is still recognized beside the new AFF4 shape.
+    /// A raw multi-part set is still recognized beside the new AFF4 shape.
     #[test]
     fn a_raw_set_is_not_mistaken_for_section_8_parts() {
         let dir = tempfile::tempdir().unwrap();
@@ -661,7 +661,7 @@ mod tests {
             touch(dir.path(), name);
         }
         let set = discover(dir.path()).unwrap();
-        assert_eq!(set.kind, SplitKind::RawSplit);
+        assert_eq!(set.kind, PartKind::RawImage);
         assert_eq!(set.parts.len(), 2);
     }
 }

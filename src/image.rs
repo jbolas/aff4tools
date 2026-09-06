@@ -244,7 +244,7 @@ impl Image {
                         "this stream is declared only as a stub, with no size or \
                          chunk size; the volume describing it ({stored}) is not \
                          among those given. Pass the containing folder with \
-                         --split-file <dir>"
+                         --multi-part <dir>"
                     ),
                 ));
             };
@@ -393,7 +393,7 @@ impl Image {
     /// Fill `buf` from an image whose streams span a volume set.
     ///
     /// The random-access counterpart to [`Image::read_from_set`], for striped
-    /// and split containers.
+    /// and multi-part containers.
     ///
     /// **One-shot, and that costs a bevy per call.** The source is built and
     /// dropped here, so the resident bevy it caches does not survive to the
@@ -670,7 +670,7 @@ impl StreamSource for SetStreams<'_> {
                     locus.clone().subject(stream.as_str()),
                     format!(
                         "no volume given holds this stream's data; pass the folder \
-                     holding {stream} with --split-file <dir>"
+                     holding {stream} with --multi-part <dir>"
                     ),
                 )
             })?;

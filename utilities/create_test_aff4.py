@@ -160,7 +160,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--stripes", type=int, default=1,
-        help="split the image across N volumes, written as NAME_1.aff4 … "
+        help="divide the image across N parts, written as NAME_1.aff4 … "
              "NAME_N.aff4 (default: 1, a single container)",
     )
     parser.add_argument(

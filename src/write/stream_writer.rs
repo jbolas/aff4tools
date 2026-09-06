@@ -265,15 +265,15 @@ pub struct BoundedOutcome {
     pub source_exhausted: bool,
 }
 
-/// Write part of a stream, stopping once `split_after` bytes are on disk.
+/// Write part of a stream, stopping once `multi_part_after` bytes are on disk.
 ///
 /// Differs from [`write_image_stream_observed`] in two ways, both required for
-/// a split set:
+/// a multi-part set:
 ///
 /// 1. **The hasher is borrowed, never finalized.** One hasher spans every part,
 ///    so the image digest describes the whole image rather than one part. The
 ///    caller finalizes it once, after the last part.
-/// 2. **It can stop early.** When `split_after` is `Some(n)`, the write ends
+/// 2. **It can stop early.** When `multi_part_after` is `Some(n)`, the write ends
 ///    after the first bevy that leaves the container at or beyond `n` bytes.
 ///
 /// The threshold is measured in **bytes on disk**, via
@@ -300,7 +300,7 @@ pub fn write_image_stream_bounded(
     source: &mut dyn Read,
     options: StreamOptions,
     hasher: &mut MultiHasher,
-    split_after: Option<u64>,
+    multi_part_after: Option<u64>,
     progress: &mut dyn FnMut(u64, u64),
     locus: &Locus,
 ) -> Result<BoundedOutcome> {
@@ -355,7 +355,7 @@ pub fn write_image_stream_bounded(
             // The cut point. The bevy, its index, and its block-hash segments
             // have all reached the sink and the builder is empty, so nothing is
             // buffered and the boundary is clean.
-            if let Some(target) = split_after
+            if let Some(target) = multi_part_after
                 && writer.bytes_written() >= target
             {
                 threshold_reached = true;

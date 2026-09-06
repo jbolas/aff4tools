@@ -48,14 +48,14 @@ pub mod map;
 pub mod metadata;
 
 pub mod model;
+/// Finding and ordering the parts of a multi-part AFF4 set.
+pub mod multi_part;
 pub mod naming;
 pub mod parallel;
 pub mod progress;
 pub mod rdf;
 /// The conformance rule registry.
 pub mod rules;
-/// Finding and ordering the parts of a split AFF4 set.
-pub mod split_set;
 pub mod stream;
 pub mod verify;
 pub mod version;
@@ -74,8 +74,7 @@ pub use hash::{Digest, MultiHasher};
 pub use image::Image;
 pub use lexicon::{Generation, Lexicon};
 pub use map::{
-    GapFill, GapPolicy, GapSummary, Map, MapEntry, ReadAccounting, SplitLayout, StreamSource,
-    Target,
+    GapFill, GapPolicy, GapSummary, Map, MapEntry, PartLayout, ReadAccounting, StreamSource, Target,
 };
 pub use model::{
     Aff4Object, BlockHashesInfo, ContainerSummary, EdgeKind, GraphEdge, HashAlgorithm, Locality,

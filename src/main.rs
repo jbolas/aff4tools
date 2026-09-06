@@ -15,7 +15,7 @@ use aff4tools::zip::Volume as _;
 use aff4tools::zip_volume_set::VolumeOrigin;
 use aff4tools::{
     Aff4Object, Container, ContainerSummary, Coverage, Deviation, DeviationKind, Error, HashCheck,
-    Image, Locus, ObjectRole, Outcome, Progress, SplitLayout, VerificationReport, VerifyOptions,
+    Image, Locus, ObjectRole, Outcome, PartLayout, Progress, VerificationReport, VerifyOptions,
     WorkEstimate, estimate_work, verify_container_with_progress,
 };
 // Re-exported at `pub(crate)` visibility so `report.rs` can keep referring to
@@ -97,15 +97,15 @@ enum Command {
     Info {
         /// Container to summarize.
         #[arg(
-            required_unless_present = "split_file",
+            required_unless_present = "multi_part",
             value_name = "PATH",
-            conflicts_with = "split_file"
+            conflicts_with = "multi_part"
         )]
         paths: Vec<PathBuf>,
 
-        /// Folder containing a split-file .aff4.
+        /// Folder containing a multi-part .aff4.
         #[arg(long, value_name = "DIR", conflicts_with = "paths")]
-        split_file: Option<PathBuf>,
+        multi_part: Option<PathBuf>,
 
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -147,15 +147,15 @@ enum Command {
     Conformance {
         /// Container to check.
         #[arg(
-            required_unless_present = "split_file",
+            required_unless_present = "multi_part",
             value_name = "PATH",
-            conflicts_with = "split_file"
+            conflicts_with = "multi_part"
         )]
         paths: Vec<PathBuf>,
 
-        /// Folder containing a split-file .aff4.
+        /// Folder containing a multi-part .aff4.
         #[arg(long, value_name = "DIR", conflicts_with = "paths")]
-        split_file: Option<PathBuf>,
+        multi_part: Option<PathBuf>,
 
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -183,19 +183,14 @@ enum Command {
         #[arg(long = "logical", value_name = "PATH", group = "source")]
         logical: Vec<PathBuf>,
 
-        /// Set source to an existing .dd or .aff4 image. <PATH> to single-file image or folder containing split-file image.
+        /// Set source to an existing .dd or .aff4 image. <PATH> to single-file image or folder containing multi-part image.
         ///
-        /// If given a folder containing a split-file image, its parts are ordered by the numbers in their names.
+        /// If given a folder containing a multi-part image, its parts are ordered by the numbers in their names.
         ///
-        /// Given the first segment of a split set (`name.001`), the remaining
-        /// segments are discovered automatically.
+        /// Given the first part of a multi-part set (`name.001`), the remaining
+        /// parts are discovered automatically.
         #[arg(long = "image", value_name = "PATH", group = "source")]
         images: Vec<PathBuf>,
-
-        /// Deprecated; has no effect. `--image name.001` now discovers the
-        /// rest of the set on its own, as `--image <folder>` always has.
-        #[arg(long, hide = true)]
-        discover_split: bool,
 
         /// Filepath to destination .aff4 file. May not exist already.
         #[arg(long, required = true, value_name = "PATH")]
@@ -220,7 +215,7 @@ enum Command {
         /// `evidence.aff4` is followed by `evidence.aff4.1`, `evidence.aff4.2`,
         /// and so on. A set is limited to 4096 parts.
         #[arg(long, value_enum, value_name = "SIZE")]
-        split_file: Option<SplitSize>,
+        multi_part: Option<PartSize>,
 
         /// Skip verification of hash digests in .aff4 after acquisition completes.
         #[arg(long)]
@@ -287,7 +282,7 @@ enum Command {
 
     /// Write a disk image out as raw dd; or, export logical files to a directory.
     Export {
-        /// The container to export. Any part of a split set will do.
+        /// The container to export. Any part of a multi-part set will do.
         #[arg(value_name = "PATH")]
         path: PathBuf,
 
@@ -304,15 +299,15 @@ enum Command {
     Verify {
         /// Containers to verify.
         #[arg(
-            required_unless_present = "split_file",
+            required_unless_present = "multi_part",
             value_name = "PATH",
-            conflicts_with = "split_file"
+            conflicts_with = "multi_part"
         )]
         paths: Vec<PathBuf>,
 
-        /// Folder containing a split-file .aff4.
+        /// Folder containing a multi-part .aff4.
         #[arg(long, value_name = "DIR", conflicts_with = "paths")]
-        split_file: Option<PathBuf>,
+        multi_part: Option<PathBuf>,
 
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -375,13 +370,13 @@ impl From<Compression> for aff4tools::Codec {
     }
 }
 
-/// How large each part of a split set may grow before the next one starts.
+/// How large each part of a multi-part set may grow before the next one starts.
 ///
 /// A fixed set rather than a free-form size: these are the values examiners
 /// actually choose, and constraining them lets clap reject a typo with the
 /// valid list rather than accepting `3G` and producing an odd set.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum SplitSize {
+enum PartSize {
     /// 10 MB per part — for testing only, hidden from `--help`.
     ///
     /// Every other value here is a size an examiner would choose, and all are
@@ -414,7 +409,7 @@ enum SplitSize {
     ThirtyTwo,
 }
 
-impl SplitSize {
+impl PartSize {
     /// The threshold in bytes.
     fn bytes(self) -> u64 {
         let gib = 1u64 << 30;
@@ -509,13 +504,13 @@ fn run() -> ExitCode {
     match cli.command {
         Command::Info {
             paths,
-            split_file,
+            multi_part,
             format,
             strict,
             objects,
             brief,
             full_listing,
-        } => match into_sets(paths, split_file) {
+        } => match into_sets(paths, multi_part) {
             Ok((sets, line)) => {
                 if let Some(line) = line {
                     println!("{line}");
@@ -533,10 +528,10 @@ fn run() -> ExitCode {
         },
         Command::Conformance {
             paths,
-            split_file,
+            multi_part,
             format,
             strict,
-        } => match into_sets(paths, split_file) {
+        } => match into_sets(paths, multi_part) {
             Ok((sets, line)) => {
                 if let Some(line) = line {
                     println!("{line}");
@@ -549,12 +544,11 @@ fn run() -> ExitCode {
             images,
             logical,
             device,
-            discover_split,
             output,
             compression,
             chunk_size,
             chunks_per_bevy,
-            split_file,
+            multi_part,
             no_verify,
             deduplicate,
             log,
@@ -565,7 +559,6 @@ fn run() -> ExitCode {
             &images,
             &logical,
             device.as_deref(),
-            discover_split,
             &output,
             log.as_deref(),
             AcquireOptions {
@@ -574,7 +567,7 @@ fn run() -> ExitCode {
                 chunks_per_bevy,
                 verify_written_container: !no_verify,
                 deduplicate,
-                split_after: split_file.map(SplitSize::bytes),
+                multi_part_after: multi_part.map(PartSize::bytes),
                 scan_first,
                 // Clap enforces the exclusion, so the two flags cannot both be
                 // set. `--aff4l-legacy` is named for symmetry and to let a
@@ -596,13 +589,13 @@ fn run() -> ExitCode {
 
         Command::Verify {
             paths,
-            split_file,
+            multi_part,
             format,
             no_block_hashing,
             strict,
             verbose,
             full_listing,
-        } => match into_sets(paths, split_file) {
+        } => match into_sets(paths, multi_part) {
             Ok((sets, line)) => {
                 if let Some(line) = line {
                     println!("{line}");
@@ -624,22 +617,22 @@ fn run() -> ExitCode {
 /// Group the command line into the sets of volumes to open.
 ///
 /// Positional paths are independent containers, one set each. A
-/// `--split-file` is a single set: every part of one image, in part order.
+/// `--multi-part` is a single set: every part of one image, in part order.
 /// The returned string, when present, is the discovery line to print before
 /// reading begins.
 ///
 /// # Errors
 ///
 /// [`Error::Malformed`](aff4tools::Error::Malformed) if the folder holds no
-/// split set, holds two kinds at once, or has a gap in its part numbering.
+/// multi-part set, holds two kinds at once, or has a gap in its part numbering.
 fn into_sets(
     paths: Vec<PathBuf>,
-    split_file: Option<PathBuf>,
+    multi_part: Option<PathBuf>,
 ) -> aff4tools::Result<(Vec<Vec<PathBuf>>, Option<String>)> {
-    match split_file {
+    match multi_part {
         None => Ok((paths.into_iter().map(|p| vec![p]).collect(), None)),
         Some(dir) => {
-            let set = aff4tools::split_set::discover(&dir)?;
+            let set = aff4tools::multi_part::discover(&dir)?;
             let line = set.discovery_line();
             Ok((vec![set.parts], Some(line)))
         }
@@ -650,7 +643,7 @@ fn into_sets(
 /// Export a container: a raw image, or an AFF4-L's files.
 ///
 /// Any part of a
-/// split set may be named — siblings are discovered and the whole image is
+/// multi-part set may be named — siblings are discovered and the whole image is
 /// written — so the container's shape is invisible here exactly as it is
 /// through the C ABI.
 fn run_export(
@@ -669,24 +662,31 @@ fn run_export(
     run_export_image(path, output)
 }
 
-/// Every part of the split set `path` belongs to, or just `path`.
+/// Every part of the multi-part set `path` belongs to, or just `path`.
 ///
 /// Mirrors `aff4tools-ffi`'s `parts_of`: naming any part opens the whole set.
-fn split_parts_of(path: &std::path::Path) -> Vec<PathBuf> {
+fn parts_of(path: &std::path::Path) -> Vec<PathBuf> {
     let alone = || vec![path.to_path_buf()];
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return alone();
     };
-    if aff4tools::split_set::part_number(name).is_none() {
-        return alone();
-    }
+    // Deliberately **not** gated on the name carrying an ordinal. Under
+    // AFF4-L v1.0-ALPHA §8 the first part of a set is `evidence.aff4`, with no
+    // ordinal at all -- indistinguishable by name from a lone container. So a
+    // name without a number is exactly the case that must still look for
+    // siblings, and `discover` below is what settles which it is.
+    //
+    // The cost is a directory listing per open. That was measured against the
+    // alternative: skipping the scan for an unsuffixed name made `export` read
+    // only part 1 of an AFF4-L v1.0-ALPHA §8 set and fail on a stub stream.
+    let _ = &name;
     let dir = match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => std::path::Path::new("."),
     };
-    match aff4tools::split_set::discover(dir) {
+    match aff4tools::multi_part::discover(dir) {
         Ok(set)
-            if set.kind == aff4tools::split_set::SplitKind::Aff4
+            if set.kind == aff4tools::multi_part::PartKind::Aff4
                 && set.parts.iter().any(|p| p == path) =>
         {
             set.parts
@@ -695,15 +695,15 @@ fn split_parts_of(path: &std::path::Path) -> Vec<PathBuf> {
     }
 }
 
-/// Open a container and the disk image it holds, following split parts.
+/// Open a container and the disk image it holds, following parts.
 ///
-/// The first part is the primary whatever part was named: in a split set only
+/// The first part is the primary whatever part was named: in a multi-part set only
 /// part 001 carries the Map, so opening the named part as primary fails for
 /// every other part.
 fn open_disk_image(
     path: &std::path::Path,
 ) -> Result<(aff4tools::Container, aff4tools::image::Image, PathBuf), String> {
-    let parts = split_parts_of(path);
+    let parts = parts_of(path);
     let primary = parts.first().cloned().unwrap_or_else(|| path.to_path_buf());
     let locus = aff4tools::Locus::new(&primary);
 
@@ -1486,7 +1486,7 @@ fn verify(
     if paths.len() == 1 {
         let missing = container.missing_volume_arns();
         if !missing.is_empty() {
-            return Err(OpenError::PartOfSplitSet {
+            return Err(OpenError::PartOfMultiPartSet {
                 path: paths[0].clone(),
                 missing: missing.len(),
             });
@@ -1500,7 +1500,7 @@ fn verify(
     if let Some(out) = header {
         let _ = report::write_identity_block(out, &summary);
         if paths.len() > 1
-            && let Some(line) = describe_split_layout(&mut container, &summary)
+            && let Some(line) = describe_part_layout(&mut container, &summary)
         {
             let _ = writeln!(out, "{line}");
         }
@@ -1535,9 +1535,9 @@ fn verify(
 /// [`None`] when the set holds a single stored stream, or when no image's map
 /// can be resolved: nothing is claimed that was not read. The layout is
 /// inferred from map geometry rather than declared — see
-/// [`aff4tools::Map::split_layout`] — so the line says so, and both layouts
+/// [`aff4tools::Map::part_layout`] — so the line says so, and both layouts
 /// reassemble identically.
-fn describe_split_layout(container: &mut Container, summary: &ContainerSummary) -> Option<String> {
+fn describe_part_layout(container: &mut Container, summary: &ContainerSummary) -> Option<String> {
     let lexicon = container.lexicon();
     let mapping = container.name_mapping();
     let images: Vec<Aff4Object> = summary
@@ -1558,8 +1558,8 @@ fn describe_split_layout(container: &mut Container, summary: &ContainerSummary) 
         ) else {
             continue;
         };
-        let layout = image.map().split_layout();
-        if layout == SplitLayout::Single {
+        let layout = image.map().part_layout();
+        if layout == PartLayout::Single {
             continue;
         }
         return Some(format!(
@@ -2925,7 +2925,7 @@ struct AcquireOptions {
     /// When set, write the image across several parts, starting a new one once
     /// the current part reaches this many bytes on disk. Applies to the
     /// byte-stream sources, `--image` and `--device`; `--logical` is refused.
-    split_after: Option<u64>,
+    multi_part_after: Option<u64>,
     /// Whether a logical acquisition inventories the tree to completion before
     /// acquiring, so the progress total is exact from the start.
     scan_first: bool,
@@ -2933,7 +2933,7 @@ struct AcquireOptions {
     logical_profile: aff4tools::write::logical::LogicalProfile,
 }
 
-/// Whether a path names the first segment of a split-raw set, e.g. `img.001`.
+/// Whether a path names the first part of a raw multi-part set, e.g. `img.001`.
 ///
 /// Deliberately narrow: an existing regular file whose extension is entirely
 /// digits. A file with no extension, a non-numeric one, or a folder is not a
@@ -2941,9 +2941,9 @@ struct AcquireOptions {
 /// the ordinary single-file source path so their own errors are reported.
 ///
 /// Any numeric suffix qualifies, not only `001`, so that naming a middle
-/// segment is recognized as a split set and refused by `preceding_segment`
+/// part is recognized as a multi-part set and refused by `preceding_part`
 /// rather than quietly acquired as a lone file.
-fn is_split_first_segment(path: &Path) -> bool {
+fn is_raw_first_part(path: &Path) -> bool {
     path.is_file()
         && path
             .extension()
@@ -2951,16 +2951,16 @@ fn is_split_first_segment(path: &Path) -> bool {
             .is_some_and(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// The segment immediately before `path` in its split set, if it exists.
+/// The part immediately before `path` in its multi-part set, if it exists.
 ///
-/// Used to reject a source that is not the set's first segment. Only the
+/// Used to reject a source that is not the set's first part. Only the
 /// immediate predecessor is checked: with it absent, `path` is the start of a
 /// contiguous run, and any earlier segment beyond that hole is a gap, which
-/// `discover_split` reports from the other side.
+/// `discover_multi_part` reports from the other side.
 ///
 /// The suffix width is preserved, so `img.010` looks for `img.009` and never
 /// `img.9`.
-fn preceding_segment(path: &Path) -> Option<PathBuf> {
+fn preceding_part(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
     let (stem, suffix) = name.rsplit_once('.')?;
     let width = suffix.len();
@@ -2988,7 +2988,6 @@ fn run_acquire(
     images: &[PathBuf],
     logical: &[PathBuf],
     device: Option<&std::path::Path>,
-    discover_split: bool,
     output: &std::path::Path,
     log_path: Option<&std::path::Path>,
     settings: AcquireOptions,
@@ -2998,7 +2997,7 @@ fn run_acquire(
         chunk_size,
         chunks_per_bevy,
         verify_written_container,
-        split_after,
+        multi_part_after,
         ..
     } = settings;
     use aff4tools::write::acquire::ImageSource;
@@ -3008,15 +3007,6 @@ fn run_acquire(
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-
-    // Accepted so existing command lines keep working, but announced, because
-    // a flag that silently does nothing is worse than one that says so.
-    if discover_split {
-        eprintln!(
-            "warning: --discover-split is deprecated and has no effect; \
-             --image <first segment> discovers the set on its own."
-        );
-    }
 
     if let Some(device) = device {
         return run_acquire_device(&mut out, device, output, log_path, settings);
@@ -3029,8 +3019,8 @@ fn run_acquire(
         // `--deduplicate` a pool spanning parts would let one part's files
         // depend on chunks stored in another, so no part would be independently
         // readable. Neither is specified.
-        if settings.split_after.is_some() {
-            eprintln!("error: --split-file is not yet supported for --logical acquisitions.");
+        if settings.multi_part_after.is_some() {
+            eprintln!("error: --multi-part is not yet supported for --logical acquisitions.");
             eprintln!(
                 "       An AFF4-L container is a set of files rather than a byte stream, so \
                  parts would be divided at file boundaries. That division, and what a \
@@ -3064,51 +3054,51 @@ names for this format; writing {}",
         return ExitCode::from(EXIT_USAGE);
     }
 
-    // Resolve the source set first, so a split-set gap fails before anything
+    // Resolve the source set first, so a gap in the set fails before anything
     // is created.
-    let paths: Vec<PathBuf> = if images.len() == 1 && is_split_first_segment(&images[0]) {
-        // A first segment stands for its whole set, the same way a folder
-        // does. Discovery runs unconditionally because a gap must be an error
-        // even when the examiner did not know the source was split: acquiring
-        // `name.001` alone, silently, is the data-loss this guards against.
+    let paths: Vec<PathBuf> = if images.len() == 1 && is_raw_first_part(&images[0]) {
+        // A first part stands for its whole set, the same way a folder does,
+        // and no flag gates that: a gap must be an error even when the
+        // examiner did not know the source was multi-part. Acquiring
+        // `name.001` alone, silently, is the data loss this guards against.
         //
-        // `discover_split` reads forward from the segment it is given, so a
-        // segment with predecessors would acquire the tail of the set as if it
+        // `discover_multi_part` reads forward from the part it is given, so a
+        // part with predecessors would acquire the tail of the set as if it
         // were the whole image — data loss that verifies clean, since the
         // digests would describe exactly the bytes that were read. Refuse.
-        if let Some(earlier) = preceding_segment(&images[0]) {
+        if let Some(earlier) = preceding_part(&images[0]) {
             eprintln!(
-                "error: {} is not the first segment of its split set; {} exists.",
+                "error: {} is not the first part of its multi-part set; {} exists.",
                 images[0].display(),
                 earlier.display()
             );
             eprintln!(
                 "       Acquiring from here would silently omit every earlier \
-                 segment. Name the first segment, or its folder, instead."
+                 part. Name the first part, or its folder, instead."
             );
             return ExitCode::from(EXIT_USAGE);
         }
-        match ImageSource::discover_split(&images[0]) {
+        match ImageSource::discover_multi_part(&images[0]) {
             Ok(found) => {
                 if found.len() > 1 {
-                    let _ = writeln!(out, "Found {} split files.", found.len());
+                    let _ = writeln!(out, "Found {} parts.", found.len());
                 }
                 found
             }
             Err(e) => return ExitCode::from(report_error(&e)),
         }
     } else if images.len() == 1 && images[0].is_dir() {
-        // One folder may stand for a whole split set, so an examiner need not
+        // One folder may stand for a whole multi-part set, so an examiner need not
         // name every part. Ambiguous folders are refused rather than guessed at.
-        match aff4tools::split_set::discover(&images[0]) {
+        match aff4tools::multi_part::discover(&images[0]) {
             Ok(set) => {
                 // Re-imaging an existing AFF4 set would hash the container
                 // bytes rather than the image they carry, producing a digest
                 // that does not describe the evidence. Refuse instead.
-                if set.kind == aff4tools::split_set::SplitKind::Aff4 {
+                if set.kind == aff4tools::multi_part::PartKind::Aff4 {
                     eprintln!(
                         "error: {} holds a set of AFF4 containers, and --image cannot \
-                         tell a split set apart from a striped one by looking at the \
+                         tell a multi-part set apart from a striped one by looking at the \
                          folder.",
                         images[0].display()
                     );
@@ -3162,8 +3152,8 @@ names for this format; writing {}",
     };
     let out = &mut out;
 
-    let _ = writeln!(out, "Source:      {} segment(s)", source.segments().len());
-    for segment in source.segments() {
+    let _ = writeln!(out, "Source:      {} part(s)", source.parts().len());
+    for segment in source.parts() {
         let _ = writeln!(out, "             {}", segment.display());
     }
     let _ = writeln!(out, "Size:        {}", human_bytes(source.total_size()));
@@ -3198,7 +3188,7 @@ names for this format; writing {}",
         aff4tools::HashAlgorithm::Md5,
     ];
 
-    if let Some(split_after) = split_after {
+    if let Some(multi_part_after) = multi_part_after {
         // `--image` behavior is unchanged: a write failure and a verification
         // floor both become the same exit code, exactly as before this
         // function distinguished them for `--device`.
@@ -3207,9 +3197,9 @@ names for this format; writing {}",
             output,
             &mut reader,
             source.total_size(),
-            aff4tools::write::split_writer::SplitOptions {
+            aff4tools::write::multi_part_writer::MultiPartOptions {
                 stream: options,
-                split_after,
+                multi_part_after,
             },
             &algorithms,
             &registry,
@@ -3333,7 +3323,7 @@ names for this format; writing {}",
     ExitCode::from(worst)
 }
 
-/// The caller's reporting hook, run after a split set is written.
+/// The caller's reporting hook, run after a multi-part set is written.
 ///
 /// See `run_acquire_split` for what it receives and what its return value means.
 type AcquireReporter<'a> = &'a mut dyn FnMut(&mut dyn Write, &[PathBuf]) -> u8;
@@ -3382,7 +3372,7 @@ fn run_acquire_from_aff4(
         chunk_size,
         chunks_per_bevy,
         verify_written_container,
-        split_after,
+        multi_part_after,
         ..
     } = settings;
 
@@ -3441,15 +3431,15 @@ fn run_acquire_from_aff4(
 
     let mut reader = source.reader();
 
-    if let Some(split_after) = split_after {
+    if let Some(multi_part_after) = multi_part_after {
         let code = match run_acquire_split(
             out,
             output,
             &mut reader,
             total_size,
-            aff4tools::write::split_writer::SplitOptions {
+            aff4tools::write::multi_part_writer::MultiPartOptions {
                 stream: options,
-                split_after,
+                multi_part_after,
             },
             &algorithms,
             registry,
@@ -3571,7 +3561,7 @@ fn run_acquire_from_aff4(
 /// 3..=6) and nothing after it — including the completion transcript — should
 /// print. `Ok(floor)` means the set was written and `floor` is any exit-code
 /// floor contributed by the `after` verification hook.
-// The argument list mirrors what `write_split_set` itself needs (output,
+// The argument list mirrors what `write_multi_part` itself needs (output,
 // reader, size, options, algorithms, registry) plus the caller's `after`
 // reporting hook; each is used independently and splitting them into a
 // struct would not make a call site clearer.
@@ -3581,7 +3571,7 @@ fn run_acquire_split(
     output: &std::path::Path,
     reader: &mut dyn std::io::Read,
     source_size: u64,
-    options: aff4tools::write::split_writer::SplitOptions,
+    options: aff4tools::write::multi_part_writer::MultiPartOptions,
     algorithms: &[aff4tools::HashAlgorithm],
     registry: &aff4tools::write::guard::SourceRegistry,
     after: Option<AcquireReporter<'_>>,
@@ -3590,18 +3580,20 @@ fn run_acquire_split(
 
     // Fail before a single part is created if the source cannot fit within the
     // part-number limit, so the refusal costs nothing.
-    if let Err(e) =
-        aff4tools::write::split_writer::preflight(source_size, options.split_after, &locus)
-    {
+    if let Err(e) = aff4tools::write::multi_part_writer::preflight(
+        source_size,
+        options.multi_part_after,
+        &locus,
+    ) {
         return Err(report_error(&e));
     }
 
     let mut painter =
         painter::ProgressPainter::new(std::io::IsTerminal::is_terminal(&std::io::stderr()));
     let mut reporter = aff4tools::progress::BlockProgress::new(source_size);
-    // Progress from `write_split_set` is already cumulative across parts, so it
+    // Progress from `write_multi_part` is already cumulative across parts, so it
     // passes straight through.
-    let set = match aff4tools::write::split_writer::write_split_set(
+    let set = match aff4tools::write::multi_part_writer::write_multi_part(
         output,
         reader,
         source_size,
@@ -3639,14 +3631,10 @@ fn run_acquire_split(
     // through 003" described a four-part set with three numbers in it.
     match last {
         Some(last) => {
-            let _ = writeln!(
-                out,
-                "Wrote {} split file(s), through {last}.",
-                set.parts.len()
-            );
+            let _ = writeln!(out, "Wrote {} part(s), through {last}.", set.parts.len());
         }
         None => {
-            let _ = writeln!(out, "Wrote {} split file(s).", set.parts.len());
+            let _ = writeln!(out, "Wrote {} part(s).", set.parts.len());
         }
     }
     let _ = writeln!(out, "Image:       {}", set.image_arn);
@@ -3732,9 +3720,9 @@ fn run_acquire_logical(
         chunks_per_bevy,
         deduplicate,
         verify_written_container,
-        // `run_acquire` refuses `--split-file` alongside `--logical` with a
+        // `run_acquire` refuses `--multi-part` alongside `--logical` with a
         // worded error, so it never reaches here.
-        split_after: _,
+        multi_part_after: _,
         scan_first,
         logical_profile,
     } = settings;
@@ -4107,7 +4095,7 @@ fn run_acquire_device(
         chunk_size,
         chunks_per_bevy,
         verify_written_container,
-        split_after,
+        multi_part_after,
         ..
     } = settings;
     use aff4tools::write::container_writer::ContainerWriter;
@@ -4189,7 +4177,7 @@ fn run_acquire_device(
     );
     let _ = writeln!(out);
 
-    if let Some(split_after) = split_after {
+    if let Some(multi_part_after) = multi_part_after {
         let mut reader = DeviceReader::new(file, total, DeviceOptions::default());
         let algorithms = [
             aff4tools::HashAlgorithm::Sha256,
@@ -4205,9 +4193,9 @@ fn run_acquire_device(
             output,
             &mut reader,
             total,
-            aff4tools::write::split_writer::SplitOptions {
+            aff4tools::write::multi_part_writer::MultiPartOptions {
                 stream: options,
-                split_after,
+                multi_part_after,
             },
             &algorithms,
             &registry,
@@ -4507,12 +4495,12 @@ fn verify_after_acquire(
     worst
 }
 
-/// Verify a split set in place, reading its parts as the one image they form.
+/// Verify a multi-part set in place, reading its parts as the one image they form.
 ///
 /// `verify_after_acquire` cannot serve here: it calls `verify_written`, which
 /// opens a single container. A part opened alone is a partial view of the
 /// evidence, so the whole set is opened together through the same path
-/// `verify --split-file` uses.
+/// `verify --multi-part` uses.
 fn verify_set_after_acquire(out: &mut dyn Write, parts: &[PathBuf], size: u64, verify: bool) -> u8 {
     let mut worst = 0u8;
 
@@ -4521,7 +4509,7 @@ fn verify_set_after_acquire(out: &mut dyn Write, parts: &[PathBuf], size: u64, v
             out,
             "Scope:       digests were recorded from the source as it was read, \
              but not checked against the container (--no-verify). Run \
-             `aff4tools verify --split-file` to check them."
+             `aff4tools verify --multi-part` to check them."
         );
         return worst;
     }
@@ -5053,14 +5041,14 @@ struct InfoJsonReport {
 #[derive(Debug, serde::Serialize)]
 struct ContainerError {
     /// The path given on the command line that this error is about. For a
-    /// `--split-file` set, the primary (first) path.
+    /// `--multi-part` set, the primary (first) path.
     path: PathBuf,
     /// A stable, short token for the failure category — the same grouping
     /// [`Error::exit_code`] uses, so a script can match on it without parsing
     /// `message`. One of `"io"`, `"zip"`, `"not_aff4"`, `"malformed"`,
-    /// `"unsupported"`, `"usage"` (a command-line mistake, e.g. a `--split-file`
+    /// `"unsupported"`, `"usage"` (a command-line mistake, e.g. a `--multi-part`
     /// set that shares no volume, which is not a fact about the evidence at
-    /// all), or `"unverifiable"` (one part of a split set was named, so bytes
+    /// all), or `"unverifiable"` (one part of a multi-part set was named, so bytes
     /// the recorded digests cover are not present).
     kind: &'static str,
     /// The top-level error message, exactly as the text report's first line
@@ -5303,9 +5291,9 @@ fn open_striped_inner(
 enum OpenError {
     Library(Error),
     Usage(String),
-    /// The single file named is one part of a split set, so the volumes it
+    /// The single file named is one part of a multi-part set, so the volumes it
     /// references are not all present.
-    PartOfSplitSet {
+    PartOfMultiPartSet {
         /// The path the examiner named.
         path: PathBuf,
         /// How many volumes it references but does not hold.
@@ -5332,15 +5320,15 @@ impl OpenError {
             // bytes that cannot be read back. That is exactly what
             // `EXIT_UNVERIFIABLE` means, and it beats a reassuring partial
             // report over whichever streams happened to be present.
-            Self::PartOfSplitSet { path, missing } => {
+            Self::PartOfMultiPartSet { path, missing } => {
                 eprintln!(
-                    "error: {} is one part of a split set; it references {missing} volume(s) \
+                    "error: {} is one part of a multi-part set; it references {missing} volume(s) \
                      it does not hold.",
                     path.display()
                 );
                 eprintln!(
                     "       Pass the containing folder: \
-                     aff4tools verify --split-file <dir>"
+                     aff4tools verify --multi-part <dir>"
                 );
                 EXIT_UNVERIFIABLE
             }
@@ -5356,15 +5344,15 @@ impl OpenError {
         match self {
             Self::Library(e) => (ContainerError::from(e, path), e.exit_code()),
             Self::Usage(detail) => (ContainerError::from_usage(detail, path), EXIT_USAGE),
-            Self::PartOfSplitSet {
+            Self::PartOfMultiPartSet {
                 path: part,
                 missing,
             } => (
                 ContainerError::from_unverifiable(
                     &format!(
-                        "{} is one part of a split set; it references {missing} volume(s) \
+                        "{} is one part of a multi-part set; it references {missing} volume(s) \
                          it does not hold. Pass the containing folder: \
-                         aff4tools verify --split-file <dir>",
+                         aff4tools verify --multi-part <dir>",
                         part.display()
                     ),
                     path,
@@ -5383,7 +5371,7 @@ impl OpenError {
 /// identifier differs per volume. Volumes sharing none are not a striped
 /// container.
 ///
-/// Checked before verifying because `--split-file` is an **assertion by the
+/// Checked before verifying because `--multi-part` is an **assertion by the
 /// examiner** that these files are one image. Verifying anyway mostly works —
 /// each object resolves against whichever volume owns it — so the mistake would
 /// surface only as a puzzling decline several screens below a reassuring
@@ -5441,7 +5429,7 @@ fn check_stripe_set(container: &mut Container) -> std::result::Result<(), String
     }
     detail.push_str(
         "\nTo verify these as separate containers, pass them as plain paths \
-         rather than --split-file.",
+         rather than --multi-part.",
     );
 
     Err(detail)
@@ -5558,14 +5546,14 @@ mod tests {
     fn split_write_failure_is_not_masked_by_unreadable_sectors() {
         use aff4tools::write::device::{DeviceOptions, DeviceReader, FaultyReader};
         use aff4tools::write::guard::SourceRegistry;
-        use aff4tools::write::split_writer::{SplitOptions, part_path};
+        use aff4tools::write::multi_part_writer::{MultiPartOptions, part_path};
         use aff4tools::write::stream_writer::StreamOptions;
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("evidence.aff4");
 
         // Bad sector inside part 1's byte range (part boundary is at
-        // `split_after` = 64 KiB), so it is recorded before part 2 fails.
+        // `multi_part_after` = 64 KiB), so it is recorded before part 2 fails.
         let total = 192 * 1024u64;
         let data = vec![0xABu8; total as usize];
         let faulty = FaultyReader::new(data, 4096..8192);
@@ -5583,14 +5571,14 @@ mod tests {
             aff4tools::HashAlgorithm::Sha256,
             aff4tools::HashAlgorithm::Md5,
         ];
-        let options = SplitOptions {
+        let options = MultiPartOptions {
             stream: StreamOptions {
                 chunk_size: 4096,
                 chunks_per_segment: 2,
                 codec: aff4tools::Codec::Stored,
                 block_hashes: true,
             },
-            split_after: 64 * 1024,
+            multi_part_after: 64 * 1024,
         };
 
         let mut out = Vec::new();

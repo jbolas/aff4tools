@@ -23,7 +23,7 @@
  *
  * Everything here reads. There is no write, truncate, or create entry point.
  *
- * Split sets are invisible: AFF4_open on any part of a numbered set discovers
+ * Multi-part sets are invisible: AFF4_open on any part of a numbered set discovers
  * its siblings and presents the whole image. A caller cannot tell, and does not
  * need to know, whether a container is one file or twenty.
  */

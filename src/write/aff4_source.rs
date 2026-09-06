@@ -1,7 +1,7 @@
 //! Reading an existing AFF4 container as an acquisition source.
 //!
 //! Converting a
-//! container — single-file to split set, or one codec to another — needs no
+//! container — single-file to multi-part set, or one codec to another — needs no
 //! mount, no block device, and no operating-system cooperation. It needs the
 //! random-access seam and a `Read` adapter over it, which is what this is.
 //!

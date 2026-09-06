@@ -380,13 +380,13 @@ impl GapFill {
     }
 }
 
-/// How a split set's stored streams are laid out across its parts.
+/// How a multi-part set's stored streams are laid out across its parts.
 ///
 /// Descriptive rather than normative: the specification defines no property
 /// recording this, and both layouts reassemble through the same Map. See
-/// [`Map::split_layout`] for how it is inferred.
+/// [`Map::part_layout`] for how it is inferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitLayout {
+pub enum PartLayout {
     /// One stored stream, so nothing is split across parts.
     Single,
     /// Each part is filled before the next begins.
@@ -395,7 +395,7 @@ pub enum SplitLayout {
     Striped,
 }
 
-impl SplitLayout {
+impl PartLayout {
     /// A phrase for a report.
     #[must_use]
     pub fn describe(self) -> &'static str {
@@ -778,7 +778,7 @@ impl Map {
     ///
     /// The random-access counterpart to [`Map::read_all`], and short **only**
     /// at the end of the image. Works against any [`StreamSource`], so one
-    /// implementation serves a single volume, a striped set, and a split set
+    /// implementation serves a single volume, a striped set, and a multi-part set
     /// alike.
     ///
     /// # Errors
@@ -839,10 +839,10 @@ impl Map {
     /// perfectly sequential image, so counting them would report every set as
     /// striped. Only stored targets are read, since only those live in a part.
     ///
-    /// A map with fewer than two stored streams is [`SplitLayout::Single`]:
+    /// A map with fewer than two stored streams is [`PartLayout::Single`]:
     /// there is no allocation across parts to describe.
     #[must_use]
-    pub fn split_layout(&self) -> SplitLayout {
+    pub fn part_layout(&self) -> PartLayout {
         let mut runs: Vec<u32> = Vec::new();
         for entry in &self.entries {
             if !self.target_of(entry).is_some_and(Target::is_stored) {
@@ -858,12 +858,12 @@ impl Map {
         distinct.dedup();
 
         if distinct.len() < 2 {
-            return SplitLayout::Single;
+            return PartLayout::Single;
         }
         if runs.len() == distinct.len() {
-            SplitLayout::Sequential
+            PartLayout::Sequential
         } else {
-            SplitLayout::Striped
+            PartLayout::Striped
         }
     }
 

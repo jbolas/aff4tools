@@ -1060,7 +1060,7 @@ pub fn estimate_work(
     let dialect = Dialect::of(container);
     let Dialect { lexicon, mapping } = dialect;
 
-    // Every volume's streams, not just the primary's. A split set's parts each
+    // Every volume's streams, not just the primary's. A multi-part set's parts each
     // declare their own stream, so estimating from the primary alone described
     // one part of nine: the run then read 14.9 GiB against a 4.1 GiB total and
     // the meter reported 250%. `objects_across_volumes` short-circuits to the
@@ -1080,10 +1080,10 @@ pub fn estimate_work(
             continue;
         }
         // A stream is read when it carries a digest OR when its block hashes
-        // will be recomputed. A part of a split set records no `aff4:hash` of
+        // will be recomputed. A part of a multi-part set records no `aff4:hash` of
         // its own — one digest describes the whole image stream and lives in
         // part 001 — so testing for a digest alone estimated
-        // zero bytes for an entire split set, and the run then announced
+        // zero bytes for an entire multi-part set, and the run then announced
         // nothing about what it was about to cost. Mirrors the same correction
         // made in `verify_stream`.
         let has_digest = object.hashes.iter().any(|h| h.predicate == "hash");
@@ -1106,7 +1106,7 @@ pub fn estimate_work(
         }
 
         // The volume that actually holds this stream's bevies, not the
-        // primary. In a split set part 002's segments are not members of part
+        // primary. In a multi-part set part 002's segments are not members of part
         // 001, so asking the primary about them found nothing and reported zero
         // stored bytes for eight parts of nine.
         let volume_arn = holding
@@ -1203,7 +1203,7 @@ pub fn estimate_work(
 /// only streams therefore described a fraction of the run: on a 4.4 GiB logical
 /// container the meter announced a 3.3 GiB total and then read past it, because
 /// segment-stored files were work the estimate never admitted existed. The same
-/// assumption the split-set correction fixed for volumes, here for storage
+/// assumption the multi-part correction fixed for volumes, here for storage
 /// form.
 ///
 /// Metadata only, like the rest of the estimate: `uncompressed_bytes` reads the
@@ -1280,7 +1280,7 @@ fn budgeted_hasher(algorithms: &[HashAlgorithm]) -> (MultiHasher, crate::paralle
 
 /// The whole-image digest, computed from the stream passes instead of its own.
 ///
-/// Traversing a split set twice over — once per part to check that part's
+/// Traversing a multi-part set twice over — once per part to check that part's
 /// stored bytes, then once more through the map to compute the image's digest
 /// — reads the same bytes for both. The bytes are identical — only the consumer differs — so a nine-part
 /// set would decompress 14.9 GiB twice to learn two things about the same data.
@@ -1339,7 +1339,7 @@ impl FusedImage {
         // Striped sets interleave streams through the address space, so part
         // order is not image order and feeding bytes as the parts arrive would
         // produce a confidently wrong digest. Out of scope by design.
-        if matches!(image.map().split_layout(), crate::map::SplitLayout::Striped) {
+        if matches!(image.map().part_layout(), crate::map::PartLayout::Striped) {
             return None;
         }
 
@@ -1617,7 +1617,7 @@ fn verify_stream(
     // chunk. Only when there is neither is there nothing to do.
     //
     // This decision sits below the `blocks` binding for a reason. A part of a
-    // split set records no `aff4:hash` of its own — one digest describes the
+    // multi-part set records no `aff4:hash` of its own — one digest describes the
     // whole image stream and lives in part 001 — so
     // returning on `recorded.is_empty()` alone skipped every leaf in the set,
     // while the identical evidence in one file was checked in full.
@@ -2932,7 +2932,7 @@ fn verify_striped_block_map_hash(
                 "every stripe verified individually, but the order they combine \
                  in is not recorded in the container and none of the orders \
                  tried ({}) reproduced this digest. Pass the folder holding \
-                 them with --split-file, named in acquisition order",
+                 them with --multi-part, named in acquisition order",
                 tried.join(", ")
             ),
         ));

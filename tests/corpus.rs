@@ -2792,7 +2792,7 @@ fn a_missing_stripe_declines_rather_than_fabricating() {
 
     let message = err.to_string();
     assert!(
-        message.contains("stub") || message.contains("--split-file"),
+        message.contains("stub") || message.contains("--multi-part"),
         "the error must say which volume is missing and how to supply it: {message}"
     );
 }

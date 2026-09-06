@@ -162,7 +162,7 @@ fn a_split_source_acquires_as_one_stream() {
     write_source(&dir.path().join("s.001"), &vec![0xA1; 5000]);
     write_source(&dir.path().join("s.002"), &vec![0xB2; 5000]);
 
-    let found = ImageSource::discover_split(&dir.path().join("s.001")).unwrap();
+    let found = ImageSource::discover_multi_part(&dir.path().join("s.001")).unwrap();
     let mut registry = SourceRegistry::new();
     let source = ImageSource::open(&found, &mut registry).unwrap();
     assert_eq!(source.total_size(), 10_000);

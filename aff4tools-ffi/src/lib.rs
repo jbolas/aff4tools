@@ -19,7 +19,7 @@
 //!
 //! # The shape of a container is not the consumer's problem
 //!
-//! [`AFF4_open`] on **any** part of a split set discovers its siblings and
+//! [`AFF4_open`] on **any** part of a multi-part set discovers its siblings and
 //! presents the whole image. A caller cannot tell, and must not need to know,
 //! whether a container is one file or twenty. A gap in the numbering is an
 //! error rather than a silently short image.
@@ -156,7 +156,7 @@ fn report(out: *mut *mut AFF4_Message, level: AFF4_LOG_LEVEL, text: &str) {
     unsafe { *out = node };
 }
 
-/// Every part of a split set the named path belongs to, in read order.
+/// Every part of a multi-part set the named path belongs to, in read order.
 ///
 /// A consumer names one file; a container may be many. Scanning the directory
 /// is what makes the shape invisible, which is the point — see the module
@@ -172,10 +172,12 @@ fn parts_of(path: &Path) -> Vec<PathBuf> {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return vec![path.to_path_buf()];
     };
-    if aff4tools::split_set::part_number(name).is_none() {
-        // Not a numbered part, so it stands alone.
-        return vec![path.to_path_buf()];
-    }
+    // Deliberately **not** gated on the name carrying an ordinal. Under
+    // AFF4-L v1.0-ALPHA §8 the first part of a set is `evidence.aff4`, with no
+    // ordinal at all -- indistinguishable by name from a lone container. So a
+    // name without a number is exactly the case that must still look for
+    // siblings, and `discover` below is what settles which it is.
+    let _ = &name;
 
     let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -183,8 +185,8 @@ fn parts_of(path: &Path) -> Vec<PathBuf> {
         dir
     };
 
-    match aff4tools::split_set::discover(dir) {
-        Ok(set) if set.kind == aff4tools::split_set::SplitKind::Aff4 => {
+    match aff4tools::multi_part::discover(dir) {
+        Ok(set) if set.kind == aff4tools::multi_part::PartKind::Aff4 => {
             // `discover` refuses a set with a gap in its numbering, so reaching
             // here means the set is complete. A short image would be worse than
             // an error: it verifies clean and describes evidence that was never
@@ -209,7 +211,7 @@ fn open_image(path: &Path) -> Result<(Container, Image, Locus, u64, Arn), String
 
     // The **first** part is the primary, whatever part the caller named.
     //
-    // In a split set only part 001 carries the Map and the full metadata; the
+    // In a multi-part set only part 001 carries the Map and the full metadata; the
     // rest declare their own streams and little else. Opening the named part as
     // primary therefore worked for part 001 and failed for every other part
     // with "image names no data stream" — the map was simply not in that file.
@@ -337,7 +339,7 @@ pub unsafe extern "C" fn AFF4_free_messages(msg: *mut AFF4_Message) {
 
 /// Open a container and access the first disk image it holds.
 ///
-/// Any part of a split set opens the whole set: the consumer never learns the
+/// Any part of a multi-part set opens the whole set: the consumer never learns the
 /// container's shape.
 ///
 /// Returns null on failure, with `msg` populated when it is non-null.

@@ -20,7 +20,7 @@ pub trait AcquisitionProgress {
     fn line(&self, elapsed: Duration) -> String;
 }
 
-/// Progress for a source whose size is known: a device, an image, a split set.
+/// Progress for a source whose size is known: a device, an image, a multi-part set.
 pub struct BlockProgress {
     total: u64,
     done: u64,

@@ -7,10 +7,10 @@
 //!
 //! # Split raw carries a gap
 //!
-//! Nothing inside a split set records how many segments there should be, so a
-//! missing final segment yields a shorter image that is internally consistent
+//! Nothing inside a multi-part set records how many parts there should be, so a
+//! missing final part yields a shorter image that is internally consistent
 //! and verifies clean. This module therefore refuses a set with a gap in its
-//! numbering and reports the segment count, rather than inferring completeness.
+//! numbering and reports the part count, rather than inferring completeness.
 
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -22,8 +22,8 @@ use crate::error::{Error, Locus, Result};
 #[derive(Debug)]
 pub struct ImageSource {
     /// Every file making up the source, in read order.
-    segments: Vec<PathBuf>,
-    /// Total bytes across all segments.
+    parts: Vec<PathBuf>,
+    /// Total bytes across all parts.
     total_size: u64,
 }
 
@@ -35,7 +35,7 @@ impl ImageSource {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if a segment cannot be opened or measured.
+    /// [`Error::Io`] if a part cannot be opened or measured.
     pub fn open(
         paths: &[PathBuf],
         registry: &mut crate::write::guard::SourceRegistry,
@@ -47,7 +47,7 @@ impl ImageSource {
             ));
         }
 
-        let mut segments = Vec::with_capacity(paths.len());
+        let mut parts = Vec::with_capacity(paths.len());
         let mut total_size = 0u64;
 
         for path in paths {
@@ -62,16 +62,13 @@ impl ImageSource {
                 .register(path)
                 .map_err(|e| Error::io(path.clone(), e))?;
             total_size += metadata.len();
-            segments.push(path.clone());
+            parts.push(path.clone());
         }
 
-        Ok(Self {
-            segments,
-            total_size,
-        })
+        Ok(Self { parts, total_size })
     }
 
-    /// Discover a split-raw set from its first segment.
+    /// Discover a raw multi-part set from its first part.
     ///
     /// Accepts `name.001`, `name.002`, … and stops at the first missing
     /// number. **A gap is an error**, not a stopping point: silently acquiring
@@ -79,9 +76,9 @@ impl ImageSource {
     ///
     /// # Errors
     ///
-    /// [`Error::Malformed`] if the first segment's name has no numeric suffix,
+    /// [`Error::Malformed`] if the first part's name has no numeric suffix,
     /// or if the discovered set has a gap.
-    pub fn discover_split(first: &Path) -> Result<Vec<PathBuf>> {
+    pub fn discover_multi_part(first: &Path) -> Result<Vec<PathBuf>> {
         let name = first
             .file_name()
             .and_then(|n| n.to_str())
@@ -90,14 +87,14 @@ impl ImageSource {
         let (stem, suffix) = name.rsplit_once('.').ok_or_else(|| {
             Error::malformed(
                 Locus::new(first),
-                "a split set's first segment must end in a numeric suffix, e.g. .001",
+                "a multi-part set's first part must end in a numeric suffix, e.g. .001",
             )
         })?;
 
         if !suffix.chars().all(|c| c.is_ascii_digit()) || suffix.is_empty() {
             return Err(Error::malformed(
                 Locus::new(first),
-                format!("suffix {suffix:?} is not numeric; not a split set"),
+                format!("suffix {suffix:?} is not numeric; not a multi-part set"),
             ));
         }
 
@@ -121,15 +118,15 @@ impl ImageSource {
             n += 1;
         }
 
-        // A higher-numbered segment beyond the break means a gap: the set is
+        // A higher-numbered part beyond the break means a gap: the set is
         // incomplete in the middle, which no acquisition should proceed past.
         let after_gap = dir.join(format!("{stem}.{:0width$}", n + 1));
         if after_gap.is_file() {
             return Err(Error::malformed(
                 Locus::new(&after_gap),
                 format!(
-                    "split set has a gap: {stem}.{n:0width$} is missing but a \
-                     later segment exists; the acquisition would silently omit data"
+                    "multi-part set has a gap: {stem}.{n:0width$} is missing but a \
+                     later part exists; the acquisition would silently omit data"
                 ),
             ));
         }
@@ -137,10 +134,14 @@ impl ImageSource {
         Ok(found)
     }
 
-    /// Every segment, in read order.
+    /// Every part, in read order.
+    ///
+    /// Parts, not segments: a *segment* is a member inside a container, and a
+    /// *part* is one file of a multi-part set (see `docs/glossary.md`). These
+    /// are files.
     #[must_use]
-    pub fn segments(&self) -> &[PathBuf] {
-        &self.segments
+    pub fn parts(&self) -> &[PathBuf] {
+        &self.parts
     }
 
     /// Total bytes across the whole source.
@@ -149,29 +150,29 @@ impl ImageSource {
         self.total_size
     }
 
-    /// A reader over the whole source, segments concatenated in order.
+    /// A reader over the whole source, parts concatenated in order.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if the first segment cannot be opened.
+    /// [`Error::Io`] if the first part cannot be opened.
     pub fn reader(&self) -> Result<ConcatReader> {
-        ConcatReader::open(self.segments.clone())
+        ConcatReader::open(self.parts.clone())
     }
 }
 
 /// Reads a sequence of files as one continuous bytestream.
 #[derive(Debug)]
 pub struct ConcatReader {
-    segments: Vec<PathBuf>,
+    parts: Vec<PathBuf>,
     index: usize,
     current: Option<BufReader<File>>,
 }
 
 impl ConcatReader {
-    /// Open the first segment; the rest follow as reads exhaust each.
-    fn open(segments: Vec<PathBuf>) -> Result<Self> {
+    /// Open the first part; the rest follow as reads exhaust each.
+    fn open(parts: Vec<PathBuf>) -> Result<Self> {
         let mut reader = Self {
-            segments,
+            parts,
             index: 0,
             current: None,
         };
@@ -179,9 +180,9 @@ impl ConcatReader {
         Ok(reader)
     }
 
-    /// Open the next segment, or leave `current` empty at the end.
+    /// Open the next part, or leave `current` empty at the end.
     fn advance(&mut self) -> Result<()> {
-        self.current = match self.segments.get(self.index) {
+        self.current = match self.parts.get(self.index) {
             Some(path) => {
                 let file = File::open(path).map_err(|e| Error::io(path.clone(), e))?;
                 self.index += 1;
@@ -203,7 +204,7 @@ impl Read for ConcatReader {
             if n > 0 {
                 return Ok(n);
             }
-            // This segment is exhausted; continue into the next one.
+            // This part is exhausted; continue into the next one.
             self.advance()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
@@ -224,13 +225,13 @@ mod tests {
     }
 
     #[test]
-    fn a_split_set_reads_as_one_stream() {
+    fn a_multi_part_reads_as_one_stream() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("img.001"), b"aaaa");
         write_file(&dir.path().join("img.002"), b"bbbb");
         write_file(&dir.path().join("img.003"), b"cc");
 
-        let found = ImageSource::discover_split(&dir.path().join("img.001")).unwrap();
+        let found = ImageSource::discover_multi_part(&dir.path().join("img.001")).unwrap();
         assert_eq!(found.len(), 3);
 
         let mut registry = SourceRegistry::new();
@@ -245,13 +246,13 @@ mod tests {
     /// A gap must be an error. Acquiring a prefix of the evidence and calling
     /// it complete is the failure this exists to prevent.
     #[test]
-    fn a_gap_in_a_split_set_is_refused() {
+    fn a_gap_in_a_multi_part_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("img.001"), b"aaaa");
         // .002 deliberately missing
         write_file(&dir.path().join("img.003"), b"cccc");
 
-        let err = ImageSource::discover_split(&dir.path().join("img.001")).unwrap_err();
+        let err = ImageSource::discover_multi_part(&dir.path().join("img.001")).unwrap_err();
         assert!(err.to_string().contains("gap"), "{err}");
     }
 

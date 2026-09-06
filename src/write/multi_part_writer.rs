@@ -1,6 +1,6 @@
 //! Writing one image across several `.aff4` parts.
 //!
-//! A **part** is one file of a split set; a **segment** is a member inside a
+//! A **part** is one file of a multi-part set; a **segment** is a member inside a
 //! volume (`docs/glossary.md`). This module writes *split* sets —
 //! sequential, non-striped — which are the special case of v1.0a §7.1 where map
 //! entries are monotonic and each part holds one stream.
@@ -57,13 +57,13 @@ const LARGEST_PART_SIZE_GIB: u64 = 32;
 /// was a fact about the old `evidence_001.aff4` naming and about nothing else.
 pub const MAX_PARTS: u32 = 4096;
 
-/// How a split set should be written.
+/// How a multi-part set should be written.
 #[derive(Debug, Clone, Copy)]
-pub struct SplitOptions {
+pub struct MultiPartOptions {
     /// Chunking and compression, shared by every part.
     pub stream: StreamOptions,
     /// Start a new part once the current one reaches this many bytes on disk.
-    pub split_after: u64,
+    pub multi_part_after: u64,
 }
 
 /// One written part.
@@ -81,7 +81,7 @@ pub struct WrittenPart {
     pub bevy_count: u64,
 }
 
-/// What a whole split set turned out to be.
+/// What a whole multi-part set turned out to be.
 #[derive(Debug, Clone)]
 pub struct WrittenSet {
     /// Every part, in order.
@@ -120,7 +120,7 @@ pub struct WrittenSet {
 /// a plain lexicographic sort was correct. That scheme was this project's own
 /// invention, described by no specification and used by no container in the
 /// reference corpus. Ordering is now by
-/// [`crate::split_set::natural_cmp`], which compares numeric runs
+/// [`crate::multi_part::natural_cmp`], which compares numeric runs
 /// numerically and so needs no padding.
 #[must_use]
 pub fn part_path(output: &Path, number: u32) -> PathBuf {
@@ -142,14 +142,14 @@ pub fn part_path(output: &Path, number: u32) -> PathBuf {
 /// # Errors
 ///
 /// [`Error::Malformed`] when the worst case exceeds [`MAX_PARTS`].
-pub fn preflight(source_size: u64, split_after: u64, locus: &Locus) -> Result<()> {
-    if split_after == 0 {
+pub fn preflight(source_size: u64, multi_part_after: u64, locus: &Locus) -> Result<()> {
+    if multi_part_after == 0 {
         return Err(Error::malformed(
             locus.clone(),
             "the split threshold must be greater than zero",
         ));
     }
-    let worst_case = source_size.div_ceil(split_after);
+    let worst_case = source_size.div_ceil(multi_part_after);
     if worst_case > u64::from(MAX_PARTS) {
         let needed = source_size.div_ceil(u64::from(MAX_PARTS));
         let suggestion = (needed.next_power_of_two() / (1 << 30)).max(1);
@@ -192,17 +192,17 @@ pub fn preflight(source_size: u64, split_after: u64, locus: &Locus) -> Result<()
 // distinct borrows the caller holds separately, and an options struct would
 // move the same eight values one level down while hiding that.
 #[allow(clippy::too_many_arguments)]
-pub fn write_split_set(
+pub fn write_multi_part(
     output: &Path,
     source: &mut dyn Read,
     source_size: u64,
-    options: SplitOptions,
+    options: MultiPartOptions,
     algorithms: &[HashAlgorithm],
     registry: &SourceRegistry,
     progress: &mut dyn FnMut(u64, u64),
     locus: &Locus,
 ) -> Result<WrittenSet> {
-    preflight(source_size, options.split_after, locus)?;
+    preflight(source_size, options.multi_part_after, locus)?;
 
     // Minted before anything is written: every part refers to these, and the
     // shared DiskImage is what makes the parts one image (v1.0a §7.1).
@@ -278,7 +278,7 @@ pub fn write_split_set(
             feed,
             options.stream,
             &mut hasher,
-            Some(options.split_after),
+            Some(options.multi_part_after),
             // `write_image_stream_bounded` reports bytes within this part, so
             // add the running total or the display resets at every boundary.
             &mut |done, bevies| progress(total + done, bevies),
@@ -390,7 +390,7 @@ fn next_part_number(number: u32, locus: &Locus) -> Result<u32> {
 
 /// Write part 001's Map and the image digest, then close it.
 ///
-/// Split out of [`write_split_set`] because it can only run once every part's
+/// Split out of [`write_multi_part`] because it can only run once every part's
 /// length is known, which is why part 001 stays open to the end.
 // Eight parameters, one over clippy's threshold; every one is a distinct fact
 // about the finished set that only the caller has.
@@ -419,7 +419,7 @@ fn finish_first_part(
                 image_arn,
                 &lexicon.iri(lexicon.hash),
                 // The same construction `write_stream_metadata` uses
-                // (`src/write/stream_writer.rs`), so a split set's digests are
+                // (`src/write/stream_writer.rs`), so a multi-part set's digests are
                 // typed identically to a single-file container's.
                 TurtleTerm::typed(digest.hex(), lexicon.iri(&digest.algorithm().to_string())),
             );

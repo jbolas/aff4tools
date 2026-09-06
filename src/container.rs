@@ -293,7 +293,7 @@ impl Container {
 
     /// Every volume's `aff4:DiskImage` ARNs, paired with the volume's path.
     ///
-    /// The check that a `--split-file` set really is one image: v1.0a §7.1 makes a
+    /// The check that a `--multi-part` set really is one image: v1.0a §7.1 makes a
     /// commonly-named `DiskImage` "the point of commonality unifying" the
     /// volumes, so sharing none means the files are unrelated.
     ///
@@ -997,7 +997,7 @@ impl Container {
 
     /// Report predicates the admitted volumes disagree about.
     ///
-    /// Only meaningful with more than one volume admitted, via `--split-file`;
+    /// Only meaningful with more than one volume admitted, via `--multi-part`;
     /// a lone volume has nothing to disagree with and
     /// must never be faulted for it.
     ///
@@ -1229,7 +1229,7 @@ fn build_object(
 
 /// Whether `stored_arn` resolves within the volumes currently open.
 ///
-/// A split set's parts reference each other by design (v1.0a §7.1): that is what
+/// A multi-part set's parts reference each other by design (v1.0a §7.1): that is what
 /// makes the set reassemblable, and every part necessarily points outside
 /// itself. Noting it is useful when one part is inspected alone, and noise when
 /// the whole set is present and the reference resolves. The distinction is
@@ -1267,7 +1267,7 @@ fn locality_of(
             Ok(stored_arn) => {
                 if !resolves_within(&stored_arn, siblings) {
                     // Normal for one stripe of a striped container, or one part
-                    // of a split set, read alone: the stream genuinely lives in
+                    // of a multi-part set, read alone: the stream genuinely lives in
                     // a volume this reader does not hold. Not an error, but
                     // worth saying, because the view is incomplete.
                     deviations.push(Deviation::new(

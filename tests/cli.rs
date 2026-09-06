@@ -81,7 +81,7 @@ fn corpus_path(relative: &str) -> String {
 /// is a limit of the tool. Getting that wrong would make the code fire on
 /// healthy containers and train an examiner to ignore it.
 ///
-/// **One part of a split set alone is also 9.** The format legitimately
+/// **One part of a multi-part set alone is also 9.** The format legitimately
 /// spreads one image across several files, so a lone part looks ordinary — but
 /// it references volumes it does not hold, so bytes its recorded digests cover
 /// cannot be read back, which is what 9 means. The report names the fix rather
@@ -126,7 +126,7 @@ fn unreadable_evidence_exits_nine_and_tool_limits_do_not() {
 #[cfg(feature = "corpus")]
 #[test]
 fn unreadable_evidence_exits_nine_on_reference_containers() {
-    // One part of a split set: it names volumes it does not hold, so its
+    // One part of a multi-part set: it names volumes it does not hold, so its
     // digests cover bytes that cannot be read back. Exit 9, and say how to fix
     // it rather than reporting over a partial view.
     let assert = aff4tools()
@@ -138,7 +138,7 @@ fn unreadable_evidence_exits_nine_on_reference_containers() {
         .code(9);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(
-        stderr.contains("--split-file"),
+        stderr.contains("--multi-part"),
         "the message must name the fix:\n{stderr}"
     );
 
@@ -2573,7 +2573,7 @@ fn the_verify_summary_states_how_many_checks_were_attempted() {
 }
 
 #[test]
-fn split_file_rejects_a_size_outside_the_allowed_set() {
+fn multi_part_rejects_a_size_outside_the_allowed_set() {
     let mut cmd = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
     cmd.args([
         "acquire",
@@ -2581,7 +2581,7 @@ fn split_file_rejects_a_size_outside_the_allowed_set() {
         "/dev/null",
         "--output",
         "/tmp/x.aff4",
-        "--split-file",
+        "--multi-part",
         "3G",
     ]);
     cmd.assert()
@@ -2590,12 +2590,12 @@ fn split_file_rejects_a_size_outside_the_allowed_set() {
 }
 
 #[test]
-fn split_file_help_lists_the_allowed_sizes() {
+fn multi_part_help_lists_the_allowed_sizes() {
     let mut cmd = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
     cmd.args(["acquire", "--help"]);
     let out = cmd.assert().success().get_output().stdout.clone();
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("--split-file"), "{text}");
+    assert!(text.contains("--multi-part"), "{text}");
     for size in ["1G", "2G", "4G", "8G", "16G", "32G"] {
         assert!(text.contains(size), "help must list {size}: {text}");
     }
@@ -2617,7 +2617,7 @@ fn verify_split_folder_reports_what_it_found() {
         src.to_str().unwrap(),
         "--output",
         out.to_str().unwrap(),
-        "--split-file",
+        "--multi-part",
         "1G",
         "--compression",
         "stored",
@@ -2627,19 +2627,19 @@ fn verify_split_folder_reports_what_it_found() {
     acq.assert().success();
 
     let mut ver = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
-    ver.args(["verify", "--split-file", dir.path().to_str().unwrap()]);
+    ver.args(["verify", "--multi-part", dir.path().to_str().unwrap()]);
     ver.assert()
         .success()
         .stdout(predicates::str::contains("Found "))
-        .stdout(predicates::str::contains("split files"));
+        .stdout(predicates::str::contains("parts"));
 }
 
 #[test]
 fn the_stripe_flag_is_gone() {
-    // Every command that reads a split set names it the same way. `--stripe`
+    // Every command that reads a multi-part set names it the same way. `--stripe`
     // (info, conformance) and `--split-folder` (verify) were two names for one
-    // idea, and a third — acquire's `--split-file` — meant the reader had to
-    // remember which command took which. All three are now `--split-file`.
+    // idea, and a third — acquire's `--multi-part` — meant the reader had to
+    // remember which command took which. All three are now `--multi-part`.
     for command in ["verify", "info", "conformance"] {
         let mut cmd = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
         cmd.args([command, "--help"]);
@@ -2653,16 +2653,16 @@ fn the_stripe_flag_is_gone() {
             "{command} still offers --split-folder: {text}"
         );
         assert!(
-            text.contains("--split-file"),
-            "{command} must offer --split-file: {text}"
+            text.contains("--multi-part"),
+            "{command} must offer --multi-part: {text}"
         );
     }
 
-    // acquire keeps `--split-file` too, but as a write option taking a size.
+    // acquire keeps `--multi-part` too, but as a write option taking a size.
     let mut cmd = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
     cmd.args(["acquire", "--help"]);
     let text = String::from_utf8(cmd.assert().success().get_output().stdout.clone()).unwrap();
-    assert!(text.contains("--split-file"), "{text}");
+    assert!(text.contains("--multi-part"), "{text}");
 }
 
 #[test]
@@ -2682,7 +2682,7 @@ fn the_discover_siblings_flag_is_gone() {
 ///
 /// A single AFF4 named directly is now re-acquired through its map (see
 /// `re_acquiring_an_aff4_reproduces_the_source_image`). A folder is still
-/// refused, because nothing in the folder distinguishes a split set from a
+/// refused, because nothing in the folder distinguishes a multi-part set from a
 /// striped one, and guessing wrong would acquire a partial image while
 /// reporting success.
 #[test]
@@ -2728,7 +2728,7 @@ fn acquire_refuses_a_folder_of_aff4_containers() {
         .stderr(predicates::str::contains("--image <container.aff4>"));
 }
 
-/// A folder of raw parts stands for the whole split set.
+/// A folder of raw parts stands for the whole multi-part set.
 #[test]
 fn acquire_accepts_a_folder_of_raw_parts() {
     let dir = tempfile::tempdir().unwrap();
@@ -2753,15 +2753,15 @@ fn acquire_accepts_a_folder_of_raw_parts() {
     ]);
     acq.assert()
         .success()
-        .stdout(predicates::str::contains("Found 2 split files"));
+        .stdout(predicates::str::contains("Found 2 parts"));
     assert!(out.is_file());
 }
 
-/// Naming one part of a split set must not produce a reassuring partial
+/// Naming one part of a multi-part set must not produce a reassuring partial
 /// report over whichever streams happened to be present.
 ///
 /// The corpus `Striped/` set is the only real multi-part set available: the
-/// smallest `--split-file` size is 1 GiB, so an acquisition small enough for a
+/// smallest `--multi-part` size is 1 GiB, so an acquisition small enough for a
 /// test never produces a second part.
 #[cfg(feature = "corpus")]
 #[test]
@@ -2771,8 +2771,8 @@ fn verifying_a_single_part_names_the_fix() {
     ver.args(["verify", &part]);
     ver.assert()
         .code(9)
-        .stderr(predicates::str::contains("one part of a split set"))
-        .stderr(predicates::str::contains("--split-file"));
+        .stderr(predicates::str::contains("one part of a multi-part set"))
+        .stderr(predicates::str::contains("--multi-part"));
 }
 
 /// The whole striped set verifies once the folder is named.
@@ -2782,16 +2782,16 @@ fn verify_split_folder_reads_a_striped_corpus_set() {
     let part = corpus_path("pyaff4/test_images/AFF4Std/Striped/Base-Linear_1.aff4");
     let dir = std::path::Path::new(&part).parent().unwrap().to_owned();
     let mut ver = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
-    ver.args(["verify", "--split-file", dir.to_str().unwrap()]);
+    ver.args(["verify", "--multi-part", dir.to_str().unwrap()]);
     ver.assert()
         .success()
-        .stdout(predicates::str::contains("Found 2 split files"));
+        .stdout(predicates::str::contains("Found 2 parts"));
 }
 
 /// The reference striped set is reported as striped.
 ///
 /// The counterpart to `a_generated_set_is_reported_as_sequential`
-/// (`tests/split_acquire.rs`): that pins the sequential shape this writer
+/// (`tests/multi_part_acquire.rs`): that pins the sequential shape this writer
 /// produces, this pins the interleaved shape only the corpus has. Neither
 /// layout is declared anywhere in the container — both are inferred from map
 /// geometry — so having a real example of each is what keeps the inference
@@ -2802,19 +2802,19 @@ fn a_striped_corpus_set_is_reported_as_striped() {
     let part = corpus_path("pyaff4/test_images/AFF4Std/Striped/Base-Linear_1.aff4");
     let dir = std::path::Path::new(&part).parent().unwrap().to_owned();
     let mut ver = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
-    ver.args(["verify", "--split-file", dir.to_str().unwrap()]);
+    ver.args(["verify", "--multi-part", dir.to_str().unwrap()]);
     ver.assert()
         .success()
         .stdout(predicates::str::contains("striped (interleaved)"))
         .stdout(predicates::str::contains("inferred from the map"));
 }
 
-/// `--split-file` with `--device` must reach the acquisition code rather than
+/// `--multi-part` with `--device` must reach the acquisition code rather than
 /// being refused during argument parsing. The combination was blocked by a clap
 /// conflict, which made whole-disk acquisitions — the case that most needs
 /// splitting — the one case that could not use it.
 #[test]
-fn device_accepts_split_file() {
+fn device_accepts_multi_part() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
     let mut cmd = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
@@ -2822,7 +2822,7 @@ fn device_accepts_split_file() {
         .arg("acquire")
         .arg("--device")
         .arg("/nonexistent/device/node")
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg("1G")
         .arg("--output")
         .arg(&output)
@@ -2840,11 +2840,11 @@ fn device_accepts_split_file() {
     );
 }
 
-/// `--logical` with `--split-file` must explain why it is refused, not emit
+/// `--logical` with `--multi-part` must explain why it is refused, not emit
 /// clap's generic conflict text. The limit is a design decision with a reason,
 /// and the message is where an examiner learns it.
 #[test]
-fn logical_refuses_split_file_with_a_reason() {
+fn logical_refuses_multi_part_with_a_reason() {
     let dir = tempfile::tempdir().unwrap();
     let roots = dir.path().join("roots");
     std::fs::create_dir(&roots).unwrap();
@@ -2857,7 +2857,7 @@ fn logical_refuses_split_file_with_a_reason() {
         .arg("acquire")
         .arg("--logical")
         .arg(&roots)
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg("1G")
         .arg("--output")
         .arg(&output)
@@ -3140,7 +3140,7 @@ fn no_verify_still_stamps_all_three() {
 /// not say which one ended the run.
 ///
 /// Both branches are driven here. `--device` accepts a regular file, so the
-/// split branch is reachable without a block device, and `--split-file` only
+/// split branch is reachable without a block device, and `--multi-part` only
 /// takes 1G and up — a small source yields a single part, which still takes the
 /// split code path.
 #[test]
@@ -3174,7 +3174,7 @@ fn the_log_carries_exactly_one_completed_line() {
         .arg("acquire")
         .arg("--device")
         .arg(&raw)
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg("1G")
         .arg("--output")
         .arg(&split)
@@ -3185,7 +3185,7 @@ fn the_log_carries_exactly_one_completed_line() {
     assert_eq!(
         sbody.matches("Completed:").count(),
         1,
-        "exactly one `Completed:` line belongs in the --device --split-file \
+        "exactly one `Completed:` line belongs in the --device --multi-part \
          log:\n{sbody}"
     );
     // The other two stamps must still be there: a single `Completed:` would
@@ -3705,7 +3705,7 @@ fn logical_only_flags_are_refused_with_image() {
 
 /// Build a split-raw set of `count` segments, each `size` bytes of a distinct
 /// filler, and return the directory plus the concatenated expected bytes.
-fn split_set(dir: &std::path::Path, stem: &str, count: u32, size: usize) -> Vec<u8> {
+fn multi_part(dir: &std::path::Path, stem: &str, count: u32, size: usize) -> Vec<u8> {
     let mut expected = Vec::new();
     for n in 1..=count {
         let filler = vec![u8::try_from(n).unwrap(); size];
@@ -3715,12 +3715,11 @@ fn split_set(dir: &std::path::Path, stem: &str, count: u32, size: usize) -> Vec<
     expected
 }
 
-/// Naming the first segment acquires the whole set, with no flag. This is the
-/// behavior `--discover-split` used to gate.
+/// Naming the first part acquires the whole set, with no flag.
 #[test]
-fn image_discovers_a_split_set_from_its_first_segment() {
+fn image_discovers_a_multi_part_from_its_first_part() {
     let dir = tempfile::tempdir().unwrap();
-    let expected = split_set(dir.path(), "s", 3, 4096);
+    let expected = multi_part(dir.path(), "s", 3, 4096);
     let out = dir.path().join("e.aff4");
 
     aff4tools()
@@ -3730,7 +3729,7 @@ fn image_discovers_a_split_set_from_its_first_segment() {
         .arg(&out)
         .assert()
         .success()
-        .stdout(predicate::str::contains("3 segment(s)"));
+        .stdout(predicate::str::contains("3 part(s)"));
 
     let raw = dir.path().join("out.raw");
     aff4tools()
@@ -3750,7 +3749,7 @@ fn image_discovers_a_split_set_from_its_first_segment() {
 /// A gap must stop the run. A short set verifies clean, because its digests
 /// describe exactly the bytes read, so the omission would never be noticed.
 #[test]
-fn image_refuses_a_split_set_with_a_gap() {
+fn image_refuses_a_multi_part_with_a_gap() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("g.001"), vec![1u8; 1024]).unwrap();
     std::fs::write(dir.path().join("g.003"), vec![3u8; 1024]).unwrap();
@@ -3768,35 +3767,35 @@ fn image_refuses_a_split_set_with_a_gap() {
     assert!(!out.exists(), "nothing may be written when a gap is found");
 }
 
-/// Naming a middle segment must be refused, not read forward from. Discovery
+/// Naming a middle part must be refused, not read forward from. Discovery
 /// reads forward, so it would acquire the tail of the set as the whole image —
 /// and that container would verify clean.
 #[test]
-fn image_refuses_a_segment_that_is_not_the_first() {
+fn image_refuses_a_part_that_is_not_the_first() {
     let dir = tempfile::tempdir().unwrap();
-    split_set(dir.path(), "s", 3, 1024);
+    multi_part(dir.path(), "s", 3, 1024);
     let out = dir.path().join("e.aff4");
 
-    for segment in ["s.002", "s.003"] {
+    for part in ["s.002", "s.003"] {
         let assert = aff4tools()
             .args(["acquire", "--image"])
-            .arg(dir.path().join(segment))
+            .arg(dir.path().join(part))
             .arg("--output")
             .arg(&out)
             .assert()
             .code(2);
         let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
         assert!(
-            stderr.contains("not the first segment"),
-            "{segment} was accepted as a source: {stderr}"
+            stderr.contains("not the first part"),
+            "{part} was accepted as a source: {stderr}"
         );
-        assert!(!out.exists(), "nothing may be written for {segment}");
+        assert!(!out.exists(), "nothing may be written for {part}");
     }
 }
 
 /// A numeric suffix with no siblings is an ordinary single file, not a set.
 #[test]
-fn a_lone_numbered_file_is_acquired_as_one_segment() {
+fn a_lone_numbered_file_is_acquired_as_one_part() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("x.001"), vec![0xAB; 2048]).unwrap();
 
@@ -3807,15 +3806,20 @@ fn a_lone_numbered_file_is_acquired_as_one_segment() {
         .arg(dir.path().join("e.aff4"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("1 segment(s)"));
+        .stdout(predicate::str::contains("1 part(s)"));
 }
 
-/// The deprecated flag still parses and still acquires, but says it is dead.
-/// Breaking a recorded command line would be worse than carrying the flag.
+/// `--discover-split` is gone, and its absence is an error rather than a
+/// silently ignored argument.
+///
+/// The flag gated nothing by the time it was removed: multi-part discovery
+/// runs on every `--image`, so the flag's whole behavior was a deprecation
+/// warning. Clap's unknown-argument error names the current interface, which
+/// tells a caller more than that warning did.
 #[test]
-fn discover_split_is_deprecated_but_still_works() {
+fn the_removed_discovery_flag_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    split_set(dir.path(), "s", 2, 1024);
+    multi_part(dir.path(), "s", 2, 1024);
 
     let assert = aff4tools()
         .args(["acquire", "--discover-split", "--image"])
@@ -3823,22 +3827,40 @@ fn discover_split_is_deprecated_but_still_works() {
         .arg("--output")
         .arg(dir.path().join("e.aff4"))
         .assert()
-        .success()
-        .stdout(predicate::str::contains("2 segment(s)"));
+        .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(
-        stderr.contains("deprecated"),
-        "the flag must announce that it does nothing: {stderr}"
+        stderr.contains("unexpected argument") || stderr.contains("--discover-split"),
+        "the error must name what was rejected: {stderr}"
     );
+
+    // And nothing was written: the run failed before it created anything.
+    assert!(!dir.path().join("e.aff4").exists());
 }
 
-/// A deprecated flag is hidden from help, so it is not offered to new users.
+/// What the removed flag used to gate still happens, with no flag at all.
 #[test]
-fn discover_split_is_hidden_from_help() {
-    let assert = aff4tools().args(["acquire", "--help"]).assert().success();
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    assert!(
-        !stdout.contains("--discover-split"),
-        "the deprecated flag must not be advertised"
-    );
+fn multi_part_discovery_needs_no_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = multi_part(dir.path(), "s", 2, 1024);
+
+    aff4tools()
+        .args(["acquire", "--image"])
+        .arg(dir.path().join("s.001"))
+        .arg("--output")
+        .arg(dir.path().join("e.aff4"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 part(s)"));
+
+    // The whole set, not just the part named.
+    let exported = dir.path().join("out.dd");
+    aff4tools()
+        .args(["export"])
+        .arg(dir.path().join("e.aff4"))
+        .arg("--output")
+        .arg(&exported)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&exported).unwrap(), expected);
 }

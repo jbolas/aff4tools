@@ -35,47 +35,62 @@ it. A container with 16,435 members has 16,435 segments regardless of how many
 streams or images it describes.
 
 **Not a [part](#part).** A segment lives inside a volume; a part *is* a volume,
-one file of a [split set](#split-set). This meaning of "segment" is fixed and
+one file of a [multi-part set](#multi-part-set). This meaning of "segment" is fixed and
 must not be reused for a file of a set.
 
 ### part
 
-**One file of a split set** — `evidence_001.aff4`, `evidence_002.aff4`, and so
-on. A part is a whole [volume](#volume): it has its own ARN, its own ZIP
-central directory, and opens on its own.
+**One file of a multi-part set** — `evidence.aff4`, `evidence.aff4.1`,
+`evidence.aff4.2`, and so on, per AFF4-L v1.0-ALPHA §8. A part is a whole
+[volume](#volume): it has its own ARN, its own ZIP central directory, and opens
+on its own.
+
+The first part carries no ordinal, so its name is indistinguishable from a
+lone container's. Which it is comes from the folder, not the name.
 
 **Not a [segment](#segment), and the two must never be swapped.** A segment is a
 member *inside* a volume; a part *is* a volume. A six-part set of containers
 holding 3,000 members each has six parts and 18,000 segments. Avoid "segmented"
-as an adjective for a set, which reads as "made of segments" — say "split set".
+as an adjective for a set, which reads as "made of segments" — say "multi-part set".
 
-### split set
+### multi-part set
 
 Several [parts](#part) holding one image between them, whether allocated
-[sequentially](#sequential) or [striped](#stripe). `--split-folder <DIR>` reads
-one: parts are ordered by the numbers in their names, so `part_9` precedes
-`part_10`, and a gap in the numbering is refused rather than silently skipped.
+[sequentially](#sequential) or [striped](#stripe). `--multi-part <DIR>` reads
+one: parts are ordered by the numbers in their names, so part 9 precedes part
+10, and a gap in the numbering is refused rather than silently skipped.
 
-Every part declares the same [DiskImage](#image) ARN — v1.0a §7.1's point of
-commonality — which is what makes them one image rather than several.
+**The term covers any format.** A raw dd image across `img.001` and `img.002`
+is a multi-part set exactly as an AFF4 one is; what differs is the format of
+the parts, not whether the set is multi-part.
 
-### split file
+Every part of an AFF4 set declares the same [DiskImage](#image) ARN — v1.0a
+§7.1's point of commonality — which is what makes them one image rather than
+several.
 
-`acquire --split-file <SIZE>`: writing one acquisition across several parts,
+**Naming.** AFF4-L v1.0-ALPHA §8 gives the first part the name asked for and
+appends an ordinal to each later one, counting from 1. aff4tools writes that
+scheme for every container it produces, whatever the version. It also reads
+pyaff4's `Base-Linear_1.aff4` form, which the reference images use, and a raw
+set's numeric extensions.
+
+### multi-part acquisition
+
+`acquire --multi-part <SIZE>`: writing one acquisition across several parts,
 starting a new one each time the current reaches the threshold. The threshold
 counts bytes **on disk**, so parts stay near the chosen size whatever the
 compression ratio, and a part may overshoot by at most one [bevy](#bevy).
 
 ### sequential
 
-The parts of [split set](#split-set) may be sequential, in which each [part](#part) is filled before the next
+The parts of a [multi-part set](#multi-part-set) may be sequential, in which each [part](#part) is filled before the next
 begins, so each part's stream occupies one contiguous run of the image address
-space. This is the layout `acquire --split-file` writes. It is familiar to 
+space. This is the layout `acquire --multi-part` writes. It is familiar to 
 forensic examiners accustomed to the .E01 format.
 
-Contrast split sets that are [striped](#stripe), where the streams interleave. Neither is declared
+Contrast multi-part sets that are [striped](#stripe), where the streams interleave. Neither is declared
 anywhere in a container: both are inferred from map geometry
-(`Map::split_layout`), and both reassemble identically through the
+(`Map::part_layout`), and both reassemble identically through the
 [Map](#map).
 
 ### stripe
@@ -94,7 +109,7 @@ exists for acquisition bandwidth, not resilience. Contrast *mirrored* and
 *segmented* multi-ZIP containers, also named in §7 and both unimplemented here —
 note that §7's "segmented" is its own term for a multi-ZIP arrangement and is
 unrelated to a [segment](#segment) inside a volume. This project says
-[split set](#split-set) for what it writes, to keep clear of both.
+[multi-part set](#multi-part-set) for what it writes, to keep clear of both.
 
 ---
 

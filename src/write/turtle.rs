@@ -280,13 +280,13 @@ impl TurtleWriter {
     /// does. Neither reference implementation is deterministic here.
     ///
     /// **First-mention order is a contract, not a presentation choice.** A
-    /// split part lists its own stream before its siblings' stubs, and
+    /// part lists its own stream before its siblings' stubs, and
     /// `FusedImage::prepare` uses that grouping to tell which stream a volume
     /// owns. Emitting subjects in any other order — sorted, for instance —
     /// leaves it unable to trust the layout, so it declines the fused
     /// traversal and every image is read twice: once per part's stream, once
     /// more through the map. Verification stays correct and takes about twice
-    /// as long. `tests/split_acquire.rs` holds the guard.
+    /// as long. `tests/multi_part_acquire.rs` holds the guard.
     #[must_use]
     pub fn serialize(&self) -> String {
         let mut out = String::new();

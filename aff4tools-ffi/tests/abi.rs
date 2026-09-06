@@ -196,7 +196,7 @@ fn freeing_null_is_safe() {
     unsafe { AFF4_free_messages(std::ptr::null_mut()) };
 }
 
-/// Any part of a split set opens the whole image, identically.
+/// Any part of a multi-part set opens the whole image, identically.
 ///
 /// **The property this ABI exists to provide.** A consumer names one file; what
 /// it gets is the evidence, whatever shape the container happens to have on
@@ -207,10 +207,10 @@ fn freeing_null_is_safe() {
 /// "image names no data stream".
 #[cfg(feature = "corpus")]
 #[test]
-fn any_part_of_a_split_set_opens_the_whole_image() {
+fn any_part_of_a_multi_part_opens_the_whole_image() {
     let dir = match std::env::var_os("AFF4_TEST_SPLIT_SET") {
         Some(d) => PathBuf::from(d),
-        // No split-set fixture configured; the corpus does not ship one.
+        // No multi-part fixture configured; the corpus does not ship one.
         None => return,
     };
 

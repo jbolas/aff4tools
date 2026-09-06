@@ -1,6 +1,6 @@
 //! Split-file output: one image written across several `.aff4` parts.
 //!
-//! A *part* is one file of a split set; a *segment* is a member inside a
+//! A *part* is one file of a multi-part set; a *segment* is a member inside a
 //! volume (`docs/glossary.md`).
 
 // Integration tests build fixture trees in temp dirs, which needs the
@@ -12,7 +12,9 @@
 use std::path::Path;
 
 use aff4tools::write::guard::SourceRegistry;
-use aff4tools::write::split_writer::{SplitOptions, part_path, preflight, write_split_set};
+use aff4tools::write::multi_part_writer::{
+    MultiPartOptions, part_path, preflight, write_multi_part,
+};
 use aff4tools::write::stream_writer::StreamOptions;
 use aff4tools::{Codec, HashAlgorithm, Locus};
 
@@ -30,15 +32,15 @@ fn incompressible(len: usize) -> Vec<u8> {
     out
 }
 
-fn options(split_after: u64) -> SplitOptions {
-    SplitOptions {
+fn options(multi_part_after: u64) -> MultiPartOptions {
+    MultiPartOptions {
         stream: StreamOptions {
             chunk_size: 32 * 1024,
             chunks_per_segment: 2,
             codec: Codec::Stored,
             block_hashes: true,
         },
-        split_after,
+        multi_part_after,
     }
 }
 
@@ -102,14 +104,14 @@ fn a_source_fitting_within_999_parts_is_accepted() {
 }
 
 #[test]
-fn a_split_set_is_written_as_several_parts() {
+fn a_multi_part_is_written_as_several_parts() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
     let data = incompressible(768 * 1024);
     let registry = SourceRegistry::new();
     let mut src = &data[..];
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut src,
         data.len() as u64,
@@ -145,7 +147,7 @@ fn every_part_but_the_first_carries_only_a_stub() {
     let registry = SourceRegistry::new();
     let mut src = &data[..];
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut src,
         data.len() as u64,
@@ -226,7 +228,7 @@ fn cross_part_references_resolve() {
     let registry = SourceRegistry::new();
     let mut src = &data[..];
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut src,
         data.len() as u64,
@@ -312,7 +314,7 @@ fn splitting_does_not_change_the_digests_of_the_stored_data() {
     // Whole: a threshold no run can reach, so one part.
     let whole_out = dir.path().join("whole.aff4");
     let mut src = &data[..];
-    let whole = write_split_set(
+    let whole = write_multi_part(
         &whole_out,
         &mut src,
         data.len() as u64,
@@ -328,7 +330,7 @@ fn splitting_does_not_change_the_digests_of_the_stored_data() {
     // Split.
     let split_out = dir.path().join("split.aff4");
     let mut src = &data[..];
-    let split = write_split_set(
+    let split = write_multi_part(
         &split_out,
         &mut src,
         data.len() as u64,
@@ -405,7 +407,7 @@ fn every_part_conforms_with_zero_deviations() {
     let registry = SourceRegistry::new();
     let mut src = &data[..];
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut src,
         data.len() as u64,
@@ -447,14 +449,14 @@ fn every_part_conforms_with_zero_deviations() {
 }
 
 /// Write a set of several parts into `dir`, returning it.
-fn a_split_set(
+fn a_multi_part(
     dir: &Path,
     registry: &SourceRegistry,
-) -> aff4tools::write::split_writer::WrittenSet {
+) -> aff4tools::write::multi_part_writer::WrittenSet {
     let output = dir.join("ev.aff4");
     let data = incompressible(768 * 1024);
     let mut src = &data[..];
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut src,
         data.len() as u64,
@@ -474,7 +476,7 @@ fn a_split_set(
 fn a_lone_part_reports_its_cross_part_references() {
     let dir = tempfile::tempdir().unwrap();
     let registry = SourceRegistry::new();
-    let set = a_split_set(dir.path(), &registry);
+    let set = a_multi_part(dir.path(), &registry);
 
     let mut cmd = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
     cmd.args(["conformance", set.parts[0].path.to_str().unwrap()]);
@@ -493,14 +495,14 @@ fn a_complete_set_conforms_with_no_deviations() {
     let registry = SourceRegistry::new();
     // Writes the parts into `dir`; the set itself is not named again, because
     // the folder is now what identifies it.
-    let _ = a_split_set(dir.path(), &registry);
+    let _ = a_multi_part(dir.path(), &registry);
 
     let mut cmd = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
-    // The whole set is named by the folder holding it: `--split-file` takes a
+    // The whole set is named by the folder holding it: `--multi-part` takes a
     // directory and orders the parts by the numbers in their names, where
     // `--stripe` once took each part as its own repeated flag.
     cmd.arg("conformance");
-    cmd.args(["--split-file", dir.path().to_str().unwrap()]);
+    cmd.args(["--multi-part", dir.path().to_str().unwrap()]);
     let out = cmd.output().unwrap();
     let text = String::from_utf8(out.stdout.clone()).unwrap();
     assert!(
@@ -534,7 +536,7 @@ fn device_split_digests_match_whole_device() {
         let registry = SourceRegistry::new();
         let file = std::fs::File::open(&source).unwrap();
         let mut reader = DeviceReader::new(file, total, DeviceOptions::default());
-        let set = write_split_set(
+        let set = write_multi_part(
             &whole_out,
             &mut reader,
             total,
@@ -555,7 +557,7 @@ fn device_split_digests_match_whole_device() {
         let registry = SourceRegistry::new();
         let file = std::fs::File::open(&source).unwrap();
         let mut reader = DeviceReader::new(file, total, DeviceOptions::default());
-        let set = write_split_set(
+        let set = write_multi_part(
             &split_out,
             &mut reader,
             total,
@@ -599,7 +601,7 @@ fn split_device_clean_source_reports_no_read_errors() {
         .arg("acquire")
         .arg("--device")
         .arg(&source)
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg("1G")
         .arg("--output")
         .arg(&output)
@@ -618,7 +620,7 @@ fn split_device_clean_source_reports_no_read_errors() {
 /// A split write over a source with a genuinely bad range must accumulate that
 /// range in `DeviceReader`'s unreadable state. This is the library-level
 /// counterpart to the CLI's "Read errors: none" happy path: it is the only
-/// test that drives a nonempty unreadable report through `write_split_set`,
+/// test that drives a nonempty unreadable report through `write_multi_part`,
 /// which is what `src/main.rs`'s device split branch reads back to decide
 /// whether to raise the exit code.
 #[test]
@@ -635,7 +637,7 @@ fn split_write_records_unreadable_regions() {
     let registry = SourceRegistry::new();
     let faulty = FaultyReader::new(data, bad);
     let mut reader = DeviceReader::new(faulty, total, DeviceOptions::default());
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut reader,
         total,
@@ -679,7 +681,7 @@ fn unreadable_region_straddling_a_part_boundary_matches_whole() {
         let registry = SourceRegistry::new();
         let faulty = FaultyReader::new(data.clone(), bad.clone());
         let mut reader = DeviceReader::new(faulty, total, DeviceOptions::default());
-        let set = write_split_set(
+        let set = write_multi_part(
             &whole_out,
             &mut reader,
             total,
@@ -699,7 +701,7 @@ fn unreadable_region_straddling_a_part_boundary_matches_whole() {
         let registry = SourceRegistry::new();
         let faulty = FaultyReader::new(data.clone(), bad.clone());
         let mut reader = DeviceReader::new(faulty, total, DeviceOptions::default());
-        let set = write_split_set(
+        let set = write_multi_part(
             &split_out,
             &mut reader,
             total,
@@ -731,7 +733,7 @@ fn unreadable_region_straddling_a_part_boundary_matches_whole() {
 /// A source too large for 999 parts at the given threshold is refused before
 /// any part file is created, so the refusal costs nothing.
 ///
-/// Exercised through `preflight` rather than the CLI: `SplitSize` offers no
+/// Exercised through `preflight` rather than the CLI: `PartSize` offers no
 /// threshold below 1 GiB, so a CLI fixture would need a terabyte of source.
 #[test]
 fn split_refuses_an_over_long_set_before_writing() {
@@ -751,7 +753,7 @@ fn split_refuses_an_over_long_set_before_writing() {
 
 /// A set this writer produced is reported as sequential.
 ///
-/// Written through the library rather than the CLI because `--split-file`'s
+/// Written through the library rather than the CLI because `--multi-part`'s
 /// smallest value is 1 GiB, which no test-sized source reaches — a CLI
 /// acquisition here would produce one part, and a single part has no layout to
 /// report. The verification still goes through the binary, so what is pinned is
@@ -760,11 +762,11 @@ fn split_refuses_an_over_long_set_before_writing() {
 fn a_generated_set_is_reported_as_sequential() {
     let dir = tempfile::tempdir().unwrap();
     let registry = SourceRegistry::new();
-    let set = a_split_set(dir.path(), &registry);
+    let set = a_multi_part(dir.path(), &registry);
     assert!(set.parts.len() > 2, "need several parts to interleave");
 
     let mut ver = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
-    ver.args(["verify", "--split-file", dir.path().to_str().unwrap()]);
+    ver.args(["verify", "--multi-part", dir.path().to_str().unwrap()]);
     let out = ver.output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
@@ -780,7 +782,7 @@ fn a_generated_set_is_reported_as_sequential() {
     );
 }
 
-/// Acquiring a device to a split set must verify the parts as one image, the
+/// Acquiring a device to a multi-part set must verify the parts as one image, the
 /// way a single-file acquisition verifies its container.
 #[test]
 fn split_device_verifies_the_set_in_place() {
@@ -795,7 +797,7 @@ fn split_device_verifies_the_set_in_place() {
         .arg("acquire")
         .arg("--device")
         .arg(&source)
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg("1G")
         .arg("--output")
         .arg(&output)
@@ -826,7 +828,7 @@ fn split_device_verifies_the_set_in_place() {
 /// examiner reading that log would misattribute minutes — or, on a large
 /// device, hours — to the acquisition.
 #[test]
-fn acquisition_complete_precedes_verification_in_a_split_set() {
+fn acquisition_complete_precedes_verification_in_a_multi_part() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.raw");
     #[allow(clippy::disallowed_methods)]
@@ -838,7 +840,7 @@ fn acquisition_complete_precedes_verification_in_a_split_set() {
         .arg("acquire")
         .arg("--device")
         .arg(&source)
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg("1G")
         .arg("--output")
         .arg(&output)
@@ -861,22 +863,22 @@ fn acquisition_complete_precedes_verification_in_a_split_set() {
     );
 }
 
-/// A split set must have its per-chunk block hashes recomputed.
+/// A multi-part set must have its per-chunk block hashes recomputed.
 ///
 /// Each part's `ImageStream` records no `aff4:hash` of its own — by design:
 /// one digest describes the whole image stream and lives in part 001.
 /// `verify_stream` must not return on that emptiness before reaching the
-/// per-chunk work, which would leave a split set's leaves unchecked while the
+/// per-chunk work, which would leave a multi-part set's leaves unchecked while the
 /// identical evidence in one file is checked in full.
 #[test]
-fn split_set_block_hashes_are_recomputed() {
+fn multi_part_block_hashes_are_recomputed() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
     let registry = SourceRegistry::new();
     let data = incompressible(300 * 1024);
     let mut source = std::io::Cursor::new(data.clone());
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut source,
         data.len() as u64,
@@ -912,7 +914,7 @@ fn split_set_block_hashes_are_recomputed() {
         .collect();
     assert!(
         !block_checks.is_empty(),
-        "no per-chunk block hash check was produced for a split set"
+        "no per-chunk block hash check was produced for a multi-part set"
     );
     assert!(
         block_checks.iter().all(|c| c.outcome.was_checked()),
@@ -924,10 +926,10 @@ fn split_set_block_hashes_are_recomputed() {
     );
 }
 
-/// A split set must report the same block-hash assurance a single-file
+/// A multi-part set must report the same block-hash assurance a single-file
 /// container reports. Same evidence, same claim.
 #[test]
-fn split_set_reports_block_hashes_recomputed() {
+fn multi_part_reports_block_hashes_recomputed() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.raw");
     #[allow(clippy::disallowed_methods)]
@@ -941,7 +943,7 @@ fn split_set_reports_block_hashes_recomputed() {
         .arg("acquire")
         .arg("--device")
         .arg(&source)
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg("1G")
         .arg("--output")
         .arg(&output)
@@ -951,7 +953,7 @@ fn split_set_reports_block_hashes_recomputed() {
     let mut verify = assert_cmd::Command::cargo_bin("aff4tools").unwrap();
     let assert = verify
         .arg("verify")
-        .arg("--split-file")
+        .arg("--multi-part")
         .arg(&set_dir)
         .assert()
         .success();
@@ -959,7 +961,7 @@ fn split_set_reports_block_hashes_recomputed() {
 
     assert!(
         stdout.contains("All per-chunk block hashes were recomputed."),
-        "split set did not report full block-hash coverage: {stdout}"
+        "multi-part set did not report full block-hash coverage: {stdout}"
     );
     assert!(
         !stdout.contains("stores no per-chunk block hashes"),
@@ -985,7 +987,7 @@ fn an_image_is_read_once_regardless_of_digest_count() {
     let data = incompressible(300 * 1024);
     let mut source = std::io::Cursor::new(data.clone());
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut source,
         data.len() as u64,
@@ -1055,7 +1057,7 @@ fn an_image_is_read_once_regardless_of_digest_count() {
     );
 }
 
-/// Verifying a split set must read every stored byte once.
+/// Verifying a multi-part set must read every stored byte once.
 ///
 /// Nine parts and one image digest meant ten traversals: nine to check each
 /// part's stream, one more to re-read the same bevies through the map. The
@@ -1063,14 +1065,14 @@ fn an_image_is_read_once_regardless_of_digest_count() {
 /// rather than progress bars keeps the assertion on the quantity that costs the
 /// user minutes, which no cosmetic change to the display can satisfy.
 #[test]
-fn a_split_set_reads_every_stored_byte_once() {
+fn a_multi_part_reads_every_stored_byte_once() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
     let registry = SourceRegistry::new();
     let data = incompressible(300 * 1024);
     let mut source = std::io::Cursor::new(data.clone());
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut source,
         data.len() as u64,
@@ -1125,7 +1127,7 @@ fn a_split_set_reads_every_stored_byte_once() {
     );
 }
 
-/// One meter, advancing only forwards, across a whole split set.
+/// One meter, advancing only forwards, across a whole multi-part set.
 ///
 /// Each `Progress::Bytes` counts from its own object's start, so a display
 /// painting `done` directly restarted at zero for every object — nine parts and
@@ -1133,14 +1135,14 @@ fn a_split_set_reads_every_stored_byte_once() {
 /// figure must guarantee is that it never goes backwards, which is the property
 /// that distinguishes a meter from a series of bars.
 #[test]
-fn progress_across_a_split_set_never_goes_backwards() {
+fn progress_across_a_multi_part_never_goes_backwards() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
     let registry = SourceRegistry::new();
     let data = incompressible(300 * 1024);
     let mut source = std::io::Cursor::new(data.clone());
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut source,
         data.len() as u64,
@@ -1207,19 +1209,19 @@ fn progress_across_a_split_set_never_goes_backwards() {
 /// A verify run states what a matching digest is a digest *of* — "14.9 GiB
 /// stored, 0 B described" — and states it once. Listing the same image ARN
 /// several times gives an examiner copies with nothing to distinguish them,
-/// which is what the split set did before the image's per-algorithm reads were
+/// which is what the multi-part set did before the image's per-algorithm reads were
 /// collapsed. Fusing the traversal into the stream passes added a second way to
 /// reach the same defect, so the property is held here rather than left to
 /// inspection.
 #[test]
-fn a_split_set_reports_its_image_accounting_once() {
+fn a_multi_part_reports_its_image_accounting_once() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
     let registry = SourceRegistry::new();
     let data = incompressible(300 * 1024);
     let mut source = std::io::Cursor::new(data.clone());
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut source,
         data.len() as u64,
@@ -1277,14 +1279,14 @@ fn a_split_set_reports_its_image_accounting_once() {
 /// which measures against that total — read 250% and showed a time remaining of
 /// zero while eight parts were still to be read.
 #[test]
-fn the_estimate_covers_every_part_of_a_split_set() {
+fn the_estimate_covers_every_part_of_a_multi_part() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
     let registry = SourceRegistry::new();
     let data = incompressible(300 * 1024);
     let mut source = std::io::Cursor::new(data.clone());
 
-    let set = write_split_set(
+    let set = write_multi_part(
         &output,
         &mut source,
         data.len() as u64,
@@ -1400,7 +1402,7 @@ fn a_multi_part_acquisition_round_trips_through_the_cli() {
         .arg(&output)
         // A bevy smaller than the threshold, or the first bevy overshoots it
         // and the whole image lands in one part.
-        .args(["--split-file", "10M", "--chunks-per-bevy", "64"])
+        .args(["--multi-part", "10M", "--chunks-per-bevy", "64"])
         .assert()
         .success();
 
@@ -1417,12 +1419,12 @@ fn a_multi_part_acquisition_round_trips_through_the_cli() {
 
     // The whole set verifies as one image, discovered from the folder.
     let assert = aff4tools()
-        .args(["verify", "--split-file"])
+        .args(["verify", "--multi-part"])
         .arg(dir.path())
         .assert()
         .success();
     let report = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    assert!(report.contains("Found 4 split files"), "{report}");
+    assert!(report.contains("Found 4 parts"), "{report}");
 
     // And the image reads back as the source, byte for byte.
     let exported = dir.path().join("out.dd");
