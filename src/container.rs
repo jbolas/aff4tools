@@ -664,7 +664,7 @@ impl Container {
             defer_object_references(&object, &mut deferred);
 
             report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
-            report_v21_identity(&object, &volume_context, &mut deviations);
+            report_v21(&object, &volume_context, &mut deviations);
 
             if matches!(object.locality, Locality::Local) {
                 // The ARN string is already held by `described`; share that
@@ -796,7 +796,7 @@ impl Container {
                 // this pass has not reached yet.
                 defer_object_references(&object, &mut deferred);
                 report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
-                report_v21_identity(&object, &volume_context, &mut deviations);
+                report_v21(&object, &volume_context, &mut deviations);
                 counts.observe(&object.role, has_bitstream_hash(&object));
                 objects.push(object);
             }
@@ -947,7 +947,7 @@ impl Container {
             ) {
                 defer_object_references(&object, &mut deferred);
                 report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
-                report_v21_identity(&object, &volume_context, &mut deviations);
+                report_v21(&object, &volume_context, &mut deviations);
                 counts.observe(&object.role, has_bitstream_hash(&object));
                 if brief_renders(&object, candidates_kept, &mut seen_types) {
                     if has_bitstream_hash(&object) {
@@ -1379,9 +1379,10 @@ fn namespace_of(iri: &str, graph: &Graph) -> (Option<String>, Option<String>) {
         return (None, None);
     };
 
-    if namespace == crate::lexicon::STANDARD_NAMESPACE
-        || namespace == crate::lexicon::LEGACY_NAMESPACE
-    {
+    // A term in any AFF4 vocabulary is a standard term, not a vendor
+    // extension. AFF4-L v1.0-ALPHA §4.1 introduces a second namespace and
+    // permits a reader to honor either, which is what including it here does.
+    if crate::lexicon::is_known_namespace(namespace) {
         return (None, None);
     }
 
@@ -2479,7 +2480,60 @@ tell where its content lives"
     ));
 }
 
-/// Report the AFF4-L v1.0-ALPHA identity and naming departures.
+/// Every AFF4-L v1.0-ALPHA check one described object is subject to.
+///
+/// The two halves are separate because they answer different questions —
+/// what an object is called, and how that name is recorded — but they always
+/// run together, so one entry point keeps a caller from adding one and
+/// forgetting the other.
+fn report_v21(object: &Aff4Object, volume: &VolumeContext, deviations: &mut Vec<Deviation>) {
+    report_v21_identity(object, volume, deviations);
+    report_v21_names(object, volume, deviations);
+    report_v21_namespaces(object, volume, deviations);
+}
+
+/// Report terms written under a namespace their defining standard does not
+/// assign them (AFF4-L v1.0-ALPHA §4.1).
+///
+/// Checked from the property's full IRI, since that is the only place the
+/// namespace survives — `local_name` strips it, which is exactly what lets a
+/// reader honor either. So the leniency and the check read the same data and
+/// reach opposite conclusions, deliberately: the container is read, and the
+/// departure is recorded.
+fn report_v21_namespaces(
+    object: &Aff4Object,
+    volume: &VolumeContext,
+    deviations: &mut Vec<Deviation>,
+) {
+    if volume.mapping != crate::arn::NameMapping::Literal {
+        return;
+    }
+
+    for property in &object.properties {
+        let Some((namespace, local)) = split_namespace(&property.iri) else {
+            continue;
+        };
+        // A vendor extension is outside every AFF4 vocabulary and is nobody's
+        // to place. Only terms in one of ours are subject to AFF4-L v1.0-ALPHA §4.1.
+        if !crate::lexicon::is_known_namespace(namespace) {
+            continue;
+        }
+        let expected = crate::lexicon::namespace_for(Generation::Aff4L10, local);
+        if namespace != expected {
+            deviations.push(Deviation::new(
+                (*volume.locus).clone().subject(object.arn.as_str()),
+                DeviationKind::WrongTermNamespace,
+                format!(
+                    "{local} is written under {namespace} but AFF4-L v1.0-ALPHA \
+§4.1 places it in {expected}; a reader that does not accept both namespaces \
+will not recognize the term"
+                ),
+            ));
+        }
+    }
+}
+
+/// Report the AFF4-L v1.0-ALPHA identity departures.
 ///
 /// Four rules, all of them about what an object is called and where its bytes
 /// are therefore stored. They apply only to a v2.1 container: under the
@@ -2586,6 +2640,124 @@ the latter"
             ));
         }
     }
+}
+
+/// Report the AFF4-L v1.0-ALPHA §5 name-normalization departures.
+///
+/// Five rules, checked as two pairs and a spelling.
+///
+/// The strongest of them is the last: decoding the raw form and re-encoding it
+/// must reproduce the display form. That checks the container's two halves
+/// against **each other** rather than either against an assumption, so it
+/// catches a writer whose encoder and decoder disagree — which no
+/// single-property check could.
+fn report_v21_names(object: &Aff4Object, volume: &VolumeContext, deviations: &mut Vec<Deviation>) {
+    use crate::naming::{RecordedName, base64_decode, needs_raw_form};
+
+    if volume.mapping != crate::arn::NameMapping::Literal {
+        return;
+    }
+    let locus = || (*volume.locus).clone().subject(object.arn.as_str());
+
+    for (name, raw_name) in [
+        ("fileName", "fileNameRaw"),
+        ("originalPathName", "originalPathNameRaw"),
+    ] {
+        let Some(display) = object.property(name).map(|p| p.value.lexical()) else {
+            continue;
+        };
+        let raw = object.property(raw_name).map(|p| p.value.lexical());
+
+        // AFF4-L v1.0-ALPHA §5 rule 2b: escapes are uppercase. Checked on the
+        // display form itself, so it applies whether or not a raw form exists.
+        if has_lowercase_escape(display) {
+            deviations.push(Deviation::new(
+                locus(),
+                DeviationKind::LowercaseNameEscape,
+                format!(
+                    "{name} {display:?} carries a lowercase percent escape; \
+AFF4-L v1.0-ALPHA §5 specifies uppercase"
+                ),
+            ));
+        }
+
+        let Some(raw) = raw.filter(|r| !r.is_empty()) else {
+            // No raw form. Rule 2 requires one when the display form was
+            // encoded, and a percent escape is the only evidence of that
+            // available from the metadata alone.
+            if has_percent_escape(display) {
+                deviations.push(Deviation::new(
+                    locus(),
+                    DeviationKind::MissingRawName,
+                    format!(
+                        "{name} {display:?} is percent-encoded but no {raw_name} \
+records the original bytes, so the name cannot be recovered"
+                    ),
+                ));
+            }
+            continue;
+        };
+
+        // Rule 3: the raw form must actually decode.
+        let Some(bytes) = base64_decode(raw) else {
+            deviations.push(Deviation::new(
+                locus(),
+                DeviationKind::MalformedRawName,
+                format!("{raw_name} is not valid base64, so the name it records cannot be read"),
+            ));
+            continue;
+        };
+
+        // Rule 1: a name needing no encoding records no raw form.
+        if !needs_raw_form(&bytes) {
+            deviations.push(Deviation::new(
+                locus(),
+                DeviationKind::RedundantRawName,
+                format!(
+                    "{raw_name} is present, but the name it decodes to needs no \
+encoding and AFF4-L v1.0-ALPHA §5 does not use a raw form for one"
+                ),
+            ));
+        }
+
+        // Rule 2 the other way: the two halves must describe one name.
+        let expected = RecordedName::of(&bytes);
+        if expected.display() != display {
+            deviations.push(Deviation::new(
+                locus(),
+                DeviationKind::ContradictoryRawName,
+                format!(
+                    "{raw_name} decodes to a name whose display form is \
+{:?}, but {name} records {display:?}; the container contradicts itself about \
+what this file was called",
+                    expected.display()
+                ),
+            ));
+        }
+    }
+}
+
+/// Whether a display name carries a percent escape.
+///
+/// Two hex digits after a `%`. A bare `%` is a literal one in a clean name,
+/// which AFF4-L v1.0-ALPHA §5 rule 1 allows and which must not be mistaken for
+/// evidence of encoding.
+fn has_percent_escape(display: &str) -> bool {
+    let bytes = display.as_bytes();
+    bytes
+        .windows(3)
+        .any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit())
+}
+
+/// Whether any percent escape uses a lowercase hex letter.
+fn has_lowercase_escape(display: &str) -> bool {
+    let bytes = display.as_bytes();
+    bytes.windows(3).any(|w| {
+        w[0] == b'%'
+            && w[1].is_ascii_hexdigit()
+            && w[2].is_ascii_hexdigit()
+            && (w[1].is_ascii_lowercase() || w[2].is_ascii_lowercase())
+    })
 }
 
 /// How a resource name's authority is spelled.

@@ -38,6 +38,94 @@ pub const STANDARD_NAMESPACE: &str = "http://aff4.org/Schema#";
 /// The RDF namespace used by pre-standard (Evimetry/Wirespeed) containers.
 pub const LEGACY_NAMESPACE: &str = "http://afflib.org/2009/aff4#";
 
+/// The namespace AFF4-L Standard v1.0-ALPHA §4.1 assigns its new lexicon
+/// items, bound to the `aff4l` prefix.
+///
+/// **`http`, not `https`.** An RDF namespace is compared as an exact string,
+/// so the two denote different namespaces entirely and a writer using the
+/// wrong one produces terms no conforming reader recognizes. AFF4-L v1.0-ALPHA §4.1's prose and
+/// its examples disagree; the examples win, on the reasoning that they are
+/// what implementations were written against.
+///
+/// Terms the base standard already defines keep [`STANDARD_NAMESPACE`] — AFF4-L v1.0-ALPHA §4.1
+/// says its classes *supplement* the base lexicon rather than replacing it.
+/// In particular AFF4-L v1.0-ALPHA §1.1 spells `aff4:fileName*` and
+/// `aff4:originalPathName*` with the base prefix inside the requirement
+/// itself, so those do not move.
+pub const AFF4L_NAMESPACE: &str = "http://aff4.org/Schema/2022/#";
+
+/// Whether `namespace` is one this project recognizes as an AFF4 vocabulary.
+///
+/// A property outside these is a vendor extension: legitimate under RDF, and
+/// something an examiner should see labelled rather than mixed in with
+/// standard terms. A property *inside* them is a standard term, and labelling
+/// one as a vendor extension would misdescribe it — which is what happened to
+/// every `aff4l:` term before AFF4-L v1.0-ALPHA §4.1 was honored here.
+///
+/// This is the read side of AFF4-L v1.0-ALPHA §4.1's permission to accept either namespace. The
+/// write side is stricter: see `Generation::namespace_for`.
+#[must_use]
+pub fn is_known_namespace(namespace: &str) -> bool {
+    matches!(
+        namespace,
+        STANDARD_NAMESPACE | LEGACY_NAMESPACE | AFF4L_NAMESPACE
+    )
+}
+
+/// Terms AFF4-L Standard v1.0-ALPHA introduces, which take its namespace.
+///
+/// AFF4-L v1.0-ALPHA §4.1 requires a writer to use "the correct namespace as defined in the
+/// relevant AFF4/AFF4-L standard", so a term belongs to whichever document
+/// first defined it. This lists the ones v1.0-ALPHA defines and nothing else
+/// does.
+///
+/// **What is deliberately absent matters as much as what is here.**
+///
+/// - `fileName`, `fileNameRaw`, `originalPathName`, `originalPathNameRaw` —
+///   AFF4-L v1.0-ALPHA §1.1 writes these with the `aff4:` prefix inside the
+///   requirement itself, so the standard assigns them the base namespace
+///   despite introducing three of the four.
+/// - `FileImage`, `Folder`, `LogicalAcquisitionTask`, `filesystemRoot`,
+///   `birthTime`, `lastWritten`, `lastAccessed`, `recordChanged` — defined by
+///   the AFF4-L 2019 paper, which v1.0-ALPHA §4.2 restates rather than
+///   introduces. A term that already had a namespace keeps it.
+/// - `hash`, `size`, `stored`, and the rest of the base lexicon — AFF4 Standard
+///   v1.0a's, and §4.1 says its classes *supplement* that lexicon.
+///
+/// So no term aff4tools writes today moves namespace, and this table is
+/// consulted rather than exercised until a later phase writes one of these.
+const AFF4L_TERMS: &[&str] = &[
+    // AFF4-L v1.0-ALPHA §4.2 classes with no earlier definition.
+    "FileSubStream",
+    "FileExtendedAttribute",
+    // AFF4-L v1.0-ALPHA §4.3 properties with no earlier definition.
+    "pathSeparator",
+    "alternateDataStream",
+    "extendedAttribute",
+    // Properties the document's examples use that its AFF4-L v1.0-ALPHA §4.3 table omits.
+    "dataStream",
+    "imports",
+];
+
+/// The namespace a term belongs to, for a container of this generation.
+///
+/// The write side of AFF4-L v1.0-ALPHA §4.1, whose MUST is that a writer use
+/// the namespace the defining standard assigns. Deliberately not the mirror of
+/// [`is_known_namespace`]: a reader may honor either namespace, a writer may
+/// not choose. Letting the reader's leniency reach the writer would break the
+/// project's rule that leniency runs one way only.
+///
+/// A generation that predates v1.0-ALPHA has only one vocabulary, so every
+/// term takes the base namespace there whatever this table says.
+#[must_use]
+pub fn namespace_for(generation: Generation, local_name: &str) -> &'static str {
+    if generation == Generation::Aff4L10 && AFF4L_TERMS.contains(&local_name) {
+        AFF4L_NAMESPACE
+    } else {
+        STANDARD_NAMESPACE
+    }
+}
+
 /// Which era of the AFF4 format wrote a container.
 ///
 /// Serializes as a stable `snake_case` token (`"standard10"`,

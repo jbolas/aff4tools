@@ -154,6 +154,18 @@ pub enum RuleState {
     NotImplemented,
     /// No checker can exist yet, because the requirement itself is unsettled.
     NotCheckable,
+    /// Honored by this build, but not a property of any container.
+    ///
+    /// A permission granted to a *reader* is satisfied by how aff4tools
+    /// behaves, not by anything a container carries — AFF4-L v1.0-ALPHA §4.1's
+    /// leave to accept either namespace is the example. Reporting such a rule
+    /// as an unevaluated gap would misstate the position: the rule is met, and
+    /// no container could show otherwise.
+    ///
+    /// Distinct from [`Self::Detected`], which raises a deviation when a
+    /// container departs, and from [`Self::NotCheckable`], which is a question
+    /// the standard has not answered.
+    Honored,
 }
 
 impl RuleState {
@@ -164,6 +176,7 @@ impl RuleState {
             Self::Detected => "detected",
             Self::NotImplemented => "not implemented",
             Self::NotCheckable => "not checkable",
+            Self::Honored => "honored",
         }
     }
 }
@@ -484,8 +497,8 @@ mod tests {
             .collect();
         assert_eq!(
             alpha.len(),
-            28,
-            "the standard states 28 normative requirements; {} are declared",
+            36,
+            "the standard states 36 normative requirements; {} are declared",
             alpha.len()
         );
     }
@@ -515,11 +528,15 @@ mod tests {
         }
     }
 
-    /// The identity rules of the new standard are implemented; the rest are
-    /// still coverage gaps. Phase 3 moved exactly four rules, and naming them
-    /// here means a later phase cannot quietly claim one it has not written.
+    /// The identity and naming rules of the new standard are implemented; the
+    /// rest are still coverage gaps. Naming them here means a later phase
+    /// cannot quietly claim a rule it has not written.
+    ///
+    /// Phase 3 moved the four identity rules of AFF4-L v1.0-ALPHA (§1.1, §1.2
+    /// and AFF4-L v1.0-ALPHA §2); Phase 4 moved that standard's five §5 name-normalization
+    /// rules.
     #[test]
-    fn only_the_identity_rules_of_the_alpha_standard_are_checked() {
+    fn only_the_identity_and_naming_rules_of_the_alpha_standard_are_checked() {
         let detected: Vec<String> = all_rules()
             .iter()
             .filter(|rule| {
@@ -535,6 +552,12 @@ mod tests {
                 "AFF4L_V1_ALPHA/1.1/2",
                 "AFF4L_V1_ALPHA/1.2/1",
                 "AFF4L_V1_ALPHA/2/1",
+                "AFF4L_V1_ALPHA/4.1/1",
+                "AFF4L_V1_ALPHA/5/1",
+                "AFF4L_V1_ALPHA/5/2",
+                "AFF4L_V1_ALPHA/5/3",
+                "AFF4L_V1_ALPHA/5/4",
+                "AFF4L_V1_ALPHA/5/5",
             ]
         );
     }

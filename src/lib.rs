@@ -48,6 +48,7 @@ pub mod map;
 pub mod metadata;
 
 pub mod model;
+pub mod naming;
 pub mod parallel;
 pub mod progress;
 pub mod rdf;

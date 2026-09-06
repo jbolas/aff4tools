@@ -33,6 +33,10 @@ pub const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 /// The XSD `dateTime` datatype IRI — capital `T`, unlike pyaff4's output.
 pub const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
+/// The datatype for base64-encoded binary, which AFF4-L v1.0-ALPHA §5 uses for
+/// the raw filename properties.
+pub const XSD_BASE64_BINARY: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
+
 /// The `rdf:type` predicate IRI.
 pub const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
@@ -51,6 +55,15 @@ pub enum TurtleTerm {
 }
 
 impl TurtleTerm {
+    /// Whether this is an IRI beginning with `namespace`.
+    ///
+    /// A class reaches the graph as an `rdf:type` object rather than as a
+    /// predicate, so deciding which namespaces a document uses has to look at
+    /// objects too.
+    fn iri_starting_with(&self, namespace: &str) -> bool {
+        matches!(self, Self::Iri(iri) if iri.starts_with(namespace))
+    }
+
     /// An IRI object.
     #[must_use]
     pub fn iri(value: impl Into<String>) -> Self {
@@ -103,6 +116,10 @@ fn escape_literal(value: &str) -> String {
 
 /// The AFF4 schema namespace.
 const AFF4_NS: &str = "http://aff4.org/Schema#";
+
+/// The namespace AFF4-L Standard v1.0-ALPHA §4.1 assigns its new lexicon
+/// items. Bound and abbreviated only when a triple actually uses it.
+const AFF4L_NS: &str = crate::lexicon::AFF4L_NAMESPACE;
 
 /// The RDF namespace.
 const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -211,7 +228,16 @@ impl TurtleWriter {
         {
             return ":".to_owned();
         }
-        for (prefix, namespace) in [("aff4", AFF4_NS), ("rdf", RDF_NS), ("xsd", XSD_NS)] {
+        for (prefix, namespace) in [
+            // `aff4l` before `aff4`: the base namespace is not a prefix of the
+            // 2022 one, so order does not affect matching here, but keeping the
+            // more specific first states the intent for a future namespace
+            // that does nest.
+            ("aff4l", AFF4L_NS),
+            ("aff4", AFF4_NS),
+            ("rdf", RDF_NS),
+            ("xsd", XSD_NS),
+        ] {
             if let Some(local) = iri.strip_prefix(namespace) {
                 // Only abbreviate when the local part is a bare name; anything
                 // else could produce a token Turtle would not parse back.
@@ -235,6 +261,16 @@ impl TurtleWriter {
                 )
             }
         }
+    }
+
+    /// Whether any triple names a term in the AFF4-L v1.0-ALPHA namespace.
+    ///
+    /// Predicates and object IRIs both count: a class in that namespace
+    /// reaches the graph as an `rdf:type` object, not as a predicate.
+    fn uses_aff4l_namespace(&self) -> bool {
+        self.triples.iter().any(|(_, predicate, object)| {
+            predicate.starts_with(AFF4L_NS) || object.iri_starting_with(AFF4L_NS)
+        })
     }
 
     /// Render the graph as prefixed, subject-grouped Turtle.
@@ -261,6 +297,14 @@ impl TurtleWriter {
         let _ = writeln!(out, "@prefix rdf:   <{RDF_NS}> .");
         let _ = writeln!(out, "@prefix xsd:   <{XSD_NS}> .");
         let _ = writeln!(out, "@prefix aff4:  <{AFF4_NS}> .");
+        // Bound only when something uses it. A declaration nothing references
+        // is legal Turtle but is noise, and it leaves a reader unable to tell
+        // "this writer supports the namespace" from "this writer forgot to use
+        // it". AFF4-L v1.0-ALPHA §4.1 requires the namespace be correct where
+        // it is used, not that it be declared unconditionally.
+        if self.uses_aff4l_namespace() {
+            let _ = writeln!(out, "@prefix aff4l: <{AFF4L_NS}> .");
+        }
 
         for (slot, subject) in self.order.iter().enumerate() {
             let _ = writeln!(out);
@@ -660,5 +704,48 @@ mod tests {
         let graph = crate::rdf::Graph::parse(w.serialize().as_bytes(), &locus)
             .expect("escaped literals must still parse");
         assert!(!graph.is_empty());
+    }
+
+    /// The AFF4-L v1.0-ALPHA namespace is bound only when a term uses it.
+    ///
+    /// AFF4-L v1.0-ALPHA §4.1 requires the namespace be correct where used, not that it be
+    /// declared regardless. A binding nothing references is legal Turtle but
+    /// leaves a reader unable to tell support from oversight.
+    #[test]
+    fn the_aff4l_prefix_is_bound_only_when_used() {
+        let mut w = TurtleWriter::new();
+        w.add(
+            SUBJECT,
+            "http://aff4.org/Schema#size",
+            TurtleTerm::typed("1", XSD_LONG),
+        );
+        assert!(
+            !w.serialize().contains("@prefix aff4l:"),
+            "no term uses it, so nothing binds it"
+        );
+
+        let mut w = TurtleWriter::new();
+        w.add(
+            SUBJECT,
+            "http://aff4.org/Schema/2022/#pathSeparator",
+            TurtleTerm::string("/"),
+        );
+        let text = w.serialize();
+        assert!(text.contains("@prefix aff4l:"), "now it is used:\n{text}");
+        assert!(
+            text.contains("aff4l:pathSeparator"),
+            "and the term is abbreviated with it:\n{text}"
+        );
+    }
+
+    /// A class in that namespace reaches the graph as an `rdf:type` object,
+    /// not as a predicate, so the binding decision must look at objects too.
+    #[test]
+    fn a_class_in_the_aff4l_namespace_binds_the_prefix() {
+        let mut w = TurtleWriter::new();
+        w.add_type(SUBJECT, "http://aff4.org/Schema/2022/#FileSubStream");
+        let text = w.serialize();
+        assert!(text.contains("@prefix aff4l:"), "{text}");
+        assert!(text.contains("aff4l:FileSubStream"), "{text}");
     }
 }

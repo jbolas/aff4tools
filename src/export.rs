@@ -190,6 +190,137 @@ fn safe_component(raw: &str) -> (Option<String>, Option<String>) {
     (Some(cleaned), reason)
 }
 
+/// Where a recorded path should be written, given the name's raw bytes.
+///
+/// The byte-level counterpart of [`rebase`], for the names AFF4-L
+/// v1.0-ALPHA §5 records raw because they are not valid UTF-8. Preferring the
+/// bytes is what reproduces such a name: the display form is lossy by
+/// construction, since a literal `%41` and an encoded `A` are the same three
+/// characters.
+///
+/// Valid UTF-8 delegates to [`rebase`], so one sanitizing rule covers both.
+///
+/// Returns the path to write, plus an alteration when the result differs from
+/// what was recorded.
+#[must_use]
+pub fn rebase_bytes(target: &Path, recorded: &[u8]) -> (PathBuf, Option<PathAlteration>) {
+    // Where the bytes are valid UTF-8, the string path handles them and its
+    // sanitizing applies unchanged. That is the common case even for a name
+    // AFF4-L v1.0-ALPHA §5 encoded, since a control character is valid UTF-8.
+    if let Ok(text) = std::str::from_utf8(recorded) {
+        return rebase(target, text);
+    }
+
+    // Not valid UTF-8. On Unix a filename is a byte string, so the bytes can
+    // be written as they are -- the whole reason AFF4-L v1.0-ALPHA §5 records
+    // them at all.
+    // Sanitizing still applies per component, on the ASCII bytes it knows.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let mut relative = PathBuf::new();
+        let mut reasons: Vec<String> = Vec::new();
+        for component in recorded.split(|&b| b == b'/' || b == b'\\') {
+            let (kept, reason) = safe_component_bytes(component);
+            if let Some(reason) = reason {
+                reasons.push(reason);
+            }
+            if let Some(kept) = kept {
+                relative.push(std::ffi::OsStr::from_bytes(&kept));
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            relative.push("_");
+            reasons.push("the recorded bytes named no writable path; wrote `_`".to_owned());
+        }
+        let written = target.join(&relative);
+        let alteration = if reasons.is_empty() {
+            None
+        } else {
+            Some(PathAlteration {
+                recorded: String::from_utf8_lossy(recorded).into_owned(),
+                written: relative.to_string_lossy().into_owned(),
+                reason: reasons.join("; "),
+            })
+        };
+        (written, alteration)
+    }
+
+    // Elsewhere a path is not a byte string, so the bytes cannot be written
+    // faithfully. The lossy form is used and the substitution reported.
+    #[cfg(not(unix))]
+    {
+        let text = String::from_utf8_lossy(recorded).into_owned();
+        let (written, alteration) = rebase(target, &text);
+        (
+            written,
+            Some(alteration.unwrap_or_else(|| {
+                PathAlteration {
+                    recorded: text.clone(),
+                    written: text,
+                    reason: "the recorded name is not valid UTF-8 and this platform \
+                         cannot write it as bytes"
+                        .to_owned(),
+                }
+            })),
+        )
+    }
+}
+
+/// Sanitize one component given as raw bytes.
+///
+/// The byte counterpart of [`safe_component`], for a name that is not valid
+/// UTF-8. Each byte is judged on its own: the illegal set is ASCII, so a byte
+/// above `0x7f` is left alone rather than being mistaken for one.
+#[cfg(unix)]
+fn safe_component_bytes(raw: &[u8]) -> (Option<Vec<u8>>, Option<String>) {
+    if raw.is_empty() || raw == b"." {
+        return (None, None);
+    }
+    if raw == b".." {
+        return (
+            None,
+            Some("a `..` component was removed; it would climb above the target".to_owned()),
+        );
+    }
+
+    let mut cleaned: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut replaced = false;
+    for &byte in raw {
+        if byte < 0x80 && is_illegal(byte as char) {
+            cleaned.push(b'_');
+            replaced = true;
+        } else {
+            cleaned.push(byte);
+        }
+    }
+
+    // Trailing dots and spaces, as the string path strips them and for the
+    // same reason.
+    while matches!(cleaned.last(), Some(b'.' | b' ')) {
+        cleaned.pop();
+        replaced = true;
+    }
+    if cleaned.is_empty() {
+        return (
+            Some(b"_".to_vec()),
+            Some(format!(
+                "{:?} reduced to nothing once made writable; wrote `_`",
+                String::from_utf8_lossy(raw)
+            )),
+        );
+    }
+
+    let reason = replaced.then(|| {
+        format!(
+            "bytes illegal in a file name were replaced in {:?}",
+            String::from_utf8_lossy(raw)
+        )
+    });
+    (Some(cleaned), reason)
+}
+
 /// Where a recorded path should be written beneath `target`.
 ///
 /// The recorded hierarchy is preserved and rebased: an absolute

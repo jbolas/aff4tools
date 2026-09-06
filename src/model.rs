@@ -370,6 +370,36 @@ impl Aff4Object {
         }
         None
     }
+
+    /// The suspect path as the acquisition read it, byte for byte.
+    ///
+    /// AFF4-L v1.0-ALPHA §5 records a name that is not valid UTF-8, or that
+    /// carries a control character, twice: a printable display form and the
+    /// raw bytes base64-encoded. This decodes the raw form.
+    ///
+    /// **Prefer this over [`Self::recorded_path`] when writing a file.** The
+    /// display form is lossy by construction — a literal `%41` in a name and
+    /// an encoded `A` are the same three characters — so only the raw form
+    /// reconstructs the name. The display form remains the right choice for
+    /// anything shown to a person, which is what AFF4-L v1.0-ALPHA §5 built it for.
+    ///
+    /// [`None`] when no raw property is present, which for a conforming
+    /// container means the display form is the name itself and needs no
+    /// decoding. Also [`None`] when the value is not valid base64: that is a
+    /// container contradicting itself, reported by `conformance` rather than
+    /// guessed at here.
+    #[must_use]
+    pub fn recorded_path_bytes(&self) -> Option<Vec<u8>> {
+        for name in ["originalPathNameRaw", "fileNameRaw"] {
+            if let Some(property) = self.property(name) {
+                let lexical = property.value.lexical();
+                if !lexical.is_empty() {
+                    return crate::naming::base64_decode(lexical);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// What a [`ObjectRole::BlockHashes`] object's per-chunk digests are, and

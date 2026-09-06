@@ -47,8 +47,15 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/1.2/1` (§1.2) | MUST | detected | A segment name derived from an object's resource name leaves the scheme and authority unescaped. |
 | `AFF4L_V1_ALPHA/2/1` (§2) | MUST | detected | An object's resource name is the AFF4 scheme followed by a lower-case GUID. |
 | `AFF4L_V1_ALPHA/2/2` (§2) | MAY | not checkable | A resource name may carry a further part after its GUID, provided the whole remains a valid IRI. |
-| `AFF4L_V1_ALPHA/4.1/1` (§4.1) | MUST | not implemented | A writer emits new lexicon terms under the namespace its governing standard assigns them. |
-| `AFF4L_V1_ALPHA/4.1/2` (§4.1) | MAY | not implemented | A reader may accept either namespace prefix for a lexicon term, so that containers written against the earlier schema still read. |
+| `AFF4L_V1_ALPHA/4.1/1` (§4.1) | MUST | detected | A writer emits new lexicon terms under the namespace its governing standard assigns them. |
+| `AFF4L_V1_ALPHA/4.1/2` (§4.1) | MAY | honored | A reader may accept either namespace prefix for a lexicon term, so that containers written against the earlier schema still read. |
+| `AFF4L_V1_ALPHA/5/1` (§5) | MUST | detected | A name that is valid UTF-8 without control characters is recorded as it is, with no raw form. |
+| `AFF4L_V1_ALPHA/5/2` (§5) | MUST | detected | A name that is not valid UTF-8, or carries a control character, records its raw bytes base64-encoded alongside the display form. |
+| `AFF4L_V1_ALPHA/5/3` (§5) | MUST | detected | A raw name is well-formed base64, so the bytes it records can be read. |
+| `AFF4L_V1_ALPHA/5/4` (§5) | MUST | detected | A name's raw form and display form describe the same name, so the two never contradict each other. |
+| `AFF4L_V1_ALPHA/5/5` (§5) | MUST | detected | Percent escapes in a display name use uppercase hexadecimal. |
+| `AFF4L_V1_ALPHA/5/6` (§5) | MAY | not checkable | Two encoded names in one folder may share a display form, so a reader must not assume a display name is unique. |
+| `AFF4L_V1_ALPHA/5/7` (§5) | MUST | not implemented | A name is recorded byte for byte on a platform whose paths are not byte-oriented, in the encoding the standard names. |
 | `AFF4L_V1_ALPHA/6/1` (§6) | MUST | not implemented | A reader handles every storage stream form this section describes, not a chosen subset. |
 | `AFF4L_V1_ALPHA/6/2` (§6) | MUST | not implemented | A writer implements at least one of the storage stream forms this section describes. |
 | `AFF4L_V1_ALPHA/6.1/1` (§6.1) | MUST | not implemented | A stream held as a ZIP segment is compressed with Stored or Deflate and no other method. |
@@ -58,6 +65,7 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/6.2/2` (§6.2) | MAY | not implemented | A stream carried inside the metadata need not record its own digests, since the metadata integrity hash covers it. |
 | `AFF4L_V1_ALPHA/6.3.1/1` (§6.3.1) | MUST | not implemented | A writer computes and records a block map digest for every map, under either of the two property spellings the standard allows. |
 | `AFF4L_V1_ALPHA/6.3.1/2` (§6.3.1) | MUST | not implemented | A reader accepts either block map digest spelling and can verify the block map digests of every map and dependent image stream. |
+| `AFF4L_V1_ALPHA/7/1` (§7) | MAY | honored | A container may signal its format by file extension, which is a hint and never decides how the container is read. |
 | `AFF4L_V1_ALPHA/9/1` (§9) | MUST | not checkable | Triples from the primary metadata segment and from every store it imports are read as one graph. |
 | `AFF4L_V1_ALPHA/9a/1` (§9a) | MAY | not checkable | A container may carry an accelerated metadata store beside the primary one, holding everything the primary and any secondary stores hold. |
 | `AFF4L_V1_ALPHA/9a/2` (§9a) | MAY | not checkable | A reader may take its metadata from the accelerated store in place of the primary and secondary stores. |
@@ -73,4 +81,4 @@ registry in `src/rules/catalog.rs`.
 
 ## Coverage
 
-17 of 43 declared rules are checked.
+23 of 51 declared rules are checked.

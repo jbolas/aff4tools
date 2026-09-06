@@ -185,6 +185,181 @@ def write_nameless(path: Path) -> None:
     _write(path, turtle, {arn: content})
 
 
+def _b64(data: bytes) -> str:
+    """Base64, matching what the standard's raw name properties carry."""
+    import base64 as _base64
+
+    return _base64.b64encode(data).decode()
+
+
+def _display(raw: bytes) -> str:
+    """The AFF4-L v1.0-ALPHA section 5 display form of a name's bytes.
+
+    Written from the standard's rules rather than from the aff4tools encoder,
+    so a fixture cannot inherit a bug from the code it tests.
+    """
+    out = []
+    for byte in raw:
+        if byte <= 0x1F or byte == 0x25 or byte >= 0x7F:
+            out.append(f"%{byte:02X}")
+        else:
+            out.append(chr(byte))
+    return "".join(out)
+
+
+def _named_file(arn: str, raw_name: bytes, raw_path: bytes, content: bytes,
+                *, omit_raw=False, force_raw=False, bad_raw=None,
+                lowercase=False, wrong_raw=None) -> str:
+    """One FileImage subject with section 5 name properties.
+
+    The keyword arguments each break one rule, so a fixture can be built that
+    violates exactly one thing.
+    """
+    import hashlib
+
+    encoded = any(b <= 0x1F or b == 0x7F for b in raw_name) or _is_bad_utf8(raw_name)
+    name_display = _display(raw_name) if encoded else raw_name.decode()
+    path_display = _display(raw_path) if encoded else raw_path.decode()
+    if lowercase:
+        # Only an escape carrying a hex letter can differ in case, so the
+        # fixture that exercises this rule uses one.
+        name_display = "".join(
+            c.lower() if c in "ABCDEF" else c for c in name_display
+        )
+
+    lines = [
+        f"<{arn}>",
+        "    a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;",
+        f'    aff4:hash               "{hashlib.sha1(content).hexdigest()}"^^aff4:SHA1 ;',
+        f'    aff4:size               "{len(content)}"^^xsd:long ;',
+        f'    aff4:originalPathName   "{path_display}" ;',
+        f'    aff4:fileName           "{name_display}"',
+    ]
+
+    raw_value = None
+    if bad_raw is not None:
+        raw_value = bad_raw
+    elif wrong_raw is not None:
+        raw_value = _b64(wrong_raw)
+    elif force_raw or (encoded and not omit_raw):
+        raw_value = _b64(raw_name)
+
+    if raw_value is not None:
+        lines[-1] += " ;"
+        lines.append(f'    aff4:fileNameRaw        "{raw_value}"^^xsd:base64Binary')
+        # The path property is encoded too whenever the name is, so its own raw
+        # form must be present or the container is missing half a pair. Written
+        # from the path's real bytes, so only the deliberate defect above
+        # differs between fixtures.
+        if True:
+            path_raw = _b64(raw_path if (force_raw or encoded) else raw_path)
+            lines[-1] += " ;"
+            lines.append(
+                f'    aff4:originalPathNameRaw "{path_raw}"^^xsd:base64Binary'
+            )
+    lines[-1] += " ."
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def _is_bad_utf8(raw: bytes) -> bool:
+    try:
+        raw.decode()
+        return False
+    except UnicodeDecodeError:
+        return True
+
+
+def _section5(path: Path, subject: str) -> None:
+    """A container holding one section 5 fixture subject."""
+    turtle = f"""
+<{VOLUME}>
+    a           aff4:ZipVolume ;
+    aff4:stored "{path.name}" .
+""" + subject
+    _write(path, turtle, {})
+
+
+def write_section5_fixtures(outdir: Path) -> int:
+    """Every section 5 case, one container each."""
+    F = "aff4://8d1f4a26-3b07-4c95-ae82-51d0c6f39b47"
+    content = b"section five\n"
+    cases = {
+        # Conforming: a clean name, and an encoded name with a correct pair.
+        "names-clean.aff4l": _named_file(
+            F, b"report.txt", b"/case/report.txt", content),
+        "names-encoded.aff4l": _named_file(
+            F, b"ctrl\ttab.txt", b"/case/ctrl\ttab.txt", content),
+        "names-invalid-utf8.aff4l": _named_file(
+            F, b"bad\xffname.txt", b"/case/bad\xffname.txt", content),
+        # Violations, one rule each.
+        "names-redundant-raw.aff4l": _named_file(
+            F, b"clean.txt", b"/case/clean.txt", content, force_raw=True),
+        "names-missing-raw.aff4l": _named_file(
+            F, b"ctrl\ttab.txt", b"/case/ctrl\ttab.txt", content, omit_raw=True),
+        "names-malformed-raw.aff4l": _named_file(
+            F, b"ctrl\ttab.txt", b"/case/ctrl\ttab.txt", content, bad_raw="not!base64"),
+        "names-contradictory-raw.aff4l": _named_file(
+            F, b"ctrl\ttab.txt", b"/case/ctrl\ttab.txt", content,
+            wrong_raw=b"something\telse.txt"),
+        # A carriage return escapes as %0D, whose letter can be lowercased;
+        # a tab is %09 and has no letter to differ in.
+        # A lowercase escape cannot appear in an otherwise conforming
+        # container: with a raw form present it contradicts it, and without one
+        # it also breaks rule 2. This fixture takes the second, so it reports
+        # the spelling rule plus the missing raw form -- both genuine, and the
+        # test asserts exactly that pair.
+        "names-lowercase-escape.aff4l": _named_file(
+            F, b"ctrl\rcr.txt", b"/case/ctrl\rcr.txt", content,
+            lowercase=True, omit_raw=True),
+    }
+    for name, subject in cases.items():
+        _section5(outdir / name, subject)
+    return len(cases)
+
+
+def write_namespace_fixtures(outdir: Path) -> int:
+    """Section 4.1: a term under the namespace its standard does not assign.
+
+    Two cases, both well formed as RDF and both readable: what differs is
+    whether a reader that declines to honor both namespaces would recognize
+    the term.
+    """
+    import hashlib
+
+    F = "aff4://9e2c5b71-4d38-4a06-bc19-70f3e8a24d5c"
+    content = b"namespace\n"
+    common = (
+        "    a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;\n"
+        f'    aff4:hash               "{hashlib.sha1(content).hexdigest()}"^^aff4:SHA1 ;\n'
+        f'    aff4:size               "{len(content)}"^^xsd:long ;\n'
+        '    aff4:fileName           "ns.txt" ;\n'
+        '    aff4:originalPathName   "/ns.txt" ;\n'
+    )
+
+    cases = {
+        # Correct: a v1.0-ALPHA term in the 2022 namespace.
+        "namespace-correct.aff4l":
+            f"\n<{F}>\n{common}"
+            '    aff4l:pathSeparator     "/" .\n',
+        # Wrong: a v1.0-ALPHA term under the base namespace.
+        "namespace-base-for-new.aff4l":
+            f"\n<{F}>\n{common}"
+            '    aff4:pathSeparator      "/" .\n',
+        # Wrong the other way: a base term under the 2022 namespace.
+        "namespace-new-for-base.aff4l":
+            f"\n<{F}>\n{common}"
+            '    aff4l:fileMode          "420" .\n',
+    }
+    for name, subject in cases.items():
+        turtle = f"""
+<{VOLUME}>
+    a           aff4:ZipVolume ;
+    aff4:stored "{name}" .
+""" + subject
+        _write(outdir / name, turtle, {})
+    return len(cases)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("outdir", type=Path)
@@ -197,7 +372,9 @@ def main() -> None:
     write_uppercase_guid(args.outdir / "uppercase-guid.aff4l")
     write_escaped_member(args.outdir / "escaped-member.aff4l")
     write_nameless(args.outdir / "nameless.aff4l")
-    print(f"wrote 6 v2.1 containers to {args.outdir}")
+    extra = write_section5_fixtures(args.outdir)
+    extra += write_namespace_fixtures(args.outdir)
+    print(f"wrote {6 + extra} v2.1 containers to {args.outdir}")
 
 
 if __name__ == "__main__":

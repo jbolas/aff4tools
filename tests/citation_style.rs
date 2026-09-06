@@ -8,16 +8,53 @@ use std::path::Path;
 /// Each of these cites the AFF4-L 2019 paper and nothing else, and each says
 /// so at the top of the file. Adding an entry here is a claim about the whole
 /// file, so `single_document_modules_cite_only_their_document` re-checks it.
-const SINGLE_DOCUMENT_MODULES: &[&str] = &[
-    "src/write/dedupe.rs",
-    "tests/logical_acquire.rs",
-    "tests/dedupe_acquire.rs",
+/// Each entry is a file and the document its bare sections cite.
+///
+/// Adding an entry is a claim about the whole file, which
+/// `single_document_modules_cite_only_their_document` re-checks.
+const SINGLE_DOCUMENT_MODULES: &[(&str, Document)] = &[
+    ("src/naming.rs", Document::Alpha),
+    ("src/write/dedupe.rs", Document::Paper2019),
+    ("tests/logical_acquire.rs", Document::Paper2019),
+    ("tests/dedupe_acquire.rs", Document::Paper2019),
 ];
+
+/// A document a single-document module may cite.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Document {
+    /// AFF4-L (Schatz, DFRWS USA 2019).
+    Paper2019,
+    /// AFF4-L Standard v1.0-ALPHA.
+    Alpha,
+}
+
+impl Document {
+    /// The sentence the module doc comment must carry.
+    fn statement(self) -> &'static str {
+        match self {
+            Self::Paper2019 => "**Every bare section number below cites that paper**",
+            Self::Alpha => "**Every bare section number below cites that standard.**",
+        }
+    }
+
+    /// Whether a section number could not belong to this document.
+    ///
+    /// The 2019 paper stops at section 4, so a higher number means the file has
+    /// started citing something else and the exemption no longer holds. The
+    /// v1.0-ALPHA standard runs to §10, so nothing is out of range there and
+    /// the guard falls to the qualified-citation rule instead.
+    fn is_foreign_section(self, section: &str) -> bool {
+        match self {
+            Self::Paper2019 => {
+                section.starts_with("§5") || section.starts_with("§6") || section.starts_with("§7")
+            }
+            Self::Alpha => false,
+        }
+    }
+}
 
 /// The sentence an exempt file must carry, so a reader who lands mid-file
 /// knows which document its bare sections belong to.
-const SINGLE_DOCUMENT_STATEMENT: &str = "**Every bare section number below cites that paper**";
-
 fn source_files() -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     for dir in ["src", "tests", "examples"] {
@@ -47,7 +84,10 @@ fn every_citation_names_its_document() {
 
     for path in source_files() {
         let display = path.to_string_lossy().replace('\\', "/");
-        if SINGLE_DOCUMENT_MODULES.contains(&display.as_str()) {
+        if SINGLE_DOCUMENT_MODULES
+            .iter()
+            .any(|(name, _)| *name == display)
+        {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -95,18 +135,18 @@ fn every_citation_names_its_document() {
 /// waved through by the very list meant to keep citations honest.
 #[test]
 fn single_document_modules_cite_only_their_document() {
-    for name in SINGLE_DOCUMENT_MODULES {
+    for (name, document) in SINGLE_DOCUMENT_MODULES {
         let text = std::fs::read_to_string(name)
             .unwrap_or_else(|e| panic!("{name} is listed as exempt but cannot be read: {e}"));
 
         assert!(
-            text.contains(SINGLE_DOCUMENT_STATEMENT),
+            text.contains(document.statement()),
             "{name} is exempt but its module doc comment does not say which \
              document its bare sections cite"
         );
 
-        // The paper has no section 5 or above, so a citation to one is a
-        // citation to some other document and the exemption no longer holds.
+        // A section number the named document does not have means the file has
+        // started citing something else, and the exemption no longer holds.
         for (index, line) in text.lines().enumerate() {
             let Some(position) = line.find('§') else {
                 continue;
@@ -115,11 +155,10 @@ fn single_document_modules_cite_only_their_document() {
                 continue;
             }
             let section = &line[position..];
-            let foreign =
-                section.starts_with("§5") || section.starts_with("§6") || section.starts_with("§7");
+            let foreign = document.is_foreign_section(section);
             assert!(
                 !foreign || line[..position].contains("v1.0a"),
-                "{name}:{}: cites a section outside the AFF4-L 2019 paper, so \
+                "{name}:{}: cites a section outside the document it names, so \
                  the file is no longer single-document; qualify every citation \
                  in it and drop it from SINGLE_DOCUMENT_MODULES:\n{}",
                 index + 1,

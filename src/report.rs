@@ -1499,15 +1499,34 @@ fn write_object(
     // this is the literal-valued remainder plus any `Other`-kind edge whose
     // value did not parse as an IRI (there are none in the corpus, but the
     // filter is by content, not by assumption).
+    // A name AFF4-L v1.0-ALPHA §5 encoded is marked, so an examiner does not
+    // read `%09` as a file literally called that. The raw property beside it
+    // is the authority, and `export` is what decodes it -- the display form is
+    // shown here precisely because it is safe to print, which is what AFF4-L v1.0-ALPHA §5 built
+    // it for. Decoding raw bytes into a terminal could emit an escape
+    // sequence.
+    let encoded_names: [&str; 2] = ["fileName", "originalPathName"];
+    let has_raw = |name: &str| {
+        object
+            .properties
+            .iter()
+            .any(|p| *p.name == format!("{name}Raw"))
+    };
+
     for property in object
         .properties
         .iter()
         .filter(|p| !p.is_vendor() && !is_edge_property(p))
     {
         let value = render_value(&property.value, prefixes);
+        let marker = if encoded_names.contains(&&*property.name) && has_raw(&property.name) {
+            "  [encoded per AFF4-L v1.0-ALPHA §5]"
+        } else {
+            ""
+        };
         writeln!(
             out,
-            "    {:<widest$} {}",
+            "    {:<widest$} {}{marker}",
             property.name,
             truncate(&value, 100)
         )?;

@@ -195,7 +195,14 @@ pub fn discover(dir: &Path) -> Result<SplitSet> {
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
         };
-        if ext.eq_ignore_ascii_case("aff4") || ext.eq_ignore_ascii_case("af4") {
+        // `aff4l` alongside the older two: AFF4-L v1.0-ALPHA §7 offers that
+        // extension as a hint, and a set whose parts carry it must still be
+        // found. Without this a folder of `.aff4l` parts reports as holding no
+        // split set at all.
+        if ext.eq_ignore_ascii_case("aff4")
+            || ext.eq_ignore_ascii_case("af4")
+            || ext.eq_ignore_ascii_case("aff4l")
+        {
             aff4.push(path);
         } else if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_digit()) {
             raw.push(path);
@@ -214,7 +221,8 @@ pub fn discover(dir: &Path) -> Result<SplitSet> {
         if raw.is_empty() {
             return Err(Error::malformed(
                 locus,
-                "no split set here: expected .aff4 parts or a raw set (.001, .002, …)",
+                "no split set here: expected .aff4 or .aff4l parts, or a raw \
+                 set (.001, .002, …)",
             ));
         }
         (SplitKind::RawSplit, raw)

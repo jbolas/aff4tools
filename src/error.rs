@@ -505,6 +505,48 @@ pub enum DeviationKind {
     /// what they were called, and no consumer can reconstruct the acquired
     /// tree.
     MissingRecordedPath,
+    /// A raw name property sits beside a name that needed no encoding.
+    ///
+    /// AFF4-L v1.0-ALPHA §5 rule 1 says the raw property "is not used" for a
+    /// name that is valid UTF-8 without control characters. One present anyway
+    /// is a second, redundant statement of the name that a later edit could
+    /// leave contradicting the first.
+    RedundantRawName,
+    /// A name's display form carries a percent escape but no raw property
+    /// explains it.
+    ///
+    /// AFF4-L v1.0-ALPHA §5 rule 2 records both halves or neither. With only
+    /// the display form the original name cannot be recovered: a `%41` in it
+    /// could be an encoded `A` or the three literal characters, and nothing
+    /// left in the container says which.
+    MissingRawName,
+    /// A raw name property is not valid base64.
+    ///
+    /// The bytes it claims to hold cannot be read at all, so the name it
+    /// records is unrecoverable.
+    MalformedRawName,
+    /// A name's raw and display forms do not agree.
+    ///
+    /// The raw bytes, put through AFF4-L v1.0-ALPHA §5's display encoding, do
+    /// not produce the recorded display form. The container's own metadata
+    /// contradicts itself and no consumer can tell which half to believe —
+    /// the strongest finding available here, because it checks the pair
+    /// against each other rather than either against an assumption.
+    ContradictoryRawName,
+    /// A percent escape in a display form uses lowercase hexadecimal.
+    ///
+    /// AFF4-L v1.0-ALPHA §5 rule 2b specifies uppercase. The value is
+    /// recoverable either way, so this is recorded rather than refused.
+    LowercaseNameEscape,
+    /// A lexicon term is written under a namespace its defining standard does
+    /// not assign it.
+    ///
+    /// AFF4-L v1.0-ALPHA §4.1 requires a writer use the namespace of whichever
+    /// standard defines a term. A reader may honor either, so the container is
+    /// still read — but the two namespaces are different strings to any RDF
+    /// consumer, and one that does not apply the same leniency sees a term it
+    /// does not recognize.
+    WrongTermNamespace,
 }
 
 impl DeviationKind {
@@ -668,6 +710,12 @@ impl std::fmt::Display for DeviationKind {
             Self::UppercaseGuidArn => "resource name GUID is not lower case",
             Self::EscapedV21MemberName => "member name escaped where v2.1 stores it literally",
             Self::MissingRecordedPath => "logical file records no name or path",
+            Self::RedundantRawName => "raw name recorded for a name needing no encoding",
+            Self::MissingRawName => "encoded name recorded without its raw form",
+            Self::MalformedRawName => "raw name is not valid base64",
+            Self::ContradictoryRawName => "raw and display names disagree",
+            Self::LowercaseNameEscape => "name escape uses lowercase hexadecimal",
+            Self::WrongTermNamespace => "lexicon term written under the wrong namespace",
         };
         f.write_str(s)
     }

@@ -29,6 +29,8 @@
 
 use std::path::Path;
 
+use crate::naming::RecordedName;
+
 /// Table 3 of the paper: the AFF4-L lexicon.
 ///
 /// Local names only; the namespace is `aff4:`. **Four of these nine are never
@@ -75,6 +77,10 @@ pub mod terms {
     pub const FILE_NAME: &str = "fileName";
     /// The entry's full path, under AFF4-L v1.0-ALPHA §1.1.
     pub const ORIGINAL_PATH_NAME: &str = "originalPathName";
+    /// The entry's own name as read, base64-encoded (AFF4-L v1.0-ALPHA §5).
+    pub const FILE_NAME_RAW: &str = "fileNameRaw";
+    /// The entry's full path as read, base64-encoded (AFF4-L v1.0-ALPHA §5).
+    pub const ORIGINAL_PATH_NAME_RAW: &str = "originalPathNameRaw";
     /// Marks content stored as one ZIP segment, as AFF4-L v1.0-ALPHA §6.1
     /// spells it.
     pub const ZIP_SEGMENT_V21: &str = "ZipSegment";
@@ -270,9 +276,93 @@ pub fn is_reserved_name(name: &str) -> bool {
 /// The paper preserves the original unencoded path; this keeps it verbatim
 /// rather than canonicalizing, because the path as the examiner supplied it is
 /// what the acquisition observed.
+///
+/// **Serves the AFF4-L 2019 path, and is lossy by inheritance.** The value it
+/// returns feeds two consumers: [`arn_for_entry`], which under
+/// [`LogicalProfile::Legacy`] hands it to [`arn_path_fragment`] to build the
+/// ARN and from it the ZIP member name, and the `aff4:originalFileName`
+/// property. A name that is not valid UTF-8 becomes U+FFFD here, before either
+/// sees it. That has always been this writer's behavior for the 2019 format
+/// and stays so, because the escaping pair built on top of it is lossless and
+/// correct for that document.
+///
+/// AFF4-L v1.0-ALPHA §5 requires the bytes instead, and
+/// [`recorded_path_bytes`] supplies them. The two coexist because the two
+/// documents disagree about what a name is.
 #[must_use]
 pub fn original_file_name(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// A path's bytes, for AFF4-L v1.0-ALPHA §5 normalization.
+///
+/// # Platforms
+///
+/// On Unix a path *is* a byte string, and this returns it with no conversion —
+/// which is what lets AFF4-L v1.0-ALPHA §5 record a name the kernel accepted but UTF-8 cannot
+/// represent.
+///
+/// On Windows a path is a sequence of 16-bit UTF-16 code units, not bytes, and
+/// may contain an unpaired surrogate that no UTF-8 encoding can represent.
+/// Which byte encoding AFF4-L v1.0-ALPHA §5 intends there is a question the standard has not
+/// answered, so this returns [`None`] rather than choosing one: writing a raw
+/// property in an encoding the standard does not name would assert a faithful
+/// record that a reader cannot interpret. The caller falls back to the lossy
+/// conversion and records no raw form.
+#[must_use]
+pub fn recorded_path_bytes(path: &Path) -> Option<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        Some(path.as_os_str().as_bytes().to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        // Valid UTF-16 with no lone surrogate is representable as UTF-8, and
+        // for such a name the bytes are unambiguous. Anything else is the
+        // open question above.
+        let _ = path;
+        path.to_str().map(|text| text.as_bytes().to_vec())
+    }
+}
+
+/// What one acquired entry is called, in both documents' terms.
+///
+/// The lossy string serves the AFF4-L 2019 path and the ARN built from it; the
+/// pair serves AFF4-L v1.0-ALPHA §5. They travel together because every
+/// consumer that needs one needs the other, and because keeping them in one
+/// value is what stops a caller supplying a display string from one entry and
+/// names from another.
+pub struct EntryNames<'a> {
+    /// The path as [`original_file_name`] renders it.
+    pub display: &'a str,
+    /// The AFF4-L v1.0-ALPHA §5 forms, where the platform supplies bytes.
+    pub names: Option<&'a (RecordedName, RecordedName)>,
+}
+
+/// The AFF4-L v1.0-ALPHA §5 pair for a path and for its own last component.
+///
+/// Both are derived from the **same** bytes, splitting on the separator before
+/// normalizing. That order is the only one that works: after encoding, a
+/// literal `/` in a display form is indistinguishable from a separator, and
+/// reading the filesystem twice would let the two disagree about one entry.
+///
+/// Returns [`None`] where the platform cannot supply bytes, which is
+/// [`recorded_path_bytes`]'s Windows case.
+#[must_use]
+pub fn recorded_names(path: &Path) -> Option<(RecordedName, RecordedName)> {
+    let bytes = recorded_path_bytes(path)?;
+    // A trailing separator would make the last component empty, so it is
+    // dropped first -- a folder names itself, not the empty string.
+    let trimmed = match bytes.iter().rposition(|&b| b != b'/' && b != b'\\') {
+        Some(end) => &bytes[..=end],
+        None => &bytes[..],
+    };
+    let tail = trimmed
+        .iter()
+        .rposition(|&b| b == b'/' || b == b'\\')
+        .map_or(trimmed, |i| &trimmed[i + 1..]);
+    Some((RecordedName::of(&bytes), RecordedName::of(tail)))
 }
 
 /// Timestamps captured for one filesystem entry (Table 3).
@@ -885,6 +975,9 @@ fn acquire_from_items(
             }
             ScanItem::Dir { path } => {
                 let display = original_file_name(&path);
+                // AFF4-L v1.0-ALPHA §5 works from the name's bytes; the lossy
+                // string above serves the AFF4-L 2019 path and the ARN.
+                let names = recorded_names(&path);
                 let arn = arn_for_entry(volume_arn, &display, options.profile, writer.path())?;
                 let stamps = match std::fs::symlink_metadata(&path) {
                     Ok(m) => timestamps_of(&m),
@@ -896,7 +989,10 @@ fn acquire_from_items(
                 write_table_3(
                     writer,
                     &arn,
-                    &display,
+                    &EntryNames {
+                        display: &display,
+                        names: names.as_ref(),
+                    },
                     &stamps,
                     volume_arn,
                     options.profile,
@@ -946,12 +1042,14 @@ fn acquire_from_items(
             }
             ScanItem::File { path, size } => {
                 let display = original_file_name(&path);
+                let names = recorded_names(&path);
                 let arn = arn_for_entry(volume_arn, &display, options.profile, writer.path())?;
                 record_file(
                     writer,
                     &path,
                     &arn,
                     &display,
+                    names.as_ref(),
                     size,
                     volume_arn,
                     options,
@@ -1022,6 +1120,7 @@ fn record_file(
     path: &std::path::Path,
     arn: &str,
     display: &str,
+    names: Option<&(RecordedName, RecordedName)>,
     size: u64,
     volume_arn: &str,
     options: LogicalOptions,
@@ -1048,7 +1147,7 @@ fn record_file(
     write_table_3(
         writer,
         arn,
-        display,
+        &EntryNames { display, names },
         &stamps,
         volume_arn,
         options.profile,
@@ -1354,31 +1453,61 @@ fn entry_name(path: &str) -> &str {
 fn write_table_3(
     writer: &mut crate::write::container_writer::ContainerWriter,
     arn: &str,
-    display: &str,
+    entry: &EntryNames<'_>,
     stamps: &FsTimestamps,
     volume_arn: &str,
     profile: LogicalProfile,
     record_stored: bool,
 ) {
-    use crate::write::turtle::{TurtleTerm, XSD_DATE_TIME, XSD_STRING};
+    use crate::write::turtle::{TurtleTerm, XSD_BASE64_BINARY, XSD_DATE_TIME, XSD_STRING};
+
+    let EntryNames { display, names } = entry;
+    let display = *display;
 
     let lexicon = crate::lexicon::STANDARD;
     let graph = writer.graph_mut();
     if profile.is_v1_alpha() {
         // AFF4-L v1.0-ALPHA §1.1: the name is a GUID, so the path is carried
         // here or nowhere. Both properties are written, because the full path
-        // and the entry's own name answer different questions and AFF4-L 2019 §1.1 names
-        // both.
-        graph.add(
-            arn,
-            &lexicon.iri(terms::ORIGINAL_PATH_NAME),
-            TurtleTerm::typed(display, XSD_STRING),
-        );
-        graph.add(
-            arn,
-            &lexicon.iri(terms::FILE_NAME),
-            TurtleTerm::typed(entry_name(display), XSD_STRING),
-        );
+        // and the entry's own name answer different questions and
+        // AFF4-L v1.0-ALPHA §1.1 names both.
+        //
+        // AFF4-L v1.0-ALPHA §5 decides their form. Where the platform supplies
+        // the name's bytes, a name needing encoding carries a raw form beside
+        // the display form; where it does not, the lossy conversion is
+        // recorded alone rather than asserting a raw form that is not faithful.
+        let (path_name, file_name) = match names {
+            Some((path_name, file_name)) => (path_name.clone(), file_name.clone()),
+            None => (
+                RecordedName::of(display.as_bytes()),
+                RecordedName::of(entry_name(display).as_bytes()),
+            ),
+        };
+
+        for (term, raw_term, name) in [
+            (
+                terms::ORIGINAL_PATH_NAME,
+                terms::ORIGINAL_PATH_NAME_RAW,
+                &path_name,
+            ),
+            (terms::FILE_NAME, terms::FILE_NAME_RAW, &file_name),
+        ] {
+            graph.add(
+                arn,
+                &lexicon.iri(term),
+                TurtleTerm::typed(name.display(), XSD_STRING),
+            );
+            // AFF4-L v1.0-ALPHA §5 rule 1: the raw property "is not used" for
+            // a clean name, so an absent raw form writes no triple rather than
+            // an empty one.
+            if let Some(raw) = name.raw() {
+                graph.add(
+                    arn,
+                    &lexicon.iri(raw_term),
+                    TurtleTerm::typed(raw, XSD_BASE64_BINARY),
+                );
+            }
+        }
     } else {
         graph.add(
             arn,

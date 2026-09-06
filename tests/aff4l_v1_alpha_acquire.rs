@@ -378,3 +378,253 @@ fn a_stream_backed_file_round_trips_under_its_literal_name() {
         "the stream-backed file must round-trip byte for byte"
     );
 }
+
+// ---------------------------------------------------------------------------
+// AFF4-L v1.0-ALPHA §5: filename and path normalization.
+// ---------------------------------------------------------------------------
+
+/// AFF4-L v1.0-ALPHA §5 rule 1: an ordinary name, including a non-ASCII one, is recorded as it
+/// is with no raw form.
+///
+/// The non-ASCII case is the one a careless reading gets wrong. Rule 2b
+/// AFF4-L v1.0-ALPHA §5 rule 2b escapes bytes 0x80-0xff, which could be misread as covering every accented
+/// name; it does not, because rule 2b applies only once rule 2 has triggered,
+/// and a valid-UTF-8 name without control characters never triggers it.
+#[test]
+fn v1_alpha_leaves_a_clean_name_alone() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("evidence");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+    std::fs::write(root.join("café.txt"), b"accented\n").expect("a file");
+    std::fs::write(root.join("100%.txt"), b"percent\n").expect("a file");
+
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+    let body = turtle(&container);
+
+    assert!(body.contains("\"café.txt\""), "recorded as read:\n{body}");
+    assert!(
+        body.contains("\"100%.txt\""),
+        "a literal percent is not an escape:\n{body}"
+    );
+    assert!(
+        !body.contains("fileNameRaw"),
+        "§5 rule 1 writes no raw form:\n{body}"
+    );
+}
+
+/// AFF4-L v1.0-ALPHA §5 rule 2: a control character produces both properties, and the raw form
+/// reconstructs the name exactly.
+#[test]
+fn v1_alpha_records_a_control_character_name_twice() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("evidence");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+    std::fs::write(root.join("ctrl\ttab.txt"), b"tabbed\n").expect("a file");
+
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+    let body = turtle(&container);
+
+    assert!(
+        body.contains("\"ctrl%09tab.txt\""),
+        "the display form escapes the tab:\n{body}"
+    );
+    assert!(
+        body.contains("fileNameRaw"),
+        "and a raw form is written:\n{body}"
+    );
+    assert!(
+        body.contains("xsd:base64Binary"),
+        "typed as base64:\n{body}"
+    );
+}
+
+/// The whole of AFF4-L v1.0-ALPHA §5, end to end: a name needing encoding survives acquisition
+/// and export with its bytes intact.
+///
+/// The tab is replaced on the way out because a control character is illegal
+/// in a portable filename, and that substitution is reported. What matters
+/// here is that the *recorded* name is the real one, decoded from the raw
+/// form, rather than the escaped display string.
+#[test]
+fn a_control_character_name_round_trips_through_export() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("evidence");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+    std::fs::write(root.join("ctrl\ttab.txt"), b"tabbed\n").expect("a file");
+    std::fs::write(root.join("plain.txt"), b"plain\n").expect("a file");
+
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+
+    let exported = tempfile::tempdir().expect("a temp dir");
+    let target = exported.path().join("out");
+    let assert = aff4tools()
+        .args(["export"])
+        .arg(&container)
+        .arg("--logical")
+        .arg(&target)
+        .assert()
+        .success();
+    let report = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    // The alteration names the real tab, which is only possible if the raw
+    // form was decoded rather than the display form used.
+    assert!(
+        report.contains("ctrl\\ttab.txt"),
+        "the report shows the recorded name:\n{report}"
+    );
+
+    let plain = find_ending_with(&target, "evidence/plain.txt").expect("the clean file");
+    assert_eq!(std::fs::read_to_string(plain).expect("reads"), "plain\n");
+
+    let tabbed = find_ending_with(&target, "ctrl_tab.txt").expect("the encoded file");
+    assert_eq!(
+        std::fs::read_to_string(tabbed).expect("reads"),
+        "tabbed\n",
+        "content survives even where the name had to be adjusted"
+    );
+}
+
+/// A container this writer produced satisfies its own AFF4-L v1.0-ALPHA §5 checkers.
+#[test]
+fn v1_alpha_name_output_has_no_deviations() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("evidence");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+    std::fs::write(root.join("ctrl\ttab.txt"), b"tabbed\n").expect("a file");
+    std::fs::write(root.join("café.txt"), b"accented\n").expect("a file");
+
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+
+    let assert = aff4tools()
+        .args(["conformance", "--format", "json"])
+        .arg(&container)
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("conformance JSON");
+    let deviations = parsed["containers"][0]["deviations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(deviations.is_empty(), "expected none, got {deviations:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// AFF4-L v1.0-ALPHA §7: the .aff4l extension.
+// ---------------------------------------------------------------------------
+
+/// Acquire into `out_dir` under `name`, returning what the run printed and
+/// the paths that exist afterwards.
+fn acquire_to(
+    name: &str,
+    extra: &[&str],
+) -> (tempfile::TempDir, tempfile::TempDir, String, Vec<String>) {
+    let (src, root) = source_tree();
+    let out = tempfile::tempdir().expect("a temp dir");
+    let mut command = aff4tools();
+    command
+        .args(["acquire", "--logical"])
+        .arg(&root)
+        .arg("--output")
+        .arg(out.path().join(name));
+    for arg in extra {
+        command.arg(arg);
+    }
+    let assert = command.assert().success();
+    let report = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    let mut found: Vec<String> = std::fs::read_dir(out.path())
+        .expect("the output dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    found.sort();
+    // The source tree is returned rather than dropped here: a `TempDir` deletes
+    // its contents when it falls, and the caller may still be inspecting what
+    // was acquired from it.
+    (src, out, report, found)
+}
+
+/// A path already carrying the extension is used unchanged.
+#[test]
+fn a_v1_alpha_output_named_aff4l_is_left_alone() {
+    let (_src, _out, report, found) = acquire_to("evidence.aff4l", &["--aff4l-v1.0"]);
+    assert!(
+        found.contains(&"evidence.aff4l".to_owned()),
+        "written where asked: {found:?}"
+    );
+    assert!(
+        !report.contains("adding the .aff4l extension"),
+        "and nothing was adjusted:\n{report}"
+    );
+}
+
+/// A path without the extension gains it, appended rather than substituted.
+///
+/// Appending is total: replacing an extension would mean guessing which part
+/// of a name was meant as one, and `case.2026.11.03` has no answer.
+#[test]
+fn a_v1_alpha_output_gains_the_extension() {
+    let (_src, _out, report, found) = acquire_to("evidence.aff4", &["--aff4l-v1.0"]);
+    assert!(
+        found.contains(&"evidence.aff4.aff4l".to_owned()),
+        "appended, not substituted: {found:?}"
+    );
+    assert!(
+        report.contains("adding the .aff4l extension"),
+        "and the adjustment is reported:\n{report}"
+    );
+}
+
+/// A path with no extension at all gains it too.
+#[test]
+fn a_v1_alpha_output_with_no_extension_gains_one() {
+    let (_src, _out, _report, found) = acquire_to("evidence", &["--aff4l-v1.0"]);
+    assert!(found.contains(&"evidence.aff4l".to_owned()), "{found:?}");
+}
+
+/// The legacy profile is left alone entirely.
+///
+/// AFF4-L v1.0-ALPHA §7 makes the extension a hint for the format it describes. Enforcing a
+/// *negative* convention on the other format would invent a rule the standard
+/// does not state.
+#[test]
+fn the_legacy_profile_is_not_adjusted() {
+    let (_src, _out, report, found) = acquire_to("evidence.aff4l", &["--aff4l-legacy"]);
+    assert!(found.contains(&"evidence.aff4l".to_owned()), "{found:?}");
+    assert!(
+        !report.contains("adding the .aff4l extension"),
+        "no adjustment and no complaint:\n{report}"
+    );
+}
+
+/// AFF4-L v1.0-ALPHA §7 is a hint, so a reader never dispatches on it.
+///
+/// Both mismatches must read correctly: generation comes from `version.txt`
+/// and nothing else.
+#[test]
+fn the_extension_never_decides_how_a_container_is_read() {
+    let (_src, root) = source_tree();
+    let out = tempfile::tempdir().expect("a temp dir");
+
+    // A legacy (version 1.1) container carrying the v2.1 extension.
+    let mislabelled = out.path().join("legacy.aff4l");
+    aff4tools()
+        .args(["acquire", "--logical"])
+        .arg(&root)
+        .arg("--output")
+        .arg(&mislabelled)
+        .arg("--aff4l-legacy")
+        .assert()
+        .success();
+
+    let assert = aff4tools()
+        .args(["info"])
+        .arg(&mislabelled)
+        .assert()
+        .success();
+    let out_text = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        out_text.contains("AFF4 Version: 1.1"),
+        "the version line decides, not the extension:\n{out_text}"
+    );
+}

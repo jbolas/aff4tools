@@ -831,8 +831,112 @@ fn run_export_image(path: &std::path::Path, output: &std::path::Path) -> ExitCod
 /// lands at `<target>/Users/...` rather than at the filesystem root. See
 /// `aff4tools::export::rebase`, which is where that property is enforced and
 /// tested.
+/// The path a v2.1 logical acquisition writes to, when it differs from what
+/// was asked for.
+///
+/// AFF4-L v1.0-ALPHA §7 offers `.aff4l` to signal the format. It is a hint,
+/// which is why no *reader* consults it — generation comes from `version.txt`
+/// and nothing else. A writer may still take the permission, and this one
+/// does, so a container aff4tools produces makes the hint true.
+///
+/// The extension is **appended**, not substituted: `evidence.aff4` becomes
+/// `evidence.aff4.aff4l`. Replacing one would mean guessing which part of a
+/// name was meant as an extension, and a name like `case.2026.11.03` has no
+/// defensible answer. Appending is total and reversible by inspection.
+///
+/// [`None`] when the path already ends in `.aff4l`, or when the profile is not
+/// v2.1 — a legacy container is conventionally a `.aff4`, and enforcing a
+/// *negative* convention would invent a rule AFF4-L v1.0-ALPHA §7 does not state.
+fn aff4l_output_path(
+    output: &std::path::Path,
+    profile: aff4tools::write::logical::LogicalProfile,
+) -> Option<PathBuf> {
+    if !profile.is_v1_alpha() {
+        return None;
+    }
+    if output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("aff4l"))
+    {
+        return None;
+    }
+    let mut name = output.as_os_str().to_owned();
+    name.push(".aff4l");
+    Some(PathBuf::from(name))
+}
+
+/// Give a destination a differentiator when an earlier file already claimed it.
+///
+/// AFF4-L v1.0-ALPHA §5 states outright that an encoded name need not be
+/// deconflicted against others in its folder, so two files may arrive here
+/// wanting one path. Sanitizing can produce the same result from two distinct
+/// names, and a case-insensitive target can collapse a third pair.
+///
+/// Both files are evidence. Skipping one loses it and overwriting loses it
+/// silently, so the second is written as `name (2).ext`, the convention every
+/// desktop platform already uses for this. The rename joins the alteration
+/// list, so nobody mistakes the renamed file for its original.
+///
+/// The suffix a file receives depends on which is written first, and iteration
+/// order is the summary's, which is stable — so exporting one container twice
+/// produces the same tree.
+fn deconflict(
+    destination: PathBuf,
+    alteration: Option<aff4tools::export::PathAlteration>,
+    recorded: &str,
+    taken: &mut std::collections::HashSet<PathBuf>,
+) -> (PathBuf, Option<aff4tools::export::PathAlteration>) {
+    if taken.insert(destination.clone()) {
+        return (destination, alteration);
+    }
+
+    let stem = destination
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let extension = destination
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()));
+    let parent = destination.parent().map(std::path::Path::to_path_buf);
+
+    // Bounded rather than unbounded: a container claiming the same name tens
+    // of thousands of times is malformed, and the alternative is a loop with
+    // no exit. The cap is far above any plausible legitimate collision.
+    for n in 2..10_000u32 {
+        let candidate_name = format!("{stem} ({n}){}", extension.as_deref().unwrap_or(""));
+        let candidate = parent.as_ref().map_or_else(
+            || PathBuf::from(&candidate_name),
+            |p| p.join(&candidate_name),
+        );
+        if taken.insert(candidate.clone()) {
+            let reason =
+                format!("another file already claimed this name; wrote {candidate_name:?}");
+            let written = candidate
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            return (
+                candidate,
+                Some(match alteration {
+                    // Both a character substitution and a collision: report
+                    // them together rather than losing the first.
+                    Some(mut existing) => {
+                        existing.reason = format!("{}; {reason}", existing.reason);
+                        existing.written = written;
+                        existing
+                    }
+                    None => aff4tools::export::PathAlteration {
+                        recorded: recorded.to_owned(),
+                        written,
+                        reason,
+                    },
+                }),
+            );
+        }
+    }
+    (destination, alteration)
+}
+
 fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitCode {
-    use aff4tools::export::{LogicalTimes, PathAlteration, rebase};
+    use aff4tools::export::{LogicalTimes, PathAlteration, rebase, rebase_bytes};
 
     let mut container = match aff4tools::Container::open(path) {
         Ok(c) => c,
@@ -892,6 +996,9 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
     // total is what the closing line and the exit code are decided from.
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut alterations: Vec<PathAlteration> = Vec::new();
+    // Destinations already claimed this run, so a collision gets a suffix
+    // rather than silently overwriting or being dropped.
+    let mut taken: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut unset_times: Vec<(String, LogicalTimes)> = Vec::new();
     // The metadata graph, parsed at most once for the whole export.
     let mut graph: Option<aff4tools::rdf::Graph> = None;
@@ -906,7 +1013,17 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
         // the path, but `aff4:originalFileName` holds it as read rather than
         // as escaped, so preferring it is right there too. The property's
         // lexical form is already the recorded path, so it is not decoded.
-        let recorded = if let Some(path) = object.recorded_path() {
+        // AFF4-L v1.0-ALPHA §5 records a name that needed encoding twice: a
+        // printable display form and the raw bytes, base64-encoded. The bytes
+        // are what reproduce the name — the display form is lossy by
+        // construction, since a literal `%41` and an encoded `A` are the same
+        // three characters — so they are preferred here. `info` shows the
+        // display form instead, which is what AFF4-L v1.0-ALPHA §5 built it for.
+        let raw_bytes = object.recorded_path_bytes();
+
+        let recorded = if let Some(bytes) = &raw_bytes {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else if let Some(path) = object.recorded_path() {
             path.to_owned()
         } else if mapping == aff4tools::arn::NameMapping::Escaped {
             // The 2019 fallback: everything after the volume's authority is
@@ -931,7 +1048,14 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
             continue;
         };
 
-        let (destination, alteration) = rebase(target, &recorded);
+        let (destination, alteration) = match &raw_bytes {
+            Some(bytes) => rebase_bytes(target, bytes),
+            None => rebase(target, &recorded),
+        };
+        // AFF4-L v1.0-ALPHA §5 permits two encoded names to collide, and sanitizing can map two
+        // distinct names onto one. Both files are evidence, so the second is
+        // written under a differentiator rather than skipped or overwritten.
+        let (destination, alteration) = deconflict(destination, alteration, &recorded, &mut taken);
         if let Some(alteration) = alteration {
             alterations.push(alteration);
         }
@@ -2898,6 +3022,24 @@ fn run_acquire(
                  deduplication pool spanning parts would mean, are not specified."
             );
             return ExitCode::from(EXIT_USAGE);
+        }
+        // AFF4-L v1.0-ALPHA §7 offers `.aff4l` as a hint, and aff4tools takes
+        // it: a v2.1 container is written to a path carrying that extension.
+        //
+        // Applied here, before anything else uses the path. `setup_log`
+        // derives `<output>_log.txt` from it, and both the source registry and
+        // the overwrite guard key on it — so adjusting later would leave the
+        // log beside a file that does not exist and the guard checking a path
+        // nothing is written to.
+        let adjusted = aff4l_output_path(output, settings.logical_profile);
+        let output = adjusted.as_deref().unwrap_or(output);
+        if let Some(adjusted) = &adjusted {
+            let _ = writeln!(
+                out,
+                "Note:        adding the .aff4l extension AFF4-L v1.0-ALPHA §7 \
+names for this format; writing {}",
+                adjusted.display()
+            );
         }
         return run_acquire_logical(&mut out, logical, output, log_path, settings);
     }
