@@ -34,8 +34,28 @@ use crate::write::map_writer::{MapEntry, write_map_as};
 use crate::write::stream_writer::{StreamOptions, write_image_stream_bounded};
 use crate::write::turtle::TurtleTerm;
 
-/// The largest part number a three-digit name can express.
-pub const MAX_PARTS: u32 = 999;
+/// The largest per-part size the command line offers, in gibibytes.
+///
+/// Kept beside [`MAX_PARTS`] because the two together decide the largest
+/// source one multi-part set can hold. The value mirrors the command line's
+/// own enumeration; a suggestion above it names a size the tool would reject.
+const LARGEST_PART_SIZE_GIB: u64 = 32;
+
+/// The most parts one acquisition may be divided into.
+///
+/// A ceiling rather than a naming constraint: AFF4-L v1.0-ALPHA §8's ordinal is
+/// a decimal integer of any width, so nothing about the names limits a set.
+/// What this limits is a misconfigured threshold — [`preflight`] refuses an
+/// acquisition whose worst case would exceed it, which fails in a second
+/// rather than after hours of writing.
+///
+/// 4096 is high enough never to obstruct real work: at the smallest permitted
+/// threshold of 1 GiB it admits a 4 TiB source, and at 32 GiB it admits
+/// 128 TiB.
+///
+/// **Not 999.** That was the largest number three digits could express, which
+/// was a fact about the old `evidence_001.aff4` naming and about nothing else.
+pub const MAX_PARTS: u32 = 4096;
 
 /// How a split set should be written.
 #[derive(Debug, Clone, Copy)]
@@ -78,21 +98,38 @@ pub struct WrittenSet {
 
 /// The path of part `number`, derived from the base output name.
 ///
-/// Three digits, fixed width, so plain lexicographic sort is correct.
+/// `number` counts from 1, so the first part is `part_path(output, 1)`.
+///
+/// AFF4-L v1.0-ALPHA §8 names a set `filename ("." ordinal)?`, where the
+/// **first file carries no ordinal** and the second is `.1`:
+///
+/// | Part | Name |
+/// |---|---|
+/// | 1 | `evidence.aff4` |
+/// | 2 | `evidence.aff4.1` |
+/// | 3 | `evidence.aff4.2` |
+///
+/// So the ordinal counts files *after* the first, and part `n` carries
+/// `n - 1`. The output path is used whole rather than being taken apart, which
+/// is what makes the extension follow from whatever the caller asked for:
+/// `.aff4l` output yields `evidence.aff4l.1` with no special case.
+///
+/// # What this replaced
+///
+/// Until Phase 5.2 this produced `evidence_001.aff4`, fixed to three digits so
+/// a plain lexicographic sort was correct. That scheme was this project's own
+/// invention, described by no specification and used by no container in the
+/// reference corpus. Ordering is now by
+/// [`crate::split_set::natural_cmp`], which compares numeric runs
+/// numerically and so needs no padding.
 #[must_use]
 pub fn part_path(output: &Path, number: u32) -> PathBuf {
-    let stem = output
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("evidence");
-    let ext = output
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("aff4");
-    let name = format!("{stem}_{number:03}.{ext}");
-    output
-        .parent()
-        .map_or_else(|| PathBuf::from(&name), |parent| parent.join(&name))
+    if number <= 1 {
+        return output.to_path_buf();
+    }
+    let mut name = output.as_os_str().to_owned();
+    name.push(format!(".{}", number - 1));
+    PathBuf::from(name)
 }
 
 /// Refuse a source that could need more than [`MAX_PARTS`] parts.
@@ -116,12 +153,28 @@ pub fn preflight(source_size: u64, split_after: u64, locus: &Locus) -> Result<()
     if worst_case > u64::from(MAX_PARTS) {
         let needed = source_size.div_ceil(u64::from(MAX_PARTS));
         let suggestion = (needed.next_power_of_two() / (1 << 30)).max(1);
+        // The suggestion is arithmetic, and the flag takes an enumerated set of
+        // sizes. Past the largest of them no threshold works, and naming one
+        // the tool would itself reject is worse than the refusal it accompanies
+        // -- so that case says what is actually true instead.
+        if suggestion > LARGEST_PART_SIZE_GIB {
+            return Err(Error::malformed(
+                locus.clone(),
+                format!(
+                    "this source could need up to {worst_case} parts at the \
+                     chosen size, and even the largest permitted size \
+                     ({LARGEST_PART_SIZE_GIB}G) would need more than the \
+                     {MAX_PARTS}-part limit. It cannot be acquired as one \
+                     multi-part set."
+                ),
+            ));
+        }
         return Err(Error::malformed(
             locus.clone(),
             format!(
                 "this source could need up to {worst_case} parts at the chosen \
-                 --split-file size, but part numbering is limited to {MAX_PARTS}. \
-                 Use --split-file {suggestion}G or larger."
+                 size, but a set is limited to {MAX_PARTS} parts. \
+                 Use {suggestion}G or larger."
             ),
         ));
     }
@@ -328,7 +381,7 @@ fn next_part_number(number: u32, locus: &Locus) -> Result<u32> {
             locus.clone(),
             format!(
                 "this source needs more than {MAX_PARTS} parts; \
-                 use a larger --split-file size"
+                 use a larger per-part size"
             ),
         ));
     }

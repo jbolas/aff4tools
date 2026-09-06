@@ -1,6 +1,6 @@
 //! Filename and path normalization, per AFF4-L Standard v1.0-ALPHA §5.
 //!
-//! Every bare section number below cites that standard. Where a rule comes
+//! **Every bare section number below cites that standard.** Where a rule comes
 //! from another document the citation names it.
 //!
 //! # What §5 is for

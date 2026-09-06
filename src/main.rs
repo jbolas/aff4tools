@@ -185,7 +185,7 @@ enum Command {
 
         /// Set source to an existing .dd or .aff4 image. <PATH> to single-file image or folder containing split-file image.
         ///
-        /// If given a folder containing a split-file image, files (`ev_001.aff4`, `ev_002.aff4`) are ordered by numeric suffixes in filenames.
+        /// If given a folder containing a split-file image, its parts are ordered by the numbers in their names.
         ///
         /// Given the first segment of a split set (`name.001`), the remaining
         /// segments are discovered automatically.
@@ -215,9 +215,10 @@ enum Command {
 
         /// Write the image across several .aff4 files instead of one.
         ///
-        /// Parts are named from --output: `evidence.aff4` becomes
-        /// `evidence_001.aff4`, `evidence_002.aff4`, and so on. Numbering is
-        /// limited to 999 parts.
+        /// Parts are named from --output per AFF4-L v1.0-ALPHA §8: the first
+        /// keeps the name given, and each later one appends an ordinal, so
+        /// `evidence.aff4` is followed by `evidence.aff4.1`, `evidence.aff4.2`,
+        /// and so on. A set is limited to 4096 parts.
         #[arg(long, value_enum, value_name = "SIZE")]
         split_file: Option<SplitSize>,
 
@@ -381,6 +382,18 @@ impl From<Compression> for aff4tools::Codec {
 /// valid list rather than accepting `3G` and producing an odd set.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum SplitSize {
+    /// 10 MB per part — for testing only, hidden from `--help`.
+    ///
+    /// Every other value here is a size an examiner would choose, and all are
+    /// binary (GiB). This one is **decimal** megabytes, and it exists so a
+    /// multi-part acquisition can be written and read back in a test: at a
+    /// gibibyte the smallest real threshold, nothing proved that a genuine
+    /// multi-part set round-trips, only that the naming arithmetic was right.
+    ///
+    /// Hidden rather than public because it is a testing affordance. A part
+    /// this small carries more bookkeeping than evidence.
+    #[value(name = "10M", hide = true)]
+    TenMegabytes,
     /// 1 GiB per part.
     #[value(name = "1G")]
     One,
@@ -406,6 +419,8 @@ impl SplitSize {
     fn bytes(self) -> u64 {
         let gib = 1u64 << 30;
         match self {
+            // Decimal, as its name says: 10 MB, not 10 MiB.
+            Self::TenMegabytes => 10_000_000,
             Self::One => gib,
             Self::Two => 2 * gib,
             Self::Four => 4 * gib,
@@ -3326,11 +3341,14 @@ type AcquireReporter<'a> = &'a mut dyn FnMut(&mut dyn Write, &[PathBuf]) -> u8;
 /// Write an acquisition across several `.aff4` parts, then let the caller
 /// append its own reporting.
 ///
-/// The single-file path writes `--output` itself; this one never does. `output`
-/// is a base name from which part names are derived — `evidence.aff4` yields
-/// `evidence_001.aff4`, `evidence_002.aff4`, and so on — so an existing
-/// `evidence.aff4` is not a collision, while an existing `evidence_001.aff4`
-/// is, and `WriteSink::create` refuses it naming the part rather than the base.
+/// `output` names the **first part**, and later parts append an ordinal to it
+/// per AFF4-L v1.0-ALPHA §8: `evidence.aff4` yields `evidence.aff4.1`,
+/// `evidence.aff4.2`, and so on.
+///
+/// **An existing `evidence.aff4` is now a collision**, where under the earlier
+/// `evidence_001.aff4` naming it was not — the base name was never written
+/// then, and is the first part now. `WriteSink::create` refuses it, naming the
+/// part it could not create.
 ///
 /// `after` runs once the set is written and its summary printed. It returns an
 /// exit-code floor, which is how a device acquisition reports unreadable
@@ -3615,12 +3633,15 @@ fn run_acquire_split(
         .last()
         .and_then(|p| p.path.file_name())
         .and_then(|n| n.to_str())
-        .and_then(aff4tools::split_set::part_number);
+        .map(std::borrow::ToOwned::to_owned);
+    // The count and the last name, rather than a numbered range. Under
+    // AFF4-L v1.0-ALPHA §8 the first part carries no ordinal, so "numbered 001
+    // through 003" described a four-part set with three numbers in it.
     match last {
         Some(last) => {
             let _ = writeln!(
                 out,
-                "Wrote {} split file(s), numbered 001 through {last:03}.",
+                "Wrote {} split file(s), through {last}.",
                 set.parts.len()
             );
         }

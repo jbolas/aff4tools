@@ -42,21 +42,58 @@ fn options(split_after: u64) -> SplitOptions {
     }
 }
 
+/// AFF4-L v1.0-ALPHA §8: the first part keeps the name given, and each later
+/// one appends an ordinal counting from 1.
 #[test]
-fn part_paths_are_zero_padded_to_three_digits() {
+fn part_paths_follow_the_section_8_scheme() {
     let base = Path::new("/tmp/evidence.aff4");
-    assert_eq!(part_path(base, 1), Path::new("/tmp/evidence_001.aff4"));
-    assert_eq!(part_path(base, 42), Path::new("/tmp/evidence_042.aff4"));
-    assert_eq!(part_path(base, 999), Path::new("/tmp/evidence_999.aff4"));
+    assert_eq!(part_path(base, 1), Path::new("/tmp/evidence.aff4"));
+    assert_eq!(part_path(base, 2), Path::new("/tmp/evidence.aff4.1"));
+    assert_eq!(part_path(base, 3), Path::new("/tmp/evidence.aff4.2"));
+    assert_eq!(part_path(base, 43), Path::new("/tmp/evidence.aff4.42"));
+}
+
+/// The extension follows from the output path rather than being special-cased,
+/// so a `.aff4l` set needs no separate rule — AFF4-L v1.0-ALPHA §8 names both extensions.
+#[test]
+fn part_paths_carry_whatever_extension_was_asked_for() {
+    let base = Path::new("/tmp/evidence.aff4l");
+    assert_eq!(part_path(base, 1), Path::new("/tmp/evidence.aff4l"));
+    assert_eq!(part_path(base, 2), Path::new("/tmp/evidence.aff4l.1"));
+}
+
+/// No padding, so no leading zeros — ordering is numeric, not lexicographic.
+#[test]
+fn part_ordinals_are_not_zero_padded() {
+    let base = Path::new("/tmp/e.aff4");
+    assert_eq!(part_path(base, 10), Path::new("/tmp/e.aff4.9"));
+    assert_eq!(part_path(base, 11), Path::new("/tmp/e.aff4.10"));
 }
 
 #[test]
-fn a_source_needing_more_than_999_parts_is_refused_up_front() {
-    // 1 TB at 1 GiB is 1024 parts.
-    let err = preflight(1_099_511_627_776, 1 << 30, &Locus::new("x")).unwrap_err();
+fn a_source_needing_too_many_parts_is_refused_up_front() {
+    // 8 TiB at 1 GiB is 8192 parts, past the 4096 limit.
+    let err = preflight(8 * (1 << 40), 1 << 30, &Locus::new("x")).unwrap_err();
     let text = err.to_string();
-    assert!(text.contains("999"), "{text}");
-    assert!(text.contains("--split-file"), "must name the fix: {text}");
+    assert!(text.contains("4096"), "{text}");
+    assert!(text.contains("2G"), "must name a usable size: {text}");
+}
+
+/// Past the largest size the command line accepts, no threshold works, and the
+/// message says so rather than naming a size the tool would itself reject.
+#[test]
+fn a_source_too_large_for_any_size_says_so() {
+    // 256 TiB needs more than 4096 parts even at 32G, the largest offered.
+    let err = preflight(256 * (1 << 40), 32 * (1 << 30), &Locus::new("x")).unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("cannot be acquired as one multi-part set"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("64G") && !text.contains("128G"),
+        "must not suggest a size the tool rejects: {text}"
+    );
 }
 
 #[test]
@@ -86,7 +123,10 @@ fn a_split_set_is_written_as_several_parts() {
 
     assert!(set.parts.len() > 1, "expected several parts");
     assert_eq!(set.total_size, data.len() as u64);
-    assert!(!output.exists(), "the base name itself must not be written");
+    // AFF4-L v1.0-ALPHA §8 gives the first part the name asked for, so the base
+    // name *is* written -- the opposite of the earlier `_001` scheme, where it
+    // never was.
+    assert!(output.is_file(), "the first part carries the base name");
     for (i, part) in set.parts.iter().enumerate() {
         let expected = part_path(&output, u32::try_from(i + 1).unwrap());
         assert_eq!(part.path, expected);
@@ -697,9 +737,9 @@ fn unreadable_region_straddling_a_part_boundary_matches_whole() {
 fn split_refuses_an_over_long_set_before_writing() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("evidence.aff4");
-    // 1000 parts at this threshold: one more than the three-digit limit allows.
+    // One part more than the 4096-part ceiling allows.
     let threshold = 1024u64;
-    let source_size = threshold * 1000;
+    let source_size = threshold * 4097;
 
     let result = preflight(source_size, threshold, &Locus::new(&output));
     assert!(result.is_err(), "an over-long set must be refused");
@@ -1312,5 +1352,90 @@ fn the_estimate_covers_every_part_of_a_split_set() {
         estimate.bytes_to_read,
         "the meter would read {}% at the end",
         delivered * 100 / estimate.bytes_to_read.max(1)
+    );
+}
+
+/// A real multi-part acquisition, written and read back whole.
+///
+/// Every other test here checks a piece: the naming arithmetic, the preflight
+/// refusal, the accounting. This one runs the CLI end to end at a threshold
+/// small enough to actually divide a source, which nothing could do while the
+/// smallest offered size was a gibibyte.
+///
+/// What it proves together: AFF4-L v1.0-ALPHA §8 names are written, a folder
+/// of them is discovered and ordered, every digest recomputes, and the
+/// exported image is the source byte for byte.
+#[test]
+fn a_multi_part_acquisition_round_trips_through_the_cli() {
+    use assert_cmd::Command;
+
+    fn aff4tools() -> Command {
+        Command::cargo_bin("aff4tools").expect("the binary must build")
+    }
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let source = dir.path().join("src.dd");
+
+    // Genuinely incompressible, so parts land near the threshold rather than
+    // the whole image fitting in one. A simple arithmetic pattern will not do:
+    // the first one tried compressed to 2% and produced a single part.
+    //
+    // An xorshift keeps the test deterministic while defeating LZ4.
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let data: Vec<u8> = (0..40_000_000u32)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect();
+    std::fs::write(&source, &data).expect("the source");
+
+    let output = dir.path().join("ev.aff4");
+    aff4tools()
+        .args(["acquire", "--image"])
+        .arg(&source)
+        .arg("--output")
+        .arg(&output)
+        // A bevy smaller than the threshold, or the first bevy overshoots it
+        // and the whole image lands in one part.
+        .args(["--split-file", "10M", "--chunks-per-bevy", "64"])
+        .assert()
+        .success();
+
+    // AFF4-L v1.0-ALPHA §8: the first part keeps the base name, later ones append an ordinal.
+    assert!(output.is_file(), "the first part is the name given");
+    assert!(
+        dir.path().join("ev.aff4.1").is_file(),
+        "the second part appends .1"
+    );
+    assert!(
+        !dir.path().join("ev_001.aff4").exists(),
+        "the retired padded form is not written"
+    );
+
+    // The whole set verifies as one image, discovered from the folder.
+    let assert = aff4tools()
+        .args(["verify", "--split-file"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let report = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(report.contains("Found 4 split files"), "{report}");
+
+    // And the image reads back as the source, byte for byte.
+    let exported = dir.path().join("out.dd");
+    aff4tools()
+        .args(["export"])
+        .arg(&output)
+        .arg("--output")
+        .arg(&exported)
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read(&exported).expect("the export"),
+        data,
+        "a multi-part set must reassemble to the source exactly"
     );
 }
