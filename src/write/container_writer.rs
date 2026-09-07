@@ -153,6 +153,13 @@ pub struct ContainerWriter {
     /// ARN maps to a member name. Retaining it is what lets the writer name
     /// members by the same rule a reader of the finished container will apply.
     profile: VersionProfile,
+    /// Which digests the AFF4-L v1.0-ALPHA §10.1 companion segment records.
+    ///
+    /// Defaults to [`crate::hash_selection::DEFAULT`]; an acquisition that
+    /// honors `--hash` overrides it via
+    /// [`ContainerWriter::set_hash_algorithms`] so the metadata hash and the
+    /// file digests are computed with the same algorithms.
+    algorithms: Vec<crate::model::HashAlgorithm>,
 }
 
 impl ContainerWriter {
@@ -168,6 +175,18 @@ impl ContainerWriter {
     /// exists; [`Error::Io`] if creation fails.
     pub fn create(path: &Path, registry: &SourceRegistry) -> Result<Self> {
         Self::create_with_profile(path, registry, VersionProfile::Physical)
+    }
+
+    /// Choose which digests the AFF4-L v1.0-ALPHA §10.1 companion segment records.
+    ///
+    /// An acquisition calls this with whatever `--hash` selected, so the
+    /// metadata integrity hash is computed with the same algorithms as the file
+    /// digests. Without it the segment falls back to
+    /// [`crate::hash_selection::DEFAULT`].
+    pub fn set_hash_algorithms(&mut self, algorithms: &[crate::model::HashAlgorithm]) {
+        if !algorithms.is_empty() {
+            self.algorithms = algorithms.to_vec();
+        }
     }
 
     /// Create a new volume that will hold a logical (AFF4-L) image.
@@ -223,6 +242,7 @@ impl ContainerWriter {
             volume_arn,
             graph,
             profile,
+            algorithms: crate::hash_selection::DEFAULT.to_vec(),
         })
     }
 
@@ -305,6 +325,18 @@ impl ContainerWriter {
             &mut self.sink,
             crate::container::METADATA_SEGMENT,
             turtle.as_bytes(),
+        )?;
+
+        // AFF4-L v1.0-ALPHA §10.1: the metadata integrity hash, computed from the
+        // exact bytes that just reached the container. It goes after
+        // `information.turtle` because it digests it, and the metadata is itself
+        // written last because it describes every member before it.
+        let hashes =
+            crate::write::turtle::metadata_hash_segment(&arn, turtle.as_bytes(), &self.algorithms);
+        self.zip.add_deflated_member(
+            &mut self.sink,
+            crate::container::METADATA_HASH_SEGMENT,
+            hashes.as_bytes(),
         )?;
 
         // No NUL padding: one corpus writer pads its comment and this crate

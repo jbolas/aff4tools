@@ -77,6 +77,12 @@ impl Interner {
 /// The segment holding RDF metadata, in the container root.
 pub const METADATA_SEGMENT: &str = "information.turtle";
 
+/// The companion segment holding the metadata's digests.
+///
+/// AFF4-L v1.0-ALPHA §10.1 fixes this name: [`METADATA_SEGMENT`] with
+/// `.hashes` appended.
+pub const METADATA_HASH_SEGMENT: &str = "information.turtle.hashes";
+
 /// An open AFF4 container.
 #[derive(Debug)]
 pub struct Container {
@@ -450,6 +456,26 @@ impl Container {
         self.volumes.primary_mut().read_segment(METADATA_SEGMENT)
     }
 
+    /// The raw `information.turtle.hashes` bytes, if the container carries them.
+    ///
+    /// [`None`] when the segment is absent, which is the ordinary case for a
+    /// container written before AFF4-L v1.0-ALPHA §10.1 existed. Its absence is
+    /// a conformance question for a v2.1 container, not an integrity finding,
+    /// so this reports rather than errors.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the segment is present but cannot be read.
+    pub fn metadata_hash_bytes(&mut self) -> Result<Option<Vec<u8>>> {
+        if !self.volumes.primary().has_segment(METADATA_HASH_SEGMENT) {
+            return Ok(None);
+        }
+        self.volumes
+            .primary_mut()
+            .read_segment(METADATA_HASH_SEGMENT)
+            .map(Some)
+    }
+
     /// Parse the container's metadata graph.
     ///
     /// # Errors
@@ -701,6 +727,8 @@ impl Container {
             &mut deviations,
         );
 
+        self.report_metadata_hash(&locus, &mut deviations);
+
         Ok(ConformanceScan {
             path: self.volumes.primary().path().to_path_buf(),
             generation: self.generation,
@@ -708,6 +736,81 @@ impl Container {
             deviations,
             coverage: crate::rules::Coverage::for_generation(self.generation),
         })
+    }
+
+    /// Report AFF4-L v1.0-ALPHA §10.1 departures in the metadata integrity hash.
+    ///
+    /// Only for v2.1 containers: the clause is that standard's, and an earlier
+    /// generation carrying no companion segment conforms to its own document.
+    /// aff4tools writes the segment for both profiles, but that is a choice its
+    /// output makes, not a requirement it may impose on other writers.
+    fn report_metadata_hash(&mut self, locus: &Locus, deviations: &mut Vec<Deviation>) {
+        if self.generation != Generation::Aff4L10 {
+            return;
+        }
+
+        let bytes = match self.metadata_hash_bytes() {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                deviations.push(Deviation::new(
+                    locus.clone(),
+                    DeviationKind::MissingMetadataHash,
+                    format!(
+                        "this container stores no {METADATA_HASH_SEGMENT}, so a change to \
+its metadata layer would leave no trace"
+                    ),
+                ));
+                return;
+            }
+            // Unreadable is an I/O condition, not a conformance finding; the
+            // reading paths report it in their own terms.
+            Err(_) => return,
+        };
+
+        let hash_locus = locus.clone().segment(METADATA_HASH_SEGMENT);
+        // A segment that will not parse is malformed rather than
+        // non-conformant, and the reading paths report it in those terms.
+        let Ok(graph) = crate::rdf::Graph::parse(&bytes, &hash_locus) else {
+            return;
+        };
+
+        // The clause names a strength floor, so a segment carrying only weaker
+        // digests satisfies its letter but not its purpose.
+        let mut algorithms = Vec::new();
+        for subject in graph.subjects() {
+            for statement in graph.statements_for(subject) {
+                let local = statement
+                    .predicate
+                    .rsplit_once(['#', '/'])
+                    .map_or(&*statement.predicate, |(_, name)| name);
+                if local != "hash" {
+                    continue;
+                }
+                if let crate::rdf::Value::Literal {
+                    datatype: Some(datatype),
+                    ..
+                } = &statement.object
+                {
+                    algorithms.push(HashAlgorithm::from_datatype(datatype));
+                }
+            }
+        }
+        if !algorithms.is_empty()
+            && !algorithms
+                .iter()
+                .any(crate::hash_selection::satisfies_integrity_clause)
+        {
+            let named: Vec<&str> = algorithms.iter().map(HashAlgorithm::name).collect();
+            deviations.push(Deviation::new(
+                locus.clone(),
+                DeviationKind::WeakMetadataHash,
+                format!(
+                    "the metadata integrity hash records only {}, but AFF4-L \
+v1.0-ALPHA §10.1 requires SHA-256 or stronger",
+                    named.join(" and ")
+                ),
+            ));
+        }
     }
 
     /// Build a complete summary of the container.

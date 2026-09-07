@@ -29,12 +29,24 @@ use aff4tools::write::logical::{LogicalOptions, acquire_logical};
 fn aff4tools() -> assert_cmd::Command {
     assert_cmd::Command::cargo_bin("aff4tools").expect("the binary must build")
 }
-use aff4tools::{Container, Locus};
+use aff4tools::{Container, HashAlgorithm, Locus};
 
 fn write_file(path: &Path, body: &[u8]) {
     #[allow(clippy::disallowed_methods)]
     let mut f = std::fs::File::create(path).unwrap();
     f.write_all(body).unwrap();
+}
+
+/// The AFF4-L 2019 §3.7 digest pair, pinned for this file's tests.
+///
+/// Every test here asserts on the paper's format, and §3.7 names MD5 and SHA-1
+/// specifically. Following `--hash`'s default instead would make these tests
+/// fail the next time the default moves, without anything having gone wrong.
+fn paper_options() -> LogicalOptions {
+    LogicalOptions {
+        algorithms: vec![HashAlgorithm::Md5, HashAlgorithm::Sha1],
+        ..LogicalOptions::default()
+    }
 }
 
 /// Read a container's `information.turtle`.
@@ -67,7 +79,7 @@ fn acquire_tree(dir: &Path) -> (std::path::PathBuf, String) {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -254,7 +266,7 @@ fn acquire_with(dir: &Path, tree: &Path, options: LogicalOptions) -> std::path::
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree.to_path_buf()),
-        options,
+        &options,
         &locus,
         &mut noop,
     )
@@ -498,7 +510,7 @@ fn symlinks_are_skipped_and_reported() {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -561,7 +573,7 @@ fn a_skipped_path_is_named_by_no_triple() {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -622,14 +634,8 @@ fn several_roots_each_get_a_filesystem_root_edge() {
     let mut writer = ContainerWriter::create(&out, &registry).unwrap();
     let roots = vec![documents.clone(), exports.clone()];
     let mut noop = |_: &aff4tools::write::logical::LogicalAcquisition| {};
-    let acquired = acquire_logical(
-        &mut writer,
-        &roots,
-        LogicalOptions::default(),
-        &locus,
-        &mut noop,
-    )
-    .unwrap();
+    let acquired =
+        acquire_logical(&mut writer, &roots, &paper_options(), &locus, &mut noop).unwrap();
     writer.finish().unwrap();
 
     assert_eq!(acquired.files, 2, "one file from each root");
@@ -703,14 +709,8 @@ fn same_named_roots_in_different_places_do_not_collide() {
     let mut writer = ContainerWriter::create(&out, &registry).unwrap();
     let roots = vec![a.clone(), b.clone()];
     let mut noop = |_: &aff4tools::write::logical::LogicalAcquisition| {};
-    let acquired = acquire_logical(
-        &mut writer,
-        &roots,
-        LogicalOptions::default(),
-        &locus,
-        &mut noop,
-    )
-    .unwrap();
+    let acquired =
+        acquire_logical(&mut writer, &roots, &paper_options(), &locus, &mut noop).unwrap();
     writer.finish().unwrap();
 
     assert_eq!(
@@ -783,7 +783,7 @@ fn stored_is_recorded_once_per_subject() {
     acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -853,7 +853,7 @@ fn every_logical_file_records_linear_digests_whatever_its_storage() {
     acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -928,7 +928,7 @@ fn child_edges_survive_the_discovery_split() {
     acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -970,7 +970,7 @@ fn a_skipped_path_gets_no_child_edge() {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -1016,7 +1016,7 @@ fn a_small_file_records_the_length_actually_read() {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &paper_options(),
         &locus,
         &mut noop,
     )
@@ -1128,19 +1128,28 @@ fn a_logical_verify_collapses_matches_into_counts() {
         .arg(&src)
         .arg("--output")
         .arg(&container)
+        // Pinned: this test asserts on the report's column shape for a known
+        // algorithm set, not on whatever the default happens to be. SHA-256 is
+        // present because `--hash` refuses a selection with nothing at that
+        // strength or above.
+        .args(["--hash", "md5,sha1,sha256"])
         .assert()
         .success();
 
     let assert = aff4tools().arg("verify").arg(&container).assert().success();
     let text = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
 
-    // Three files, two algorithms each, counted rather than listed.
+    // Three files times three algorithms, plus the three digests of the
+    // AFF4-L v1.0-ALPHA §10.1 metadata integrity hash, counted rather than
+    // listed.
     assert!(
-        text.contains("Matched (6)"),
+        text.contains("Matched (12)"),
         "the matches must be totalled:\n{text}"
     );
     assert!(
-        text.contains("3  file digests (MD5)") && text.contains("3  file digests (SHA1)"),
+        text.contains("3  file digests (MD5)")
+            && text.contains("3  file digests (SHA1)")
+            && text.contains("3  file digests (SHA256)"),
         "each algorithm's matches must be counted:\n{text}"
     );
 
@@ -1177,6 +1186,11 @@ fn verbose_restores_the_full_listing() {
         .arg(&src)
         .arg("--output")
         .arg(&container)
+        // Pinned: this test asserts on the report's column shape for a known
+        // algorithm set, not on whatever the default happens to be. SHA-256 is
+        // present because `--hash` refuses a selection with nothing at that
+        // strength or above.
+        .args(["--hash", "md5,sha1,sha256"])
         .assert()
         .success();
 
@@ -1217,6 +1231,11 @@ fn the_digest_table_is_one_row_per_file() {
         .arg(&src)
         .arg("--output")
         .arg(&container)
+        // Pinned: this test asserts on the report's column shape for a known
+        // algorithm set, not on whatever the default happens to be. SHA-256 is
+        // present because `--hash` refuses a selection with nothing at that
+        // strength or above.
+        .args(["--hash", "md5,sha1,sha256"])
         .assert()
         .success();
 
@@ -1235,9 +1254,12 @@ fn the_digest_table_is_one_row_per_file() {
         lines[0].starts_with("# volume\taff4://"),
         "the volume ARN must be stated once, not on every row:\n{tsv}"
     );
+    // Column order follows the order the digests were recorded, which is not
+    // the order they were named on the command line.
     assert_eq!(
         lines[1],
-        "path\tsize\toutcome\tMD5_recorded\tMD5_computed\tMD5_outcome\t\
+        "path\tsize\toutcome\tSHA256_recorded\tSHA256_computed\tSHA256_outcome\t\
+         MD5_recorded\tMD5_computed\tMD5_outcome\t\
          SHA1_recorded\tSHA1_computed\tSHA1_outcome",
         "columns must be derived from the algorithms in use"
     );
@@ -1245,10 +1267,11 @@ fn the_digest_table_is_one_row_per_file() {
     // Two files, and no row for either folder.
     let rows = &lines[2..];
     assert_eq!(rows.len(), 2, "one row per file, folders excluded:\n{tsv}");
+    let columns = lines[1].split('\t').count();
     for row in rows {
         assert_eq!(
             row.split('\t').count(),
-            9,
+            columns,
             "every row must have the full column count:\n{row}"
         );
         assert!(

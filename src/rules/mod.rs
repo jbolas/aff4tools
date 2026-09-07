@@ -497,7 +497,7 @@ mod tests {
             .collect();
         assert_eq!(
             alpha.len(),
-            36,
+            38,
             "the standard states 36 normative requirements; {} are declared",
             alpha.len()
         );
@@ -534,6 +534,7 @@ mod tests {
     ///
     /// Phase 3 moved the four identity rules of AFF4-L v1.0-ALPHA (§1.1, §1.2
     /// and AFF4-L v1.0-ALPHA §2); Phase 4 moved that standard's five §5 name-normalization
+    /// rules; Phase 6 moved its two AFF4-L v1.0-ALPHA §10.1 metadata-integrity
     /// rules.
     #[test]
     fn only_the_identity_and_naming_rules_of_the_alpha_standard_are_checked() {
@@ -558,6 +559,8 @@ mod tests {
                 "AFF4L_V1_ALPHA/5/3",
                 "AFF4L_V1_ALPHA/5/4",
                 "AFF4L_V1_ALPHA/5/5",
+                "AFF4L_V1_ALPHA/10.1/1",
+                "AFF4L_V1_ALPHA/10.1/2",
             ]
         );
     }

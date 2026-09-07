@@ -14,7 +14,11 @@
 //! (`LogicalAcquisitionTask`, `filesystemRoot`, `Folder`, `child`). A consumer
 //! of a pyaff4 logical container therefore cannot tell which paths were the
 //! acquisition roots, or walk the acquired tree. This module implements the
-//! paper in full.
+//! paper in full for `--aff4l-legacy`.
+//!
+//! `--aff4l-v1.0` writes three of those four. AFF4-L v1.0-ALPHA §4.3 does not
+//! define `child`, so v2.1 output omits it and a consumer walks the tree from
+//! `originalPathName` instead — see [`LogicalProfile::writes_child_edges`].
 //!
 //! # The three encodings
 //!
@@ -61,6 +65,9 @@ pub mod terms {
     /// the specification and existing readers at once.
     pub const FOLDER_IMAGE: &str = "FolderImage";
     /// The `FileImages` contained in a Folder.
+    ///
+    /// AFF4-L 2019 §3.6 only. Not defined by AFF4-L v1.0-ALPHA §4.3, so it is
+    /// written for `--aff4l-legacy` and withheld for `--aff4l-v1.0`.
     pub const CHILD: &str = "child";
     /// Class: a logical acquisition activity.
     pub const LOGICAL_ACQUISITION_TASK: &str = "LogicalAcquisitionTask";
@@ -446,7 +453,10 @@ pub fn format_rfc3339_utc(secs: u64) -> String {
 }
 
 /// How a logical acquisition stores what it acquires.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Not `Copy`: `algorithms` is a `Vec`, since `--hash` takes an arbitrary
+/// selection rather than one of a fixed few.
+#[derive(Debug, Clone, Default)]
 pub struct LogicalOptions {
     /// Chunking and compression for files stored as `ImageStream`s (AFF4-L 2019 §3.3).
     pub stream: crate::write::stream_writer::StreamOptions,
@@ -460,6 +470,16 @@ pub struct LogicalOptions {
     pub deduplicate: bool,
     /// Which AFF4-L format to write.
     pub profile: LogicalProfile,
+    /// Which digests to record for each acquired file.
+    ///
+    /// Every algorithm here is computed in one pass over the file's bytes, on
+    /// its own thread, so the cost of adding one is the slower of the two
+    /// rather than their sum — see [`crate::hash::MultiHasher`].
+    ///
+    /// Empty means [`crate::hash_selection::DEFAULT`]. Stored rather than
+    /// defaulted at construction so `LogicalOptions::default()` stays cheap and
+    /// the CLI remains the single place the default is applied.
+    pub algorithms: Vec<crate::model::HashAlgorithm>,
 }
 
 /// Which AFF4-L format an acquisition writes.
@@ -485,11 +505,50 @@ pub enum LogicalProfile {
     V1Alpha,
 }
 
+impl LogicalOptions {
+    /// The algorithms to record, resolving an empty selection to the default.
+    ///
+    /// [`LogicalOptions::default()`] leaves the list empty rather than cloning
+    /// a constant, so an empty list means "unspecified", never "record no
+    /// digests". A container with no digests could not be verified at all,
+    /// which is not something a default should silently produce.
+    #[must_use]
+    pub fn algorithms(&self) -> &[crate::model::HashAlgorithm] {
+        if self.algorithms.is_empty() {
+            &crate::hash_selection::DEFAULT
+        } else {
+            &self.algorithms
+        }
+    }
+}
+
 impl LogicalProfile {
     /// Whether this profile writes AFF4-L Standard v1.0-ALPHA constructs.
     #[must_use]
     pub fn is_v1_alpha(self) -> bool {
         matches!(self, Self::V1Alpha)
+    }
+
+    /// Whether this profile writes `aff4:child` containment edges.
+    ///
+    /// True for [`Self::Legacy`] only. AFF4-L 2019 §3.6 defines `child` as part
+    /// of its resource-enumeration model, and the 2019 paper governs what
+    /// `--aff4l-legacy` writes.
+    ///
+    /// The AFF4-L v1.0-ALPHA §4.3 property table does not define `child`. It
+    /// keeps `LogicalAcquisitionTask`, `filesystemRoot` and `Folder`, and adds
+    /// `pathSeparator`, from which the acquired tree is recoverable:
+    /// `originalPathName` carries each entry's full path, and `pathSeparator`
+    /// says how to split it. So a v2.1 consumer reconstructs containment from
+    /// the paths rather than from an explicit edge.
+    ///
+    /// Emitting `child` in v2.1 output would put a term in the container that
+    /// its governing document does not define, which is the writer-side
+    /// leniency this project does not permit: aff4tools' own output conforms
+    /// exactly, whatever it accepts on read.
+    #[must_use]
+    pub fn writes_child_edges(self) -> bool {
+        matches!(self, Self::Legacy)
     }
 
     /// The version this profile's container declares.
@@ -571,7 +630,7 @@ pub struct LogicalAcquisition {
 pub fn acquire_logical(
     writer: &mut crate::write::container_writer::ContainerWriter,
     roots: &[std::path::PathBuf],
-    options: LogicalOptions,
+    options: &LogicalOptions,
     locus: &crate::error::Locus,
     on_progress: &mut dyn FnMut(&LogicalAcquisition),
 ) -> crate::error::Result<LogicalAcquisition> {
@@ -650,7 +709,7 @@ fn finish_dedupe(
     writer: &mut crate::write::container_writer::ContainerWriter,
     result: &mut LogicalAcquisition,
     pool: Option<crate::write::dedupe::ChunkPool>,
-    options: LogicalOptions,
+    options: &LogicalOptions,
     locus: &crate::error::Locus,
 ) -> crate::error::Result<()> {
     let Some(pool) = pool else {
@@ -703,7 +762,7 @@ pub type ScannedProgress<'a> = dyn FnMut(&LogicalAcquisition, Option<(u64, u64, 
 pub fn acquire_logical_scanned(
     writer: &mut crate::write::container_writer::ContainerWriter,
     roots: &[std::path::PathBuf],
-    options: LogicalOptions,
+    options: &LogicalOptions,
     locus: &crate::error::Locus,
     on_progress: &mut ScannedProgress<'_>,
 ) -> crate::error::Result<LogicalAcquisition> {
@@ -794,7 +853,7 @@ pub fn acquire_logical_scanned(
 pub fn acquire_logical_prescanned(
     writer: &mut crate::write::container_writer::ContainerWriter,
     items: Vec<crate::write::scan::ScanItem>,
-    options: LogicalOptions,
+    options: &LogicalOptions,
     locus: &crate::error::Locus,
     on_progress: &mut dyn FnMut(&LogicalAcquisition),
 ) -> crate::error::Result<LogicalAcquisition> {
@@ -932,6 +991,33 @@ fn collect_items(path: &std::path::Path, out: &mut Vec<crate::write::scan::ScanI
     out.push(ScanItem::DirEnd);
 }
 
+/// Write a directory's `aff4:child` edges, if its profile defines the term.
+///
+/// AFF4-L 2019 §3.6 is the containment edge pyaff4 never writes, and what lets
+/// a consumer reconstruct the tree. Called only with children that were
+/// actually acquired, so no edge names a skipped path.
+///
+/// Writes nothing under [`LogicalProfile::V1Alpha`]: AFF4-L v1.0-ALPHA §4.3
+/// defines no `child` property. See [`LogicalProfile::writes_child_edges`].
+fn write_child_edges(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    parent: &str,
+    children: &[String],
+    profile: LogicalProfile,
+) {
+    use crate::write::turtle::TurtleTerm;
+
+    if !profile.writes_child_edges() {
+        return;
+    }
+    let lexicon = crate::lexicon::STANDARD;
+    for child in children {
+        writer
+            .graph_mut()
+            .add(parent, &lexicon.iri(terms::CHILD), TurtleTerm::iri(child));
+    }
+}
+
 /// One open directory: its ARN, and the children acquired inside it.
 struct OpenDir {
     /// Where the directory is, kept so a truncated stream can report it as a
@@ -951,18 +1037,21 @@ struct OpenDir {
 /// must never name a path that turned out to be skipped: a consumer following
 /// one would reach an ARN that resolves to nothing. The recursion this replaced
 /// carried that outcome on the call stack; the directory stack carries it now.
+///
+/// The edges are written only under [`LogicalProfile::Legacy`]; the children
+/// are tracked either way, since the stack is also what promotes an acquired
+/// directory to an `aff4:filesystemRoot`.
 #[allow(clippy::too_many_arguments)]
 fn acquire_from_items(
     writer: &mut crate::write::container_writer::ContainerWriter,
     items: impl Iterator<Item = crate::write::scan::ScanItem>,
     volume_arn: &str,
-    options: LogicalOptions,
+    options: &LogicalOptions,
     mut pool: Option<&mut crate::write::dedupe::ChunkPool>,
     result: &mut LogicalAcquisition,
     on_progress: &mut dyn FnMut(&LogicalAcquisition),
 ) -> crate::error::Result<Vec<String>> {
     use crate::write::scan::ScanItem;
-    use crate::write::turtle::TurtleTerm;
 
     let lexicon = crate::lexicon::STANDARD;
     let mut stack: Vec<OpenDir> = Vec::new();
@@ -1023,16 +1112,7 @@ fn acquire_from_items(
             }
             ScanItem::DirEnd => {
                 if let Some(done) = stack.pop() {
-                    // AFF4-L 2019 §3.6: the containment edge pyaff4 never writes, and what
-                    // lets a consumer reconstruct the tree. Written now, and
-                    // only for children that were actually acquired.
-                    for child in &done.children {
-                        writer.graph_mut().add(
-                            &done.arn,
-                            &lexicon.iri(terms::CHILD),
-                            TurtleTerm::iri(child),
-                        );
-                    }
+                    write_child_edges(writer, &done.arn, &done.children, options.profile);
                     if let Some(parent) = stack.last_mut() {
                         parent.children.push(done.arn);
                     } else {
@@ -1087,13 +1167,7 @@ fn acquire_from_items(
         // truncation. Those children were genuinely acquired and the graph
         // describes them, so each edge names a real subject; dropping them
         // would discard true information about what the container does hold.
-        for child in &open.children {
-            writer.graph_mut().add(
-                &open.arn,
-                &lexicon.iri(terms::CHILD),
-                TurtleTerm::iri(child),
-            );
-        }
+        write_child_edges(writer, &open.arn, &open.children, options.profile);
         result.skipped.push((
             open.path,
             "directory not closed; the item stream ended before its contents \
@@ -1123,7 +1197,7 @@ fn record_file(
     names: Option<&(RecordedName, RecordedName)>,
     size: u64,
     volume_arn: &str,
-    options: LogicalOptions,
+    options: &LogicalOptions,
     pool: Option<&mut crate::write::dedupe::ChunkPool>,
     result: &mut LogicalAcquisition,
 ) {
@@ -1165,7 +1239,7 @@ fn record_file(
     // pool regardless of size — the AFF4-L 2019 §3.3 threshold does not apply, because no
     // file has its own storage to choose a form for.
     if let Some(pool) = pool {
-        record_deduplicated_file(writer, path, arn, size, pool, result);
+        record_deduplicated_file(writer, path, arn, size, pool, options, result);
         return;
     }
 
@@ -1173,7 +1247,15 @@ fn record_file(
     // path streams — a file above the threshold must never be read whole into
     // memory, which is the whole reason the threshold exists.
     if !is_segment_resident(size) {
-        record_large_file(writer, path, arn, size, options.stream, result);
+        record_large_file(
+            writer,
+            path,
+            arn,
+            size,
+            options.stream,
+            options.algorithms(),
+            result,
+        );
         return;
     }
 
@@ -1196,22 +1278,17 @@ fn record_file(
         result.changed.push((path.to_path_buf(), size, actual));
     }
 
-    // AFF4-L 2019 §3.7: SHA-1 and MD5 linear bitstream hashes, both.
+    // AFF4-L 2019 §3.7 requires linear bitstream hashes; which algorithms
+    // compute them is the examiner's choice, via `--hash`.
     {
-        use md5::Digest as _;
-        let md5 = hex_lower(&md5::Md5::digest(&bytes));
-        let sha1 = hex_lower(&sha1::Sha1::digest(&bytes));
         let graph = writer.graph_mut();
-        graph.add(
-            arn,
-            &lexicon.iri(lexicon.hash),
-            TurtleTerm::typed(md5, lexicon.iri("MD5")),
-        );
-        graph.add(
-            arn,
-            &lexicon.iri(lexicon.hash),
-            TurtleTerm::typed(sha1, lexicon.iri("SHA1")),
-        );
+        for digest in crate::hash::digests_of(&bytes, options.algorithms()) {
+            graph.add(
+                arn,
+                &lexicon.iri(lexicon.hash),
+                TurtleTerm::typed(digest.hex(), lexicon.iri(digest.algorithm().name())),
+            );
+        }
         graph.add(
             arn,
             &lexicon.iri(lexicon.size),
@@ -1261,6 +1338,7 @@ fn record_deduplicated_file(
     arn: &str,
     size: u64,
     pool: &mut crate::write::dedupe::ChunkPool,
+    options: &LogicalOptions,
     result: &mut LogicalAcquisition,
 ) {
     use crate::write::turtle::{TurtleTerm, XSD_LONG};
@@ -1281,8 +1359,7 @@ fn record_deduplicated_file(
     // Hash the true bytes as they stream past on their way into the pool.
     let mut hashing = HashingReader {
         inner: file,
-        md5: <md5::Md5 as md5::Digest>::new(),
-        sha1: <sha1::Sha1 as sha1::Digest>::new(),
+        hasher: crate::hash::MultiHasher::for_algorithms(options.algorithms()),
     };
     let deduped = match pool.absorb(&mut hashing, &locus) {
         Ok(d) => d,
@@ -1291,8 +1368,7 @@ fn record_deduplicated_file(
             return;
         }
     };
-    let md5 = hex_lower(&md5::Digest::finalize(hashing.md5));
-    let sha1 = hex_lower(&sha1::Digest::finalize(hashing.sha1));
+    let digests = hashing.hasher.finish();
 
     // The size recorded is what was actually read, not what `stat` predicted.
     // The file was acquired in full, at its true length, so the change is
@@ -1305,16 +1381,13 @@ fn record_deduplicated_file(
 
     {
         let graph = writer.graph_mut();
-        graph.add(
-            arn,
-            &lexicon.iri(lexicon.hash),
-            TurtleTerm::typed(md5, lexicon.iri("MD5")),
-        );
-        graph.add(
-            arn,
-            &lexicon.iri(lexicon.hash),
-            TurtleTerm::typed(sha1, lexicon.iri("SHA1")),
-        );
+        for digest in &digests {
+            graph.add(
+                arn,
+                &lexicon.iri(lexicon.hash),
+                TurtleTerm::typed(digest.hex(), lexicon.iri(digest.algorithm().name())),
+            );
+        }
         graph.add(
             arn,
             &lexicon.iri(lexicon.size),
@@ -1334,15 +1407,14 @@ fn record_deduplicated_file(
 /// Feeds bytes onward while digesting them, so nothing is read twice.
 struct HashingReader<R> {
     inner: R,
-    md5: md5::Md5,
-    sha1: sha1::Sha1,
+    /// The selected algorithms, each on its own thread.
+    hasher: crate::hash::MultiHasher,
 }
 
 impl<R: std::io::Read> std::io::Read for HashingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
-        md5::Digest::update(&mut self.md5, &buf[..n]);
-        sha1::Digest::update(&mut self.sha1, &buf[..n]);
+        self.hasher.update(&buf[..n]);
         Ok(n)
     }
 }
@@ -1372,10 +1444,10 @@ fn record_large_file(
     path: &std::path::Path,
     arn: &str,
     size: u64,
-    options: crate::write::stream_writer::StreamOptions,
+    stream: crate::write::stream_writer::StreamOptions,
+    algorithms: &[crate::model::HashAlgorithm],
     result: &mut LogicalAcquisition,
 ) {
-    use crate::model::HashAlgorithm;
     use crate::write::stream_writer::write_image_stream_as;
     use crate::write::turtle::{TurtleTerm, XSD_LONG};
 
@@ -1392,10 +1464,9 @@ fn record_large_file(
         }
     };
 
-    // AFF4-L 2019 §3.7: SHA-1 and MD5, the paper's pair, computed over the bytes stored.
-    let algorithms = [HashAlgorithm::Sha1, HashAlgorithm::Md5];
-    let written = match write_image_stream_as(writer, arn, &mut file, options, &algorithms, &locus)
-    {
+    // AFF4-L 2019 §3.7 requires linear digests over the bytes stored; which
+    // algorithms compute them is the examiner's choice, via `--hash`.
+    let written = match write_image_stream_as(writer, arn, &mut file, stream, algorithms, &locus) {
         Ok(w) => w,
         Err(e) => {
             result.skipped.push((path.to_path_buf(), e.to_string()));
@@ -1566,15 +1637,6 @@ pub fn explain_io_error(error: &std::io::Error) -> String {
         );
     }
     error.to_string()
-}
-
-/// Render bytes as lowercase hex.
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut out, b| {
-        let _ = write!(out, "{b:02x}");
-        out
-    })
 }
 
 #[cfg(test)]
@@ -1921,7 +1983,7 @@ mod tests {
             &mut writer,
             items.into_iter(),
             &volume_arn,
-            LogicalOptions::default(),
+            &LogicalOptions::default(),
             None,
             &mut result,
             &mut noop,
@@ -2005,7 +2067,7 @@ mod tests {
             &mut writer,
             items.into_iter(),
             &volume_arn,
-            LogicalOptions::default(),
+            &LogicalOptions::default(),
             None,
             &mut result,
             &mut noop,
@@ -2066,7 +2128,7 @@ mod tests {
             &mut writer,
             items.into_iter(),
             &volume_arn,
-            LogicalOptions::default(),
+            &LogicalOptions::default(),
             None,
             &mut result,
             &mut noop,

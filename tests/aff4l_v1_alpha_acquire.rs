@@ -628,3 +628,41 @@ fn the_extension_never_decides_how_a_container_is_read() {
         "the version line decides, not the extension:\n{out_text}"
     );
 }
+
+/// AFF4-L v1.0-ALPHA §4.3 defines no `child` property, so v2.1 output omits it.
+///
+/// The AFF4-L 2019 §3.6 enumeration model defines `child`, and legacy output
+/// still carries it. Writing it into a v2.1 container would put a term in the
+/// container that its governing document does not define.
+///
+/// Both halves are asserted together: a bug that dropped the edge everywhere
+/// would satisfy the v2.1 half alone.
+#[test]
+fn child_edges_are_written_for_legacy_and_withheld_for_v1_alpha() {
+    let (_src, root) = source_tree();
+
+    let (_legacy_out, legacy) = acquire(&root, &["--aff4l-legacy"]);
+    let legacy_body = turtle(&legacy);
+    assert!(
+        legacy_body.contains("aff4:child"),
+        "AFF4-L 2019 §3.6 defines child, and legacy output keeps it:\n{legacy_body}"
+    );
+
+    let (_alpha_out, alpha) = acquire(&root, &["--aff4l-v1.0"]);
+    let alpha_body = turtle(&alpha);
+    assert!(
+        !alpha_body.contains("child"),
+        "AFF4-L v1.0-ALPHA §4.3 defines no child property:\n{alpha_body}"
+    );
+
+    // The tree is still walkable: every acquired entry carries its full path,
+    // which is what replaces the explicit edge.
+    assert!(
+        alpha_body.contains("aff4:originalPathName"),
+        "containment is recoverable from the recorded paths:\n{alpha_body}"
+    );
+    assert!(
+        alpha_body.contains("aff4:filesystemRoot"),
+        "the acquisition root is still named:\n{alpha_body}"
+    );
+}

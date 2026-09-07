@@ -256,6 +256,19 @@ enum Command {
         #[arg(long, requires = "logical", conflicts_with_all = ["images", "device"])]
         deduplicate: bool,
 
+        /// Which digests to record. Repeatable, or comma-separated.
+        ///
+        /// Defaults to SHA-512 and BLAKE3. Valid names: md5, sha1, sha256,
+        /// sha512, blake2b, sha3-256, sha3-384, sha3-512, shake128, shake256,
+        /// blake3.
+        ///
+        /// The same algorithms compute the AFF4-L v1.0-ALPHA §10.1 metadata
+        /// integrity hash, which must be SHA-256 or stronger, so a selection of
+        /// only MD5 and SHA-1 is refused. Either may be recorded alongside a
+        /// stronger algorithm.
+        #[arg(long = "hash", value_name = "ALGORITHM")]
+        hash: Vec<String>,
+
         /// Write the AFF4-L format aff4tools has always written. `--logical`
         /// only. The default.
         ///
@@ -555,32 +568,49 @@ fn run() -> ExitCode {
             scan_first,
             aff4l_legacy,
             aff4l_v1_0,
-        } => run_acquire(
-            &images,
-            &logical,
-            device.as_deref(),
-            &output,
-            log.as_deref(),
-            AcquireOptions {
-                compression,
-                chunk_size,
-                chunks_per_bevy,
-                verify_written_container: !no_verify,
-                deduplicate,
-                multi_part_after: multi_part.map(PartSize::bytes),
-                scan_first,
-                // Clap enforces the exclusion, so the two flags cannot both be
-                // set. `--aff4l-legacy` is named for symmetry and to let a
-                // script pin today's format across the change of default; it
-                // selects what the absent case already selects.
-                logical_profile: if aff4l_v1_0 {
-                    aff4tools::write::logical::LogicalProfile::V1Alpha
-                } else {
-                    let _ = aff4l_legacy;
-                    aff4tools::write::logical::LogicalProfile::Legacy
+            hash,
+        } => {
+            // Parsed before anything is opened, so a refused selection leaves
+            // no partial container behind.
+            let algorithms = if hash.is_empty() {
+                aff4tools::hash_selection::DEFAULT.to_vec()
+            } else {
+                match aff4tools::hash_selection::parse(&hash) {
+                    Ok(chosen) => chosen,
+                    Err(message) => {
+                        eprintln!("error: {message}");
+                        return ExitCode::from(EXIT_USAGE);
+                    }
+                }
+            };
+            run_acquire(
+                &images,
+                &logical,
+                device.as_deref(),
+                &output,
+                log.as_deref(),
+                AcquireOptions {
+                    compression,
+                    chunk_size,
+                    chunks_per_bevy,
+                    verify_written_container: !no_verify,
+                    deduplicate,
+                    multi_part_after: multi_part.map(PartSize::bytes),
+                    scan_first,
+                    // Clap enforces the exclusion, so the two flags cannot both be
+                    // set. `--aff4l-legacy` is named for symmetry and to let a
+                    // script pin today's format across the change of default; it
+                    // selects what the absent case already selects.
+                    logical_profile: if aff4l_v1_0 {
+                        aff4tools::write::logical::LogicalProfile::V1Alpha
+                    } else {
+                        let _ = aff4l_legacy;
+                        aff4tools::write::logical::LogicalProfile::Legacy
+                    },
+                    algorithms,
                 },
-            },
-        ),
+            )
+        }
         Command::Export {
             path,
             logical,
@@ -2913,7 +2943,9 @@ fn run_info(
 }
 
 /// How an acquisition should chunk, compress, and check itself.
-#[derive(Debug, Clone, Copy)]
+/// Not `Copy`: `algorithms` is a `Vec`, since `--hash` takes an arbitrary
+/// selection rather than one of a fixed few.
+#[derive(Debug, Clone)]
 struct AcquireOptions {
     compression: Compression,
     chunk_size: usize,
@@ -2931,6 +2963,12 @@ struct AcquireOptions {
     scan_first: bool,
     /// Which AFF4-L format a logical acquisition writes.
     logical_profile: aff4tools::write::logical::LogicalProfile,
+    /// Which digests to record for each acquired file.
+    ///
+    /// Also computes the AFF4-L v1.0-ALPHA §10.1 metadata integrity hash, which
+    /// is why `--hash` refuses a selection with nothing at SHA-256 strength or
+    /// above.
+    algorithms: Vec<aff4tools::HashAlgorithm>,
 }
 
 /// Whether a path names the first part of a raw multi-part set, e.g. `img.001`.
@@ -3725,6 +3763,7 @@ fn run_acquire_logical(
         multi_part_after: _,
         scan_first,
         logical_profile,
+        algorithms,
     } = settings;
     let options = LogicalOptions {
         stream: StreamOptions {
@@ -3735,6 +3774,7 @@ fn run_acquire_logical(
         },
         deduplicate,
         profile: logical_profile,
+        algorithms,
     };
 
     let _ = writeln!(out, "Acquiring:   {} root(s)", roots.len());
@@ -3787,6 +3827,9 @@ fn run_acquire_logical(
         Ok(w) => w,
         Err(e) => return ExitCode::from(report_error(&e)),
     };
+    // The AFF4-L v1.0-ALPHA §10.1 metadata hash uses the same algorithms as
+    // the file digests, so `--hash` reaches both.
+    writer.set_hash_algorithms(options.algorithms());
     let volume_arn = writer.volume_arn().as_str().to_owned();
 
     // Progress goes to stderr, and only to a terminal: the report above and
@@ -3803,7 +3846,7 @@ fn run_acquire_logical(
         match aff4tools::write::logical::acquire_logical_prescanned(
             &mut writer,
             items,
-            options,
+            &options,
             &locus,
             &mut |acq| {
                 progress.update(acq.files, acq.bytes);
@@ -3825,7 +3868,7 @@ fn run_acquire_logical(
             }
         }
     } else {
-        match acquire_logical_scanned(&mut writer, roots, options, &locus, &mut |acq, totals| {
+        match acquire_logical_scanned(&mut writer, roots, &options, &locus, &mut |acq, totals| {
             progress.update(acq.files, acq.bytes);
             // `None` means the scanner failed and the denominator is
             // short, so the estimate is left untouched and the line stays

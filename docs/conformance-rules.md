@@ -49,6 +49,8 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/2/2` (§2) | MAY | not checkable | A resource name may carry a further part after its GUID, provided the whole remains a valid IRI. |
 | `AFF4L_V1_ALPHA/4.1/1` (§4.1) | MUST | detected | A writer emits new lexicon terms under the namespace its governing standard assigns them. |
 | `AFF4L_V1_ALPHA/4.1/2` (§4.1) | MAY | honored | A reader may accept either namespace prefix for a lexicon term, so that containers written against the earlier schema still read. |
+| `AFF4L_V1_ALPHA/4.4/1` (§4.4) | MAY | honored | A digest property may carry any of the additional algorithms this clause names, and a reader computes each of them. |
+| `AFF4L_V1_ALPHA/4.4/2` (§4.4) | MAY | not checkable | The clause names two extendable-output functions without fixing an output length, so the length a container uses cannot be judged. |
 | `AFF4L_V1_ALPHA/5/1` (§5) | MUST | detected | A name that is valid UTF-8 without control characters is recorded as it is, with no raw form. |
 | `AFF4L_V1_ALPHA/5/2` (§5) | MUST | detected | A name that is not valid UTF-8, or carries a control character, records its raw bytes base64-encoded alongside the display form. |
 | `AFF4L_V1_ALPHA/5/3` (§5) | MUST | detected | A raw name is well-formed base64, so the bytes it records can be read. |
@@ -70,8 +72,8 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/9a/1` (§9a) | MAY | not checkable | A container may carry an accelerated metadata store beside the primary one, holding everything the primary and any secondary stores hold. |
 | `AFF4L_V1_ALPHA/9a/2` (§9a) | MAY | not checkable | A reader may take its metadata from the accelerated store in place of the primary and secondary stores. |
 | `AFF4L_V1_ALPHA/9a.1/1` (§9a.1) | MUST | not checkable | An implementation of the accelerated serialization confines itself to the triple, dictionary, and dictionary-section encodings the standard names. |
-| `AFF4L_V1_ALPHA/10.1/1` (§10.1) | MUST | not implemented | The digest of the primary metadata segment is recorded in a companion segment beside it, written in the turtle datatype syntax. |
-| `AFF4L_V1_ALPHA/10.1/2` (§10.1) | MUST | not implemented | That digest uses SHA-256, SHA-512, or a stronger algorithm the standard supports. |
+| `AFF4L_V1_ALPHA/10.1/1` (§10.1) | MUST | detected | The digest of the primary metadata segment is recorded in a companion segment beside it, written in the turtle datatype syntax. |
+| `AFF4L_V1_ALPHA/10.1/2` (§10.1) | MUST | detected | That digest uses SHA-256, SHA-512, or a stronger algorithm the standard supports. |
 | `AFF4L_V1_ALPHA/10.2/1` (§10.2) | MAY | not checkable | A container may carry an X509 signature of the primary metadata segment in a companion segment beside it. |
 | `AFF4L_V1_ALPHA/10.2/2` (§10.2) | MUST | not checkable | A signature is PEM encoded, and the certificate chain stored with it is complete down to the root and likewise PEM encoded. |
 | `AFF4L_V1_ALPHA/10.2/3` (§10.2) | MUST | not checkable | Where several keys sign the metadata, each signature and certificate segment is named by the pattern the standard fixes. |
@@ -81,4 +83,4 @@ registry in `src/rules/catalog.rs`.
 
 ## Coverage
 
-23 of 51 declared rules are checked.
+25 of 53 declared rules are checked.

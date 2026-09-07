@@ -37,6 +37,8 @@ use sha1::Sha1;
 // The `Digest` trait is re-exported identically by every RustCrypto hash
 // crate; taking it from one keeps `digest` out of the direct dependencies.
 use sha2::{Digest as _, Sha256, Sha512};
+use sha3::digest::{ExtendableOutput as _, XofReader as _};
+use sha3::{Sha3_256, Sha3_384, Sha3_512, Shake128, Shake256};
 
 use crate::model::{HashAlgorithm, StoredHash};
 
@@ -97,6 +99,12 @@ pub fn is_computable(algorithm: &HashAlgorithm) -> bool {
             | HashAlgorithm::Sha256
             | HashAlgorithm::Sha512
             | HashAlgorithm::Blake2b
+            | HashAlgorithm::Sha3_256
+            | HashAlgorithm::Sha3_384
+            | HashAlgorithm::Sha3_512
+            | HashAlgorithm::Shake128
+            | HashAlgorithm::Shake256
+            | HashAlgorithm::Blake3
     )
 }
 
@@ -107,6 +115,14 @@ enum Running {
     Sha256(Sha256),
     Sha512(Sha512),
     Blake2b(Box<Blake2b512>),
+    Sha3_256(Sha3_256),
+    Sha3_384(Sha3_384),
+    Sha3_512(Sha3_512),
+    Shake128(Shake128),
+    Shake256(Shake256),
+    /// Boxed for the same reason `Blake2b` is: an unboxed hasher would make
+    /// every `Running` its size.
+    Blake3(Box<blake3::Hasher>),
 }
 
 impl Running {
@@ -117,6 +133,12 @@ impl Running {
             HashAlgorithm::Sha256 => Some(Self::Sha256(Sha256::new())),
             HashAlgorithm::Sha512 => Some(Self::Sha512(Sha512::new())),
             HashAlgorithm::Blake2b => Some(Self::Blake2b(Box::new(Blake2b512::new()))),
+            HashAlgorithm::Sha3_256 => Some(Self::Sha3_256(Sha3_256::default())),
+            HashAlgorithm::Sha3_384 => Some(Self::Sha3_384(Sha3_384::default())),
+            HashAlgorithm::Sha3_512 => Some(Self::Sha3_512(Sha3_512::default())),
+            HashAlgorithm::Shake128 => Some(Self::Shake128(Shake128::default())),
+            HashAlgorithm::Shake256 => Some(Self::Shake256(Shake256::default())),
+            HashAlgorithm::Blake3 => Some(Self::Blake3(Box::new(blake3::Hasher::new()))),
             _ => None,
         }
     }
@@ -128,6 +150,18 @@ impl Running {
             Self::Sha256(h) => h.update(bytes),
             Self::Sha512(h) => h.update(bytes),
             Self::Blake2b(h) => h.update(bytes),
+            Self::Sha3_256(h) => sha3::Digest::update(h, bytes),
+            Self::Sha3_384(h) => sha3::Digest::update(h, bytes),
+            Self::Sha3_512(h) => sha3::Digest::update(h, bytes),
+            // `digest::Update`, named in full rather than imported: bringing
+            // that trait into scope would make `update` ambiguous on every
+            // hasher above, which also implements `Digest`. An
+            // extendable-output function implements only `Update`.
+            Self::Shake128(h) => sha3::digest::Update::update(h, bytes),
+            Self::Shake256(h) => sha3::digest::Update::update(h, bytes),
+            Self::Blake3(h) => {
+                h.update(bytes);
+            }
         }
     }
 
@@ -138,6 +172,23 @@ impl Running {
             Self::Sha256(h) => (HashAlgorithm::Sha256, h.finalize().to_vec()),
             Self::Sha512(h) => (HashAlgorithm::Sha512, h.finalize().to_vec()),
             Self::Blake2b(h) => (HashAlgorithm::Blake2b, h.finalize().to_vec()),
+            Self::Sha3_256(h) => (HashAlgorithm::Sha3_256, sha3::Digest::finalize(h).to_vec()),
+            Self::Sha3_384(h) => (HashAlgorithm::Sha3_384, sha3::Digest::finalize(h).to_vec()),
+            Self::Sha3_512(h) => (HashAlgorithm::Sha3_512, sha3::Digest::finalize(h).to_vec()),
+            Self::Shake128(h) => {
+                // 256 bits: SHAKE128's security strength.
+                // AFF4-L v1.0-ALPHA §4.4 fixes no length, so this project does.
+                let mut out = vec![0u8; 32];
+                h.finalize_xof().read(&mut out);
+                (HashAlgorithm::Shake128, out)
+            }
+            Self::Shake256(h) => {
+                // 512 bits: SHAKE256's security strength.
+                let mut out = vec![0u8; 64];
+                h.finalize_xof().read(&mut out);
+                (HashAlgorithm::Shake256, out)
+            }
+            Self::Blake3(h) => (HashAlgorithm::Blake3, h.finalize().as_bytes().to_vec()),
         };
 
         Digest {
@@ -153,6 +204,12 @@ impl Running {
             Self::Sha256(_) => HashAlgorithm::Sha256,
             Self::Sha512(_) => HashAlgorithm::Sha512,
             Self::Blake2b(_) => HashAlgorithm::Blake2b,
+            Self::Sha3_256(_) => HashAlgorithm::Sha3_256,
+            Self::Sha3_384(_) => HashAlgorithm::Sha3_384,
+            Self::Sha3_512(_) => HashAlgorithm::Sha3_512,
+            Self::Shake128(_) => HashAlgorithm::Shake128,
+            Self::Shake256(_) => HashAlgorithm::Shake256,
+            Self::Blake3(_) => HashAlgorithm::Blake3,
         }
     }
 }
@@ -340,6 +397,18 @@ impl MultiHasher {
         digests.extend(self.workers.into_iter().filter_map(HashWorker::finish));
         digests
     }
+}
+
+/// Compute every named digest over `bytes` in one pass.
+///
+/// Each algorithm runs on its own thread, so the cost is the slowest one
+/// rather than the sum — see [`MultiHasher`]. An algorithm this build cannot
+/// compute is skipped rather than faked; [`MultiHasher::declined`] names those.
+#[must_use]
+pub fn digests_of(bytes: &[u8], algorithms: &[HashAlgorithm]) -> Vec<Digest> {
+    let mut hasher = MultiHasher::for_algorithms(algorithms);
+    hasher.update(bytes);
+    hasher.finish()
 }
 
 /// Compute a single digest over a slice, for tests and small segments.

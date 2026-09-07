@@ -403,23 +403,25 @@ fn the_verify_summary_distinguishes_checks_from_recorded_values() {
         "64 chunks over two algorithms is 128 compared digests:\n{summary}"
     );
 
-    // Recorded values are the number `info` shows: two stream digests plus one
-    // blockHashesHash per block-hash segment.
+    // Recorded values are the number `info` shows: two stream digests, one
+    // blockHashesHash per block-hash segment, and the two digests of the
+    // AFF4-L v1.0-ALPHA §10.1 metadata integrity hash.
     assert!(
-        summary.contains("4 recorded digest value(s)"),
-        "the container records four digest values:\n{summary}"
+        summary.contains("6 recorded digest value(s)"),
+        "the container records six digest values:\n{summary}"
     );
 
     // And the check count stays distinct from both.
     assert!(
-        summary.contains("6 completed"),
-        "four value checks plus two sequence checks is six:\n{summary}"
+        summary.contains("8 completed"),
+        "four value checks, two sequence checks and two metadata-hash checks \
+is eight:\n{summary}"
     );
 
     // Attempted is stated, and on a container aff4tools wrote itself nothing is
     // declined, so it equals completed.
     assert!(
-        summary.contains("6 checks attempted"),
+        summary.contains("8 checks attempted"),
         "the attempted count must be stated:\n{summary}"
     );
 
@@ -451,9 +453,12 @@ fn the_verify_summary_distinguishes_checks_from_recorded_values() {
         !summary.contains("per-chunk"),
         "with block hashing off there are no per-chunk digests to report:\n{summary}"
     );
+    // Two stream digests, two blockHashesHash values, and the two digests of
+    // the AFF4-L v1.0-ALPHA §10.1 metadata integrity hash. Turning block
+    // hashing off drops the per-chunk work, not the recorded values.
     assert!(
-        summary.contains("4 completed") && summary.contains("4 recorded digest value(s)"),
-        "the four recorded values are still checked:\n{summary}"
+        summary.contains("6 completed") && summary.contains("6 recorded digest value(s)"),
+        "the six recorded values are still checked:\n{summary}"
     );
 }
 

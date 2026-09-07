@@ -27,6 +27,18 @@ TURTLE_PREFIXES = """\
 """
 
 
+def _metadata_hashes(turtle_bytes: bytes) -> str:
+    """The AFF4-L v1.0-ALPHA §10.1 companion segment for a metadata body.
+
+    Computed here with hashlib, independently of the aff4tools writer, so a
+    fixture cannot inherit a bug from the implementation it tests.
+    """
+    return TURTLE_PREFIXES + f"""
+<{VOLUME}/information.turtle>
+    aff4:hash "{hashlib.sha256(turtle_bytes).hexdigest()}"^^aff4:SHA256 .
+"""
+
+
 def write_minimal(path: Path) -> None:
     """A v2.1 container declaring only its volume."""
     turtle = TURTLE_PREFIXES + f"""
@@ -39,6 +51,7 @@ def write_minimal(path: Path) -> None:
         z.writestr("container.description", VOLUME)
         z.writestr("version.txt", "major=2\nminor=1\ntool=aff4tools-test 0.1\n")
         z.writestr("information.turtle", turtle)
+        z.writestr("information.turtle.hashes", _metadata_hashes(turtle.encode()))
         z.comment = VOLUME.encode()
 
 
@@ -61,10 +74,7 @@ def write_conformant(path: Path) -> None:
     aff4:originalPathName   "/test.txt" .
 """
     turtle_bytes = turtle.encode()
-    hashes = TURTLE_PREFIXES + f"""
-<{VOLUME}/information.turtle>
-    aff4:hash "{hashlib.sha256(turtle_bytes).hexdigest()}"^^aff4:SHA256 .
-"""
+    hashes = _metadata_hashes(turtle_bytes)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("container.description", VOLUME)
         z.writestr("version.txt", "major=2\nminor=1\ntool=aff4tools-test 0.1\n")
@@ -97,6 +107,7 @@ def _write(path: Path, turtle: str, members: dict) -> None:
         for name, content in members.items():
             z.writestr(name, content)
         z.writestr("information.turtle", body)
+        z.writestr("information.turtle.hashes", _metadata_hashes(body.encode()))
         z.comment = VOLUME.encode()
 
 

@@ -851,6 +851,29 @@ pub enum HashAlgorithm {
     Sha512,
     /// Blake2b, 512-bit.
     Blake2b,
+    /// SHA3-256, per FIPS 202. AFF4-L v1.0-ALPHA §4.4.
+    Sha3_256,
+    /// SHA3-384, per FIPS 202. AFF4-L v1.0-ALPHA §4.4.
+    Sha3_384,
+    /// SHA3-512, per FIPS 202. AFF4-L v1.0-ALPHA §4.4.
+    Sha3_512,
+    /// SHAKE128 read out to 256 bits, per FIPS 202. AFF4-L v1.0-ALPHA §4.4.
+    ///
+    /// SHAKE is extendable-output: the caller picks the length, and AFF4-L
+    /// v1.0-ALPHA §4.4 fixes none. 256 bits is this project's choice, matching
+    /// the function's security strength, and is declared as a rule so the
+    /// choice appears in tool output rather than only in the source.
+    Shake128,
+    /// SHAKE256 read out to 512 bits, per FIPS 202. AFF4-L v1.0-ALPHA §4.4.
+    ///
+    /// See [`Self::Shake128`] on the choice of length.
+    Shake256,
+    /// BLAKE3, 256-bit output.
+    ///
+    /// Named by no AFF4 document. Written as `aff4:BLAKE3` in the base
+    /// namespace, following v1.0a's precedent of carrying `aff4:blake2b`
+    /// there, and offered as a proposed addition to the lexicon.
+    Blake3,
     /// The composite block-map hash (v1.0a §6.2), SHA-512 flavour.
     BlockMapSha512,
     /// The composite block-map hash, SHA-256 flavour.
@@ -870,6 +893,12 @@ impl HashAlgorithm {
             "SHA256" => Self::Sha256,
             "SHA512" => Self::Sha512,
             "blake2b" | "Blake2b" => Self::Blake2b,
+            "SHA3-256" => Self::Sha3_256,
+            "SHA3-384" => Self::Sha3_384,
+            "SHA3-512" => Self::Sha3_512,
+            "SHAKE128" => Self::Shake128,
+            "SHAKE256" => Self::Shake256,
+            "BLAKE3" => Self::Blake3,
             "blockMapHashSHA512" => Self::BlockMapSha512,
             "blockMapHashSHA256" => Self::BlockMapSha256,
             other => Self::Other(other.to_string()),
@@ -882,8 +911,17 @@ impl HashAlgorithm {
         match self {
             Self::Md5 => Some(32),
             Self::Sha1 => Some(40),
-            Self::Sha256 | Self::BlockMapSha256 => Some(64),
-            Self::Sha512 | Self::Blake2b | Self::BlockMapSha512 => Some(128),
+            Self::Sha256
+            | Self::BlockMapSha256
+            | Self::Sha3_256
+            | Self::Shake128
+            | Self::Blake3 => Some(64),
+            Self::Sha3_384 => Some(96),
+            Self::Sha512
+            | Self::Blake2b
+            | Self::BlockMapSha512
+            | Self::Sha3_512
+            | Self::Shake256 => Some(128),
             Self::Other(_) => None,
         }
     }
@@ -897,6 +935,12 @@ impl HashAlgorithm {
             Self::Sha256 => "SHA256",
             Self::Sha512 => "SHA512",
             Self::Blake2b => "Blake2b",
+            Self::Sha3_256 => "SHA3-256",
+            Self::Sha3_384 => "SHA3-384",
+            Self::Sha3_512 => "SHA3-512",
+            Self::Shake128 => "SHAKE128",
+            Self::Shake256 => "SHAKE256",
+            Self::Blake3 => "BLAKE3",
             Self::BlockMapSha512 => "blockMapHashSHA512",
             Self::BlockMapSha256 => "blockMapHashSHA256",
             Self::Other(name) => name,
@@ -1078,5 +1122,25 @@ mod tests {
         assert_eq!(ObjectRole::DiskImage.to_string(), "disk image");
         assert_eq!(ObjectRole::ImageStream.to_string(), "image stream");
         assert_eq!(HashAlgorithm::Sha512.to_string(), "SHA512");
+    }
+
+    /// AFF4-L v1.0-ALPHA §4.4's five datatypes, plus BLAKE3, each with the
+    /// hex-string length verification compares against.
+    ///
+    /// The lengths are the property that matters: a digest recorded at the
+    /// wrong length is a finding, and `hex_length` is what detects it.
+    #[test]
+    fn the_new_algorithms_carry_their_digest_lengths() {
+        for (algorithm, hex_len, name) in [
+            (HashAlgorithm::Sha3_256, 64, "SHA3-256"),
+            (HashAlgorithm::Sha3_384, 96, "SHA3-384"),
+            (HashAlgorithm::Sha3_512, 128, "SHA3-512"),
+            (HashAlgorithm::Shake128, 64, "SHAKE128"),
+            (HashAlgorithm::Shake256, 128, "SHAKE256"),
+            (HashAlgorithm::Blake3, 64, "BLAKE3"),
+        ] {
+            assert_eq!(algorithm.hex_length(), Some(hex_len), "{name}");
+            assert_eq!(algorithm.name(), name);
+        }
     }
 }

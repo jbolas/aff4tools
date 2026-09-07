@@ -799,6 +799,11 @@ pub fn verify_container_with_progress(
         }
     }
 
+    // AFF4-L v1.0-ALPHA §10.1: the metadata's own integrity hash, checked last
+    // because it covers the segment every other check read its expectations
+    // from. A mismatch here means the recorded digests themselves are in doubt.
+    verify_metadata_hash(container, &mut session);
+
     // Derived from the work done, not from the option that asked for it. A
     // container storing no block-hash segments produces no Coverage::Block
     // check, so the closing coverage statement cannot claim the leaves were
@@ -810,6 +815,106 @@ pub fn verify_container_with_progress(
         .any(|check| check.coverage == Coverage::Block && check.outcome.was_checked());
 
     Ok(session.report)
+}
+
+/// Recompute the AFF4-L v1.0-ALPHA §10.1 metadata integrity hash.
+///
+/// Reads `information.turtle.hashes`, recomputes each digest it records over
+/// the metadata segment's bytes, and pushes one check per algorithm. Silent
+/// when the container carries no such segment: its absence is a conformance
+/// question for `conformance` to report, not an integrity finding.
+///
+/// A segment that is present but unreadable, or whose digests cover nothing
+/// this build can compute, is reported as a declined check rather than passed
+/// over — an unchecked digest must never look like a checked one.
+fn verify_metadata_hash(container: &mut crate::container::Container, session: &mut Session) {
+    let recorded = match container.metadata_hash_bytes() {
+        Ok(Some(bytes)) => bytes,
+        // No segment: nothing to check, and nothing to report here.
+        Ok(None) => return,
+        Err(e) => {
+            session.report.notes.push(format!(
+                "the metadata integrity hash could not be read: {e}"
+            ));
+            return;
+        }
+    };
+
+    let metadata = match container.metadata_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            session.report.notes.push(format!(
+                "the metadata segment could not be re-read to check its integrity hash: {e}"
+            ));
+            return;
+        }
+    };
+
+    let Ok(text) = std::str::from_utf8(&recorded) else {
+        session
+            .report
+            .notes
+            .push("the metadata integrity hash segment is not valid UTF-8".to_owned());
+        return;
+    };
+
+    let locus = Locus::new(session.report.source_path.clone())
+        .segment(crate::container::METADATA_HASH_SEGMENT);
+    let graph = match Graph::parse(text.as_bytes(), &locus) {
+        Ok(g) => g,
+        Err(e) => {
+            session.report.notes.push(format!(
+                "the metadata integrity hash segment could not be parsed: {e}"
+            ));
+            return;
+        }
+    };
+
+    let role = ObjectRole::Other(crate::container::METADATA_SEGMENT.to_owned());
+
+    for subject in graph.subjects() {
+        // A subject that is not a well-formed ARN is skipped rather than
+        // guessed at; `conformance` is where a malformed one is reported.
+        let Ok(arn) = Arn::parse(subject, &locus) else {
+            continue;
+        };
+        for statement in graph.statements_for(subject) {
+            let local = statement
+                .predicate
+                .rsplit_once(['#', '/'])
+                .map_or(&*statement.predicate, |(_, name)| name);
+            if local != "hash" {
+                continue;
+            }
+            let crate::rdf::Value::Literal { lexical, datatype } = &statement.object else {
+                continue;
+            };
+            let Some(datatype) = datatype else { continue };
+
+            let stored = StoredHash {
+                algorithm: HashAlgorithm::from_datatype(datatype),
+                hex: lexical.clone(),
+                predicate: "hash".to_owned(),
+            };
+
+            match digest_of(&stored.algorithm, &metadata) {
+                Some(computed) => session.push(HashCheck::compared(
+                    &arn,
+                    role.clone(),
+                    &stored,
+                    Coverage::Segment,
+                    &computed,
+                )),
+                None => session.push(HashCheck::declined(
+                    &arn,
+                    role.clone(),
+                    &stored,
+                    Coverage::Segment,
+                    format!("{} is unavailable in this build", stored.algorithm.name()),
+                )),
+            }
+        }
+    }
 }
 
 /// Prepare a whole-image digest to ride the stream passes, if one can.

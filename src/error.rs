@@ -547,6 +547,19 @@ pub enum DeviationKind {
     /// consumer, and one that does not apply the same leniency sees a term it
     /// does not recognize.
     WrongTermNamespace,
+    /// A v2.1 container carries no metadata integrity hash.
+    ///
+    /// AFF4-L v1.0-ALPHA §10.1 requires the digest of `information.turtle` be
+    /// stored beside it. Without it, a change to the metadata layer — where a
+    /// logical container keeps most of what it records — leaves no trace.
+    MissingMetadataHash,
+    /// The metadata integrity hash uses an algorithm weaker than the clause
+    /// allows.
+    ///
+    /// AFF4-L v1.0-ALPHA §10.1 requires SHA-256, SHA-512, or stronger. A digest
+    /// under a broken algorithm can be forged to match altered metadata, which
+    /// is the exact assurance the segment exists to give.
+    WeakMetadataHash,
 }
 
 impl DeviationKind {
@@ -715,6 +728,8 @@ impl std::fmt::Display for DeviationKind {
             Self::MalformedRawName => "raw name is not valid base64",
             Self::ContradictoryRawName => "raw and display names disagree",
             Self::LowercaseNameEscape => "name escape uses lowercase hexadecimal",
+            Self::MissingMetadataHash => "no metadata integrity hash recorded",
+            Self::WeakMetadataHash => "metadata integrity hash is weaker than required",
             Self::WrongTermNamespace => "lexicon term written under the wrong namespace",
         };
         f.write_str(s)

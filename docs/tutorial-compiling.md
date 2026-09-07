@@ -15,7 +15,7 @@ Install from [rustup.rs](https://rustup.rs) if the command is missing. On
 Linux, a distribution `rustc` is often too old — prefer rustup over the
 package manager.
 
-You also need your platform's linker and SDK to produce a binary.
+You also need a working C compiler and your platform's linker and SDK to produce a binary.
 
 - For **macOS** — the Xcode Command Line Tools. Run `xcode-select --install` once, or
   check with `xcode-select -p`. The full Xcode app is not required.

@@ -373,6 +373,39 @@ fn is_pname_local(local: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Serialize the AFF4-L v1.0-ALPHA §10.1 metadata integrity hash segment.
+///
+/// The subject is the metadata segment's own resource name: the volume ARN with
+/// the segment name appended, which is how that clause's example names it. One
+/// `aff4:hash` triple per algorithm.
+///
+/// An algorithm this build cannot compute contributes nothing rather than a
+/// placeholder: an absent digest is honest, a fabricated one is evidence of a
+/// check that never happened.
+#[must_use]
+pub fn metadata_hash_segment(
+    volume_arn: &str,
+    metadata: &[u8],
+    algorithms: &[crate::model::HashAlgorithm],
+) -> String {
+    let mut w = TurtleWriter::new();
+    w.set_volume(volume_arn);
+
+    let subject = format!("{volume_arn}/{}", crate::container::METADATA_SEGMENT);
+    let predicate = format!("{AFF4_NS}hash");
+
+    for digest in crate::hash::digests_of(metadata, algorithms) {
+        let datatype = format!("{AFF4_NS}{}", digest.algorithm().name());
+        w.add(
+            &subject,
+            &predicate,
+            TurtleTerm::typed(digest.hex(), datatype),
+        );
+    }
+
+    w.serialize()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

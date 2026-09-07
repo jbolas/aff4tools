@@ -31,6 +31,18 @@ hdt-experiment = ["dep:hdt"]
 
 [dependencies]
 blake2 = "0.10"
+# BLAKE3. Named by no AFF4 document; written as aff4:BLAKE3 in the base
+# namespace, following v1.0a's own precedent of carrying aff4:blake2b there.
+#
+# Licensed CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception. Any of the
+# three suits this project; cargo-deny elects the LLVM-exception option, which
+# the allow list already carries. No NOTICE entry is needed: that file lists
+# only crates offering no MIT-or-equivalent option, and CC0 is public domain.
+#
+# Brings arrayvec (MIT OR Apache-2.0) and constant_time_eq (CC0-1.0 OR MIT-0 OR
+# Apache-2.0), and compiles blake3_neon.c on aarch64, so a C compiler is already
+# a build requirement here.
+blake3 = "1.5"
 clap = { version = "4.6", features = ["derive"] }
 crc32fast = "1.5"
 # OS randomness for volume UUIDs. Already in the tree via `rand`.
@@ -47,6 +59,10 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
+# SHA-3 and SHAKE, for AFF4-L v1.0-ALPHA §4.4. Pinned to 0.10 so it shares the
+# `digest` 0.10 traits the rest of the tree already uses; 0.12 would pull in a
+# second copy of `digest`. Licensed MIT OR Apache-2.0.
+sha3 = "0.10"
 snap = "1.1.2"
 # Derives std::error::Error for the crate's typed Error enum.
 thiserror = "2"
@@ -81,6 +97,9 @@ zip = { version = "8.6", default-features = false, features = [
 [dev-dependencies]
 # Runs the built binary as a subprocess to assert exit codes and output.
 assert_cmd = "2"
+# An independent digest path for tests that must not trust the library's own
+# answer — e.g. recomputing the metadata integrity hash from stored bytes.
+sha2 = "0.10"
 oxttl = "0.2"
 # Composable output assertions, pairs with assert_cmd.
 predicates = "3"

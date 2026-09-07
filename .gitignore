@@ -7,4 +7,5 @@ docs/working/
 docs/superpowers/
 utilities/language-review/
 utilities/capture-conformance-baseline.sh
+utilities/hash-speed.sh
 CLAUDE.md

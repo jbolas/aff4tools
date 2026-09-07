@@ -207,7 +207,7 @@ fn scanned_and_inline_acquisitions_agree() {
     acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &LogicalOptions::default(),
         &Locus::new(&inline_out),
         &mut noop,
     )
@@ -223,7 +223,7 @@ fn scanned_and_inline_acquisitions_agree() {
     acquire_logical_scanned(
         &mut writer2,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &LogicalOptions::default(),
         &Locus::new(&scanned_out),
         &mut noop2,
     )
@@ -268,7 +268,7 @@ fn the_callback_sees_the_scan_complete() {
         acquire_logical_scanned(
             &mut writer,
             std::slice::from_ref(&tree),
-            LogicalOptions::default(),
+            &LogicalOptions::default(),
             &Locus::new(&out),
             &mut observe,
         )
@@ -310,7 +310,7 @@ fn a_complete_scanned_acquisition_skips_nothing() {
     let acquired = acquire_logical_scanned(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &LogicalOptions::default(),
         &Locus::new(&out),
         &mut noop,
     )
@@ -357,7 +357,7 @@ fn a_scanned_acquisition_handles_several_roots() {
     let acquired = acquire_logical_scanned(
         &mut writer,
         &roots,
-        LogicalOptions::default(),
+        &LogicalOptions::default(),
         &Locus::new(&out),
         &mut noop,
     )
@@ -412,7 +412,7 @@ fn discovery_overlaps_acquisition() {
         acquire_logical_scanned(
             &mut writer,
             std::slice::from_ref(&tree),
-            LogicalOptions::default(),
+            &LogicalOptions::default(),
             &Locus::new(&out),
             &mut observe,
         )

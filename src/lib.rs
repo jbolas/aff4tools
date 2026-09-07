@@ -41,6 +41,7 @@ pub mod container;
 pub mod error;
 pub mod export;
 pub mod hash;
+pub mod hash_selection;
 pub mod image;
 pub mod lexicon;
 pub mod map;

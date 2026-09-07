@@ -88,12 +88,15 @@ mod tests {
         );
     }
 
-    /// Every rule of the new standard is currently unevaluated, and most are
-    /// binding, so a v2.1 container cannot be shown to conform.
+    /// Much of the new standard is still unevaluated, and enough of it is
+    /// binding that a v2.1 container cannot yet be shown to conform.
+    ///
+    /// The bound falls as phases land; it is a floor, not a target. Lowering it
+    /// is the deliberate act of recording that a phase closed some gaps.
     #[test]
-    fn a_v2_1_container_is_almost_entirely_unevaluated() {
+    fn a_v2_1_container_is_largely_unevaluated() {
         let coverage = Coverage::for_generation(Generation::Aff4L10);
-        assert!(coverage.unevaluated().count() >= 26);
+        assert!(coverage.unevaluated().count() >= 20);
         assert!(
             coverage.has_unevaluated_must(),
             "unevaluated MUST requirements cause --strict to fail on a v2.1 container"

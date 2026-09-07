@@ -25,6 +25,7 @@
 use std::io::Write as _;
 use std::path::Path;
 
+use aff4tools::HashAlgorithm;
 use aff4tools::verify::{VerifyOptions, verify_container};
 use aff4tools::write::container_writer::ContainerWriter;
 use aff4tools::write::guard::SourceRegistry;
@@ -60,6 +61,11 @@ fn acquire_deduped(dir: &Path, tree: &Path) -> std::path::PathBuf {
 
     let options = LogicalOptions {
         deduplicate: true,
+        // Pinned rather than left to the default, because this helper's callers
+        // assert on specific digests. A test that followed the default would
+        // start failing the next time the default moves, without anything
+        // having gone wrong.
+        algorithms: vec![HashAlgorithm::Md5, HashAlgorithm::Sha1],
         ..LogicalOptions::default()
     };
 
@@ -68,7 +74,7 @@ fn acquire_deduped(dir: &Path, tree: &Path) -> std::path::PathBuf {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree.to_path_buf()),
-        options,
+        &options,
         &locus,
         &mut noop,
     )
@@ -109,7 +115,7 @@ fn identical_files_are_stored_only_once() {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions {
+        &LogicalOptions {
             deduplicate: true,
             ..LogicalOptions::default()
         },
@@ -411,7 +417,7 @@ fn deduplication_is_off_by_default() {
     let acquired = acquire_logical(
         &mut writer,
         std::slice::from_ref(&tree),
-        LogicalOptions::default(),
+        &LogicalOptions::default(),
         &locus,
         &mut noop,
     )
