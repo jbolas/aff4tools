@@ -38,6 +38,7 @@
 pub mod arn;
 pub mod codec;
 pub mod container;
+pub mod cpu;
 pub mod error;
 pub mod export;
 pub mod hash;

@@ -20,7 +20,25 @@ repository.workspace = true
 readme = "README.md"
 
 [features]
+default = ["hash-asm"]
 corpus = []
+
+# Compiles the hardware SHA-2 paths, by enabling `sha2`'s `asm` feature.
+#
+# A default, so an ordinary build reaches the CPU's hash instructions.
+# `--no-default-features` gives a build with no C-compiler requirement, which is
+# the escape hatch for a constrained build host.
+#
+# **The effect is not uniform.** On aarch64 this is the only route to the
+# hardware path. On x86 the SHA-NI path compiles in regardless, and this only
+# upgrades the software fallback for CPUs predating it. Detection is at runtime
+# with a software fallback either way, so the binary stays correct on any CPU
+# and the recorded digests never change.
+#
+# Named as this crate's own feature rather than reaching `sha2/asm` at the use
+# site because `cfg!` can read a feature of this crate but not of a dependency,
+# and `crate::cpu` needs to state what was compiled in.
+hash-asm = ["sha2/asm"]
 
 # An Header, Dictionary, Triples measurement harness.
 # Off by default and deliberately inert — enabling it adds one `examples/`
@@ -45,6 +63,10 @@ blake2 = "0.10"
 blake3 = "1.5"
 clap = { version = "4.6", features = ["derive"] }
 crc32fast = "1.5"
+# Runtime CPU feature detection, so `crate::cpu` can report whether this machine
+# has the hash instructions. Already in the tree via `sha2`; declared here
+# because this crate calls it directly.
+cpufeatures = "0.2"
 # OS randomness for volume UUIDs. Already in the tree via `rand`.
 getrandom = "0.3"
 flate2 = "1.1.9"
