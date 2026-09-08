@@ -2979,6 +2979,7 @@ fn run_acquire(
             // `run_acquire_split` has already stamped `Acquisition Complete:`;
             // this closes the run.
             Ok(code) => {
+                report_missed_acceleration(out);
                 stamp_completed(out);
                 code
             }
@@ -3088,7 +3089,7 @@ fn run_acquire(
             let _ = e;
         }
     }
-
+    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
@@ -3216,6 +3217,7 @@ fn run_acquire_from_aff4(
             // `run_acquire_split` has already stamped `Acquisition Complete:`;
             // this closes the run. A write failure gets no completion line.
             Ok(code) => {
+                report_missed_acceleration(out);
                 stamp_completed(out);
                 code
             }
@@ -3315,7 +3317,7 @@ fn run_acquire_from_aff4(
             let _ = e;
         }
     }
-
+    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
@@ -3717,7 +3719,7 @@ fn run_acquire_logical(
             let _ = writeln!(out, "Conformance: could not summarize the container");
         }
     }
-
+    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
@@ -3814,6 +3816,27 @@ fn now_rfc3339_utc() -> String {
 /// elapsed time was spent on the source medium.
 fn stamp_acquisition_complete(out: &mut impl Write) {
     let _ = writeln!(out, "Acquisition Complete: {}", now_rfc3339_utc());
+}
+
+/// Tell the examiner when the machine could hash faster than this build can.
+///
+/// Printed only in that one case. A line on every acquisition would be noise
+/// that trains people to skip it, and there is nothing to act on when the
+/// hardware path is already in use or the CPU does not have the instructions.
+/// An undetectable CPU reports nothing either: unknown is not evidence of
+/// absence — see [`aff4tools::cpu`].
+///
+/// The cost this names is real. On Apple silicon the hardware path recomputes a
+/// container's SHA-256 roughly three times faster, which on a multi-terabyte
+/// source is hours.
+fn report_missed_acceleration(out: &mut impl Write) {
+    if aff4tools::cpu::hash_acceleration().is_opportunity_missed() {
+        let _ = writeln!(
+            out,
+            "Note:        this CPU has hash acceleration this build does not \
+             use; rebuild with default features to acquire faster"
+        );
+    }
 }
 
 /// Close the run. Written once, after verification has had its chance.
@@ -3997,6 +4020,7 @@ fn run_acquire_device(
             }
             worst = worst.max(EXIT_STRICT_DEVIATION);
         }
+        report_missed_acceleration(out);
         stamp_completed(out);
 
         // `code` carries any floor the verification pass contributed; `worst`
@@ -4131,7 +4155,7 @@ fn run_acquire_device(
         written.size,
         verify_written_container,
     ));
-
+    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
