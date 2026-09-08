@@ -497,8 +497,8 @@ mod tests {
             .collect();
         assert_eq!(
             alpha.len(),
-            38,
-            "the standard states 36 normative requirements; {} are declared",
+            48,
+            "every normative statement in the standard needs a declaration; {} are declared",
             alpha.len()
         );
     }
@@ -528,16 +528,17 @@ mod tests {
         }
     }
 
-    /// The identity and naming rules of the new standard are implemented; the
-    /// rest are still coverage gaps. Naming them here means a later phase
-    /// cannot quietly claim a rule it has not written.
+    /// Which rules of the new standard have checkers. The rest are still
+    /// coverage gaps. Naming them here means a later phase cannot quietly
+    /// claim a rule it has not written.
     ///
     /// Phase 3 moved the four identity rules of AFF4-L v1.0-ALPHA (§1.1, §1.2
     /// and AFF4-L v1.0-ALPHA §2); Phase 4 moved that standard's five §5 name-normalization
     /// rules; Phase 6 moved its two AFF4-L v1.0-ALPHA §10.1 metadata-integrity
-    /// rules.
+    /// rules. Phase 8 added no checker: AFF4-L v1.0-ALPHA §4.2 and §4.3 state
+    /// no requirement to check, only a vocabulary to draw on.
     #[test]
-    fn only_the_identity_and_naming_rules_of_the_alpha_standard_are_checked() {
+    fn the_checked_rules_of_the_alpha_standard_are_these() {
         let detected: Vec<String> = all_rules()
             .iter()
             .filter(|rule| {

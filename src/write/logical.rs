@@ -73,6 +73,23 @@ pub mod terms {
     pub const LOGICAL_ACQUISITION_TASK: &str = "LogicalAcquisitionTask";
     /// Points to a Folder or `FileImage` forming an acquisition root.
     pub const FILESYSTEM_ROOT: &str = "filesystemRoot";
+    /// The Unix file mode: file type and permission bits, as an integer.
+    ///
+    /// AFF4-L v1.0-ALPHA §4.3 only, so it is written for `--aff4l-v1.0` and
+    /// withheld for `--aff4l-legacy`: the AFF4-L 2019 paper does not define
+    /// it.
+    pub const FILE_MODE: &str = "fileMode";
+    /// The separator the recorded paths of this acquisition use.
+    ///
+    /// AFF4-L v1.0-ALPHA §4.3 only, on the acquisition task, so it is written
+    /// for `--aff4l-v1.0` and withheld for `--aff4l-legacy`: the AFF4-L 2019
+    /// paper does not define it.
+    ///
+    /// It describes the paths this acquisition recorded rather than the
+    /// container format, so the value is the acquiring platform's separator.
+    /// That standard defines no `child` edge, which makes this the property a
+    /// consumer splits `originalPathName` on to recover the acquired tree.
+    pub const PATH_SEPARATOR: &str = "pathSeparator";
     /// Marks content stored directly as a ZIP segment (AFF4-L 2019 §3.8).
     pub const ZIP_SEGMENT: &str = "zip_segment";
 
@@ -372,15 +389,19 @@ pub fn recorded_names(path: &Path) -> Option<(RecordedName, RecordedName)> {
     Some((RecordedName::of(&bytes), RecordedName::of(tail)))
 }
 
-/// Timestamps captured for one filesystem entry (Table 3).
+/// What one `stat` of a filesystem entry yielded.
 ///
 /// Every field is optional because platforms differ: Windows has no
-/// `recordChanged`, and Linux needs `statx` for `birthTime`. An absent
-/// timestamp is recorded as absent rather than substituted — pyaff4 fills
+/// `recordChanged` or file mode, and Linux needs `statx` for `birthTime`. An
+/// absent value is recorded as absent rather than substituted — pyaff4 fills
 /// Windows `birthTime` from `st_ctime`, which is creation time only by
 /// accident of the CRT.
+///
+/// The mode travels with the timestamps because it comes from the same call,
+/// and passing them separately would let a caller pair one entry's mode with
+/// another's times.
 #[derive(Debug, Default, Clone)]
-pub struct FsTimestamps {
+pub struct FsMetadata {
     /// `aff4:birthTime`.
     pub birth: Option<String>,
     /// `aff4:lastWritten`.
@@ -389,15 +410,40 @@ pub struct FsTimestamps {
     pub accessed: Option<String>,
     /// `aff4:recordChanged`.
     pub changed: Option<String>,
+    /// `aff4:fileMode` — the Unix file mode, absent off Unix.
+    pub mode: Option<u32>,
 }
 
-/// Read the timestamps a platform can supply for `metadata`.
+/// The Unix file mode, where the platform has one.
+///
+/// AFF4-L v1.0-ALPHA §4.3 defines `fileMode` as the Unix file mode as an
+/// integer. That is the whole mode, type bits included, not the permission
+/// bits alone: narrowing it would silently change what the property records.
+///
+/// [`None`] off Unix. A mode is a Unix concept, and synthesizing one from
+/// Windows attributes would assert something the filesystem never said — the
+/// same reasoning that keeps `birthTime` absent rather than guessed.
+#[must_use]
+pub fn file_mode_of(metadata: &std::fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(metadata.mode())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+/// Read what a platform can supply from one `stat`.
 ///
 /// Rendered as RFC 3339 in **UTC**, unlike pyaff4's host-local rendering: the
 /// same file acquired in two timezones must yield the same literal, or two
 /// containers of one file disagree for no reason.
 #[must_use]
-pub fn timestamps_of(metadata: &std::fs::Metadata) -> FsTimestamps {
+pub fn metadata_of(metadata: &std::fs::Metadata) -> FsMetadata {
     use std::time::SystemTime;
 
     fn render(time: std::io::Result<SystemTime>) -> Option<String> {
@@ -406,11 +452,12 @@ pub fn timestamps_of(metadata: &std::fs::Metadata) -> FsTimestamps {
         Some(format_rfc3339_utc(secs))
     }
 
-    let mut stamps = FsTimestamps {
+    let mut stamps = FsMetadata {
         birth: render(metadata.created()),
         written: render(metadata.modified()),
         accessed: render(metadata.accessed()),
         changed: None,
+        mode: file_mode_of(metadata),
     };
 
     // `recordChanged` is POSIX ctime, which `std` does not expose. On Unix the
@@ -562,6 +609,68 @@ impl LogicalProfile {
     }
 }
 
+/// The separator the acquiring platform's paths use.
+///
+/// Written as AFF4-L v1.0-ALPHA §4.3's `pathSeparator`. It describes the paths
+/// this acquisition recorded, not the container format, so it is the *host's*
+/// separator rather than a constant of the standard.
+const fn host_path_separator() -> &'static str {
+    if cfg!(windows) { "\\" } else { "/" }
+}
+
+/// Open the acquisition-task subject and write the properties that do not
+/// depend on what was acquired.
+///
+/// # Why this is a function
+///
+/// Three entry points build this subject — [`acquire_logical`],
+/// [`acquire_logical_scanned`] and [`acquire_logical_prescanned`] — and each
+/// previously wrote its type inline. A property added to one and forgotten in
+/// the others would mean two acquisition modes producing containers the third
+/// does not match, with nothing to catch it: the modes differ in how they
+/// *discover* files, which is no reason for their metadata to differ.
+///
+/// `filesystemRoot` stays at the call sites, because it names what that
+/// acquisition actually reached and is only knowable once the walk is done.
+fn open_acquisition_task(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    task_arn: &str,
+    profile: LogicalProfile,
+) {
+    use crate::write::turtle::{TurtleTerm, XSD_STRING};
+
+    let lexicon = crate::lexicon::STANDARD;
+    writer
+        .graph_mut()
+        .add_type(task_arn, &lexicon.iri(terms::LOGICAL_ACQUISITION_TASK));
+
+    // AFF4-L v1.0-ALPHA §4.3 defines this; the AFF4-L 2019 paper does not, so
+    // legacy output must not gain it.
+    if profile.is_v1_alpha() {
+        writer.graph_mut().add(
+            task_arn,
+            &v1_alpha_iri(terms::PATH_SEPARATOR),
+            TurtleTerm::typed(host_path_separator(), XSD_STRING),
+        );
+    }
+}
+
+/// The IRI of a term as AFF4-L v1.0-ALPHA assigns it.
+///
+/// A term this standard introduces belongs to its own namespace; one it
+/// restates from an earlier document keeps the namespace that document gave
+/// it. [`crate::lexicon::namespace_for`] holds that table, and this is the
+/// writer's way in.
+///
+/// **The leniency runs one way only.** A reader may honor either namespace
+/// (AFF4-L v1.0-ALPHA §4.1), and `is_known_namespace` implements that. A
+/// writer may not choose, which is why this consults the table rather than
+/// formatting a fixed prefix the way `Lexicon::iri` does.
+fn v1_alpha_iri(local_name: &str) -> String {
+    let namespace = crate::lexicon::namespace_for(crate::lexicon::Generation::Aff4L10, local_name);
+    format!("{namespace}{local_name}")
+}
+
 /// What deduplication achieved over one acquisition.
 #[derive(Debug, Clone, Copy)]
 pub struct DedupeSummary {
@@ -650,9 +759,7 @@ pub fn acquire_logical(
     // containers or survive a graph merge, and an acquisition task is exactly
     // the provenance an examiner may need to cite.
     let task_arn = format!("{volume_arn}/acquisition");
-    writer
-        .graph_mut()
-        .add_type(&task_arn, &lexicon.iri(terms::LOGICAL_ACQUISITION_TASK));
+    open_acquisition_task(writer, &task_arn, options.profile);
 
     for root in roots {
         // Discovery first, writing second. The item list is the same protocol
@@ -776,9 +883,7 @@ pub fn acquire_logical_scanned(
         .then(|| crate::write::dedupe::ChunkPool::new(options.stream.chunk_size));
 
     let task_arn = format!("{volume_arn}/acquisition");
-    writer
-        .graph_mut()
-        .add_type(&task_arn, &lexicon.iri(terms::LOGICAL_ACQUISITION_TASK));
+    open_acquisition_task(writer, &task_arn, options.profile);
 
     let scanner =
         crate::write::scan::spawn(roots.to_vec(), crate::write::scan::SCAN_QUEUE_CAPACITY);
@@ -867,9 +972,7 @@ pub fn acquire_logical_prescanned(
         .then(|| crate::write::dedupe::ChunkPool::new(options.stream.chunk_size));
 
     let task_arn = format!("{volume_arn}/acquisition");
-    writer
-        .graph_mut()
-        .add_type(&task_arn, &lexicon.iri(terms::LOGICAL_ACQUISITION_TASK));
+    open_acquisition_task(writer, &task_arn, options.profile);
 
     let acquired_roots = acquire_from_items(
         writer,
@@ -1069,11 +1172,11 @@ fn acquire_from_items(
                 let names = recorded_names(&path);
                 let arn = arn_for_entry(volume_arn, &display, options.profile, writer.path())?;
                 let stamps = match std::fs::symlink_metadata(&path) {
-                    Ok(m) => timestamps_of(&m),
+                    Ok(m) => metadata_of(&m),
                     // The directory was enumerated a moment ago; if its
                     // metadata has since become unreadable the entry is still
                     // recorded, without timestamps rather than not at all.
-                    Err(_) => FsTimestamps::default(),
+                    Err(_) => FsMetadata::default(),
                 };
                 write_table_3(
                     writer,
@@ -1206,11 +1309,11 @@ fn record_file(
     let lexicon = crate::lexicon::STANDARD;
 
     let stamps = match std::fs::symlink_metadata(path) {
-        Ok(m) => timestamps_of(&m),
+        Ok(m) => metadata_of(&m),
         // The file was enumerated a moment ago. If its metadata has since
         // become unreadable it is still recorded, without timestamps rather
         // than not at all; the content read below reports its own failure.
-        Err(_) => FsTimestamps::default(),
+        Err(_) => FsMetadata::default(),
     };
 
     // A large file's bytes go through `write_image_stream_as`, which emits
@@ -1525,12 +1628,14 @@ fn write_table_3(
     writer: &mut crate::write::container_writer::ContainerWriter,
     arn: &str,
     entry: &EntryNames<'_>,
-    stamps: &FsTimestamps,
+    stamps: &FsMetadata,
     volume_arn: &str,
     profile: LogicalProfile,
     record_stored: bool,
 ) {
-    use crate::write::turtle::{TurtleTerm, XSD_BASE64_BINARY, XSD_DATE_TIME, XSD_STRING};
+    use crate::write::turtle::{
+        TurtleTerm, XSD_BASE64_BINARY, XSD_DATE_TIME, XSD_LONG, XSD_STRING,
+    };
 
     let EntryNames { display, names } = entry;
     let display = *display;
@@ -1599,6 +1704,18 @@ fn write_table_3(
                 TurtleTerm::typed(value, XSD_DATE_TIME),
             );
         }
+    }
+    // AFF4-L v1.0-ALPHA §4.3's file mode. That standard supplies the term and
+    // the AFF4-L 2019 paper does not, so legacy output must not gain it.
+    // Absent off Unix, where there is no mode to record.
+    if profile.is_v1_alpha()
+        && let Some(mode) = stamps.mode
+    {
+        graph.add(
+            arn,
+            &lexicon.iri(terms::FILE_MODE),
+            TurtleTerm::typed(mode.to_string(), XSD_LONG),
+        );
     }
     if record_stored {
         graph.add(

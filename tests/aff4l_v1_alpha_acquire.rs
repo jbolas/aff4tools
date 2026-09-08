@@ -666,3 +666,104 @@ fn child_edges_are_written_for_legacy_and_withheld_for_v1_alpha() {
         "the acquisition root is still named:\n{alpha_body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 8: AFF4-L v1.0-ALPHA §4.2 and §4.3, the lexicon this standard supplies.
+// ---------------------------------------------------------------------------
+
+/// The acquisition task records how its paths are separated.
+///
+/// AFF4-L v1.0-ALPHA §4.3 supplies `pathSeparator` on the acquisition task,
+/// and this standard defines no `child` edge — so the separator is what a
+/// consumer splits `originalPathName` on to recover the acquired tree. Written
+/// only for v2.1: the AFF4-L 2019 paper does not define it.
+#[test]
+fn the_path_separator_is_written_for_v1_alpha_and_withheld_for_legacy() {
+    let (_src, root) = source_tree();
+
+    let (_alpha_out, alpha) = acquire(&root, &["--aff4l-v1.0"]);
+    let alpha_body = turtle(&alpha);
+    assert!(
+        alpha_body.contains("pathSeparator"),
+        "AFF4-L v1.0-ALPHA §4.3 supplies the property:\n{alpha_body}"
+    );
+
+    let (_legacy_out, legacy) = acquire(&root, &["--aff4l-legacy"]);
+    let legacy_body = turtle(&legacy);
+    assert!(
+        !legacy_body.contains("pathSeparator"),
+        "the AFF4-L 2019 paper does not define it:\n{legacy_body}"
+    );
+}
+
+/// The separator is written under the namespace its own standard assigns it.
+///
+/// AFF4-L v1.0-ALPHA §4.1 requires a writer use the namespace of whichever
+/// document defines a term. `pathSeparator` is introduced by that standard, so
+/// it takes the second namespace — and it is the first term aff4tools writes
+/// that does. A term restated from an earlier document keeps that document's
+/// namespace, which is why the naming properties beside it stay `aff4:`.
+#[test]
+fn the_path_separator_uses_the_namespace_its_standard_assigns() {
+    let (_src, root) = source_tree();
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+    let body = turtle(&container);
+
+    assert!(
+        body.contains("@prefix aff4l: <http://aff4.org/Schema/2022/#> ."),
+        "the prefix is bound because a term now uses it:\n{body}"
+    );
+    assert!(
+        body.contains("aff4l:pathSeparator"),
+        "the term this standard introduces takes its namespace:\n{body}"
+    );
+    assert!(
+        !body.contains("aff4:pathSeparator"),
+        "and not the base one:\n{body}"
+    );
+    // A term the earlier document defined keeps the namespace it had, so the
+    // move is per-term rather than wholesale.
+    assert!(
+        body.contains("aff4:originalPathName"),
+        "restated terms stay in the base namespace:\n{body}"
+    );
+}
+
+/// Acquired files and folders record their Unix file mode.
+///
+/// AFF4-L v1.0-ALPHA §4.3 supplies `fileMode` as the Unix mode as an integer.
+/// The whole mode, type bits included: the value below is `0o100640`, which is
+/// a regular file with 0640 permissions, and asserting the exact number is
+/// what would catch a writer recording the permission bits alone.
+#[test]
+#[cfg(unix)]
+fn the_file_mode_is_written_for_v1_alpha_and_withheld_for_legacy() {
+    let source = tempfile::tempdir().expect("tempdir");
+    let root = source.path().join("tree");
+    std::fs::create_dir(&root).expect("mkdir");
+    let file = root.join("a.txt");
+    std::fs::write(&file, b"evidence").expect("write");
+    std::fs::set_permissions(
+        &file,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o640),
+    )
+    .expect("chmod");
+
+    let (_alpha_out, alpha) = acquire(&root, &["--aff4l-v1.0"]);
+    let alpha_body = turtle(&alpha);
+    assert!(
+        alpha_body.contains("aff4:fileMode"),
+        "AFF4-L v1.0-ALPHA §4.3 supplies the property:\n{alpha_body}"
+    );
+    assert!(
+        alpha_body.contains(&format!("\"{}\"^^xsd:long", 0o100_640)),
+        "the whole mode is recorded, not the permission bits alone:\n{alpha_body}"
+    );
+
+    let (_legacy_out, legacy) = acquire(&root, &["--aff4l-legacy"]);
+    let legacy_body = turtle(&legacy);
+    assert!(
+        !legacy_body.contains("fileMode"),
+        "the AFF4-L 2019 paper does not define it:\n{legacy_body}"
+    );
+}

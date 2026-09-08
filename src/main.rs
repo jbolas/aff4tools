@@ -3340,7 +3340,7 @@ names for this format; writing {}",
             if summary.deviations.is_empty() {
                 // Named from the container's own generation, not a constant:
                 // what aff4tools wrote decides which document governs it.
-                let (spec, _) = summary.generation.governing_spec();
+                let spec = acquisition_spec(summary.generation);
                 let _ = writeln!(out, "Conformance: no deviations from {spec}");
             } else {
                 let _ = writeln!(
@@ -3593,7 +3593,7 @@ fn run_acquire_from_aff4(
             if summary.deviations.is_empty() {
                 // Named from the container's own generation, not a constant:
                 // what aff4tools wrote decides which document governs it.
-                let (spec, _) = summary.generation.governing_spec();
+                let spec = acquisition_spec(summary.generation);
                 let _ = writeln!(out, "Conformance: no deviations from {spec}");
             } else {
                 let _ = writeln!(
@@ -4009,7 +4009,7 @@ fn run_acquire_logical(
             if summary.deviations.is_empty() {
                 // Named from the container's own generation, not a constant:
                 // what aff4tools wrote decides which document governs it.
-                let (spec, _) = summary.generation.governing_spec();
+                let spec = acquisition_spec(summary.generation);
                 let _ = writeln!(out, "Conformance: no deviations from {spec}");
             } else {
                 let _ = writeln!(
@@ -4113,6 +4113,26 @@ fn now_rfc3339_utc() -> String {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     )
+}
+
+/// The one document an acquisition summary names.
+///
+/// A generation may be governed by two documents, and `conformance` names both
+/// because it reports against both. The acquisition summary is one line and
+/// has room for one, so it names the document that decided the *shape of what
+/// was just written*: the logical standard for a logical acquisition, the base
+/// standard for a physical one.
+///
+/// That is exactly what [`Generation::governing_spec`]'s second element holds
+/// where it is present — the delta document layered over v1.0a — so the choice
+/// needs no separate table. A physical acquisition has no second document and
+/// falls through to the base.
+///
+/// The full picture stays one command away, and the summary already points at
+/// it whenever there is anything to see.
+fn acquisition_spec(generation: aff4tools::lexicon::Generation) -> aff4tools::rules::Document {
+    let (base, logical) = generation.governing_spec();
+    logical.unwrap_or(base)
 }
 
 /// Close the acquisition proper: everything before this concerns reading the

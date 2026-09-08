@@ -13,6 +13,28 @@ use crate::rules::{Document, RuleInfo};
 
 /// Rules from the AFF4 Standard v1.0a.
 pub(super) const AFF4_V1_0A: &[RuleInfo] = &[
+    // Deliberately says nothing about *which* version the file declares.
+    // The declared version is what selects the governing document, and so
+    // what selects this rule set — checking the value here would assert as a
+    // finding the very premise the check was chosen from. AFF4-L
+    // v1.0-ALPHA §3's `major=2 minor=1` is covered by this rule for the same
+    // reason: it is the same requirement, stated by whichever document
+    // governs.
+    //
+    // `Honored` rather than `Detected` because every way of breaking it is
+    // already refused before conformance runs. A container with no
+    // `version.txt` is the pre-standard generation, recognized and declined;
+    // one whose file omits `major` or `minor` is `Error::Malformed`, exit 5.
+    // A `Detected` rule here would carry a deviation kind that no input could
+    // ever raise.
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§1.1", 1),
+        requirement: Must,
+        state: Honored,
+        statement: "A container declares its format version in a version.txt segment at its root, giving a major and a minor number.",
+        kind: None,
+        routine: false,
+    },
     declare_rule! {
         id: (Document::Aff4Standard10a, "§2.2", 1),
         requirement: Should,
@@ -213,6 +235,102 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
         kind: None,
         routine: false,
     },
+    // AFF4-L v1.0-ALPHA §4.2 and §4.3 state no normative language at all.
+    //
+    // Read them closely before adding a MUST here. AFF4-L v1.0-ALPHA §4.1
+    // spells its requirement out — "Compliant implementations MUST use the
+    // correct namespace" — and the two clauses after it state nothing of the
+    // kind. They say the classes and properties "supplement those defined in
+    // AFF4 Standard v1.0" and then tabulate what each term means.
+    //
+    // So these clauses define a vocabulary; they do not require any object to
+    // carry any term. A rule asserting that a FileImage MUST record a
+    // timestamp would be this project inventing a requirement and then
+    // reporting containers for departing from it — the opposite of measuring a
+    // container against its document.
+    //
+    // What the terms are *for* is settled elsewhere and already checked:
+    // AFF4-L v1.0-ALPHA §1.1 carries the MUST that files record their name and
+    // path, and its rules are Detected.
+    //
+    // Each clause is therefore one rule at MAY, describing the vocabulary the
+    // writer draws on. `Honored` for the terms aff4tools writes today;
+    // `NotImplemented` for those it does not, so the gap stays visible.
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.2", 1),
+        requirement: May,
+        state: Honored,
+        statement: "A writer describes acquired files, folders and the acquisition itself with the classes this clause supplies.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.2", 2),
+        requirement: May,
+        state: NotImplemented,
+        statement: "A writer describes a file's non-primary data streams and extended attributes with the classes this clause supplies.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.3", 1),
+        requirement: May,
+        state: Honored,
+        statement: "A writer records an acquired object's filesystem timestamps and an acquisition's roots with the properties this clause supplies.",
+        kind: None,
+        routine: false,
+    },
+    // The clause gives `recordChanged` and `lastWritten` the same description,
+    // so what distinguishes them is not stated. aff4tools writes the AFF4-L
+    // 2019 paper's meanings — content modification and metadata modification —
+    // but a container written to the clause as it stands could carry either in
+    // either property, and nothing in the document decides which is right.
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.3", 2),
+        requirement: May,
+        state: NotCheckable,
+        statement: "Two of the timestamp properties carry the same description, so which moment each records cannot be judged from the document.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.3", 3),
+        requirement: May,
+        state: Honored,
+        statement: "A writer records the separator its acquisition's paths use, with the property this clause supplies.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.3", 4),
+        requirement: May,
+        state: Honored,
+        statement: "A writer records an acquired object's Unix file mode, with the property this clause supplies.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.3", 5),
+        requirement: May,
+        state: NotImplemented,
+        statement: "A writer references a file's alternate data streams and extended attributes with the properties this clause supplies.",
+        kind: None,
+        routine: false,
+    },
+    // The clause lists `name` and `value` twice, once for each substream
+    // class, with descriptions that differ in wording but not in what a writer
+    // would do. Whether that is one property used in two contexts or two
+    // distinct properties decides whether a reader may treat the term
+    // uniformly or must dispatch on the subject's type, and the document does
+    // not say.
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§4.3", 6),
+        requirement: May,
+        state: NotCheckable,
+        statement: "The naming and content properties of a substream appear twice under different contexts, so whether they are one term or two cannot be judged from the document.",
+        kind: None,
+        routine: false,
+    },
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§4.4", 1),
         requirement: May,
@@ -357,11 +475,43 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
         kind: None,
         routine: false,
     },
+    // A permission aff4tools takes up on both sides. The writer stores a
+    // logical file above the AFF4-L 2019 §3.3 threshold as one subject typed
+    // `FileImage, Image, ImageStream`, and the reader resolves that shape.
+    // Nothing a container carries could depart from a permission, so there is
+    // no deviation to raise.
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§6.4", 1),
+        requirement: May,
+        state: Honored,
+        statement: "A file image may additionally be typed as an image stream, storing its primary stream that way.",
+        kind: None,
+        routine: false,
+    },
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§7", 1),
         requirement: May,
         state: Honored,
         statement: "A container may signal its format by file extension, which is a hint and never decides how the container is read.",
+        kind: None,
+        routine: false,
+    },
+    // The clause calls the scheme "purely a hint" and requires conformance to
+    // the base standard instead, so a set named otherwise is not thereby
+    // non-conformant — hence SHOULD, not MUST.
+    //
+    // `NotImplemented`, not `Honored`: unlike the AFF4-L v1.0-ALPHA §7
+    // extension hint, this one *is* a property of what is on disk, so a
+    // checker could exist. It would have to judge the whole set, and a scan is
+    // handed one container at a time, with the sibling parts reached through
+    // the volume set rather than named by the finding. That is a real check
+    // with a real design question behind it, so it is reported as work not
+    // done rather than quietly claimed.
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§8", 1),
+        requirement: Should,
+        state: NotImplemented,
+        statement: "Parts of a multi-part container signal their membership by sharing one file name, the second and later parts carrying an ordinal suffix counting from one.",
         kind: None,
         routine: false,
     },
