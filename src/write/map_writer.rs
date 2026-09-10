@@ -24,6 +24,251 @@ use crate::write::turtle::{TurtleTerm, XSD_LONG};
 /// Bytes per map entry.
 const MAP_ENTRY_LEN: usize = 28;
 
+/// The digests AFF4 Standard v1.0a §6.2 defines over a map's own segments.
+///
+/// Returned by [`write_map_segments`] so a caller composing a block map hash
+/// has the four values without re-reading the segments it just wrote.
+///
+/// # What each covers
+///
+/// | Property | Over |
+/// |---|---|
+/// | `aff4:mapPointHash` | the `map` segment |
+/// | `aff4:mapIdxHash` | the `idx` segment |
+/// | `aff4:mapPathHash` | the `mapPath` segment |
+/// | `aff4:mapHash` | all three concatenated, in that order |
+///
+/// The property is named for a `point` segment the clause's table mentions,
+/// while the segment every implementation writes is named `map`. Verified
+/// against `Base-Linear.aff4`, whose recorded `mapPointHash` is the digest of
+/// its `map` segment.
+#[derive(Debug, Clone, Default)]
+pub struct MapDigests {
+    /// Raw digest of the `map` segment, recorded as `aff4:mapPointHash`.
+    pub point: Vec<u8>,
+    /// Raw digest of the `idx` segment, recorded as `aff4:mapIdxHash`.
+    pub idx: Vec<u8>,
+    /// Raw digest of the `mapPath` segment, recorded as `aff4:mapPathHash`.
+    pub path: Vec<u8>,
+}
+
+/// The algorithm AFF4 Standard v1.0a §6.2 requires for these digests.
+///
+/// The clause says implementations "WILL employ H={ SHA512 or SHA256 }".
+/// SHA-512 is chosen: it is what the reference corpus records, and matching the
+/// containers implementations were written against is worth more than matching
+/// a preference.
+///
+/// Deliberately **not** following `--hash`. These digests are inputs to a
+/// composition the standard defines, not a matter of examiner preference, and a
+/// map digested in BLAKE3 would satisfy no reader.
+const MAP_DIGEST_ALGORITHM: crate::model::HashAlgorithm = crate::model::HashAlgorithm::Sha512;
+
+/// Write a map's three segments and record the four digests over them.
+///
+/// **One function, so no path can write the segments without the digests.**
+/// They were written separately at three call sites and none of them recorded a
+/// digest, which `conformance` could not report because the AFF4 Standard
+/// v1.0a §6.2 rules were not in the registry at all.
+///
+/// `map_path` is empty for a single-volume acquisition. It is still written and
+/// still digested: a defined empty input is what lets `mapPathHash` exist,
+/// where an absent segment leaves it undefined — the state `broken-dedupe.aff4`
+/// is in.
+///
+/// # Errors
+///
+/// [`Error::Io`](crate::error::Error::Io) if a segment cannot be written.
+fn write_map_segments(
+    writer: &mut ContainerWriter,
+    base: &str,
+    map_arn: &str,
+    map_bytes: &[u8],
+    idx_bytes: &[u8],
+    map_path: &[u8],
+) -> Result<(MapDigests, Vec<(&'static str, String)>)> {
+    writer.add_stored_segment(&format!("{base}/{}", crate::map::MAP_SEGMENT), map_bytes)?;
+    writer.add_stored_segment(&format!("{base}/{}", crate::map::IDX_SEGMENT), idx_bytes)?;
+    writer.add_stored_segment(
+        &format!("{base}/{}", crate::map::MAP_PATH_SEGMENT),
+        map_path,
+    )?;
+
+    let digest = |bytes: &[u8]| {
+        crate::hash::digest_bytes_of(&MAP_DIGEST_ALGORITHM, bytes).unwrap_or_default()
+    };
+    let digests = MapDigests {
+        point: digest(map_bytes),
+        idx: digest(idx_bytes),
+        path: digest(map_path),
+    };
+
+    // `mapHash` covers the three segments concatenated, in the order the clause
+    // lists them: map, then idx, then mapPath. Confirmed against
+    // `Base-Linear.aff4`, whose recorded value this construction reproduces.
+    let mut whole = Vec::with_capacity(map_bytes.len() + idx_bytes.len() + map_path.len());
+    whole.extend_from_slice(map_bytes);
+    whole.extend_from_slice(idx_bytes);
+    whole.extend_from_slice(map_path);
+    let map_hash = digest(&whole);
+
+    let algorithm = MAP_DIGEST_ALGORITHM.name().to_owned();
+    let lexicon = crate::lexicon::STANDARD;
+    let mut recorded = Vec::with_capacity(4);
+    for (property, value) in [
+        ("mapPointHash", &digests.point),
+        ("mapIdxHash", &digests.idx),
+        ("mapPathHash", &digests.path),
+        ("mapHash", &map_hash),
+    ] {
+        let hex = hex_lower(value);
+        writer.graph_mut().add(
+            map_arn,
+            &lexicon.iri(property),
+            TurtleTerm::typed(hex.clone(), lexicon.iri(&algorithm)),
+        );
+        recorded.push((property, hex));
+    }
+
+    Ok((digests, recorded))
+}
+
+/// Record the block map digest on the image, and on the map.
+///
+/// AFF4 Standard v1.0a §6.2 puts it in two places with two spellings:
+///
+/// - **MUST** on the `aff4:Image`, as `aff4:hash` under a datatype naming the
+///   algorithm — `aff4:blockMapHashSHA512` or `aff4:blockMapHashSHA256`.
+/// - **MAY** on the `aff4:Map`, as `aff4:blockMapHash` typed `aff4:SHA512` or
+///   `aff4:SHA256`.
+///
+/// Both are written, with the same value. `Base-Linear.aff4` does the same, and
+/// writing both settles the placement question design decision D7 raised: AFF4-L
+/// v1.0-ALPHA §6.3.1 requires the digest on the map, while this clause requires
+/// it on the image, and a container carrying both satisfies each document
+/// without choosing between them.
+///
+/// **Nothing is written when the stream records no block hashes.** The digest
+/// composes them, so with none to compose there is no digest — and a value
+/// computed over an empty concatenation would look like a real one while
+/// attesting nothing.
+///
+/// When the image and the map are the same subject — the AFF4-L v1.0-ALPHA §6.3
+/// form a logical file takes — both properties land on it, which is what that
+/// clause's first example shows.
+fn write_block_map_digest(
+    writer: &mut ContainerWriter,
+    map_arn: &str,
+    image_arn: &str,
+    block_hashes: &[crate::write::stream_writer::BlockHashDigest],
+    map_digests: &MapDigests,
+) -> Option<String> {
+    if block_hashes.is_empty() {
+        return None;
+    }
+
+    // The `blockHashesHash` values, as bytes. These are the per-algorithm
+    // digests already recorded on the stream's BlockHashes objects, so this
+    // composes what the container states rather than recomputing it.
+    let composed: Vec<Vec<u8>> = block_hashes
+        .iter()
+        .map(|digest| hex_to_bytes(&digest.hex))
+        .collect();
+    let block_map = compose_block_map_digest(&composed, map_digests);
+    if block_map.is_empty() {
+        return None;
+    }
+    let hex = hex_lower(&block_map);
+
+    let lexicon = crate::lexicon::STANDARD;
+    let graph = writer.graph_mut();
+
+    // On the image: `aff4:hash`, with the algorithm carried by the datatype.
+    graph.add(
+        image_arn,
+        &lexicon.iri(lexicon.hash),
+        TurtleTerm::typed(hex.clone(), lexicon.iri("blockMapHashSHA512")),
+    );
+    // On the map: its own property, with an ordinary digest datatype.
+    graph.add(
+        map_arn,
+        &lexicon.iri("blockMapHash"),
+        TurtleTerm::typed(hex.clone(), lexicon.iri(MAP_DIGEST_ALGORITHM.name())),
+    );
+    Some(hex)
+}
+
+/// Decode lowercase hex into bytes, ignoring anything malformed.
+///
+/// The input is this crate's own digest output, so it is always well formed. A
+/// non-hex character yields a shorter result rather than a panic.
+fn hex_to_bytes(hex: &str) -> Vec<u8> {
+    let bytes = hex.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.as_chunks::<2>().0 {
+        let Ok(text) = std::str::from_utf8(pair) else {
+            continue;
+        };
+        if let Ok(byte) = u8::from_str_radix(text, 16) {
+            out.push(byte);
+        }
+    }
+    out
+}
+
+/// Render bytes as lowercase hex.
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Compose the block map digest AFF4 Standard v1.0a §6.2 defines.
+///
+/// `block_hashes_digests` are the `blockHashesHash` values already recorded for
+/// each of the stream's block-hash objects, as raw bytes. The clause orders them
+/// by digest length, smallest first, and by SHA-512 before Blake2b at equal
+/// length. This writer records one algorithm per stream, so the ordering is
+/// exercised by containers it reads rather than by ones it writes; it is applied
+/// anyway, because a single-element ordering that is wrong for two is a defect
+/// waiting for the day a second algorithm is written.
+///
+/// The composition, confirmed against `Base-Linear.aff4`:
+///
+/// ```text
+/// blockMapHash = H( H(BlockHashes...) || mapPointHash || mapIdxHash || mapPathHash )
+/// ```
+///
+/// Note it concatenates the *digests* of the map segments, not the segments.
+/// The `mapPathHash` term is bracketed as optional in the clause and is
+/// **included**: excluding it does not reproduce the reference container's
+/// recorded value.
+#[must_use]
+pub fn compose_block_map_digest(
+    block_hashes_digests: &[Vec<u8>],
+    map_digests: &MapDigests,
+) -> Vec<u8> {
+    let mut ordered: Vec<&Vec<u8>> = block_hashes_digests.iter().collect();
+    // Shortest digest first. Equal lengths keep their given order, which for
+    // the one pair the clause calls out — SHA-512 before Blake2b — is the order
+    // a caller lists them in.
+    ordered.sort_by_key(|d| d.len());
+
+    let mut input = Vec::new();
+    for digest in ordered {
+        input.extend_from_slice(digest);
+    }
+    input.extend_from_slice(&map_digests.point);
+    input.extend_from_slice(&map_digests.idx);
+    input.extend_from_slice(&map_digests.path);
+
+    crate::hash::digest_bytes_of(&MAP_DIGEST_ALGORITHM, &input).unwrap_or_default()
+}
+
 /// One contiguous run of the image's address space.
 #[derive(Debug, Clone, Copy)]
 pub struct MapEntry {
@@ -46,6 +291,13 @@ pub struct WrittenMap {
     pub image_arn: String,
     /// The address space covered.
     pub size: u64,
+    /// Every digest recorded over the map, as `(property, lowercase hex)`.
+    ///
+    /// Returned so an acquisition log can account for what the container holds.
+    /// A report naming only the stream's digests, while verification counts
+    /// every recorded value, reads as a discrepancy and leaves the rest shown
+    /// nowhere.
+    pub digests: Vec<(&'static str, String)>,
 }
 
 /// Write a Map and its `DiskImage` under caller-chosen ARNs.
@@ -62,6 +314,7 @@ pub struct WrittenMap {
 ///
 /// [`Error::Malformed`](crate::error::Error::Malformed) if `map_arn` names no
 /// member of the writer's volume.
+#[allow(clippy::too_many_arguments)]
 pub fn write_map_as(
     writer: &mut ContainerWriter,
     map_arn: &str,
@@ -69,6 +322,7 @@ pub fn write_map_as(
     entries: &[MapEntry],
     targets: &[String],
     size: u64,
+    block_hashes: &[crate::write::stream_writer::BlockHashDigest],
     locus: &crate::error::Locus,
 ) -> Result<WrittenMap> {
     let volume = writer.volume_arn().clone();
@@ -103,12 +357,11 @@ pub fn write_map_as(
         idx_bytes.push(b'\n');
     }
 
-    writer.add_stored_segment(&format!("{base}/{}", crate::map::MAP_SEGMENT), &map_bytes)?;
-    writer.add_stored_segment(&format!("{base}/{}", crate::map::IDX_SEGMENT), &idx_bytes)?;
     // mapPath is empty for a single-volume acquisition; it exists so
     // `mapPathHash` has a defined input rather than being absent, which is the
     // state `broken-dedupe.aff4` is in.
-    writer.add_stored_segment(&format!("{base}/{}", crate::map::MAP_PATH_SEGMENT), &[])?;
+    let (map_digests, mut recorded_digests) =
+        write_map_segments(writer, &base, &map_arn, &map_bytes, &idx_bytes, &[])?;
 
     let lexicon = crate::lexicon::STANDARD;
     let graph = writer.graph_mut();
@@ -179,10 +432,17 @@ pub fn write_map_as(
         TurtleTerm::iri(&volume_arn),
     );
 
+    if let Some(hex) =
+        write_block_map_digest(writer, &map_arn, &image_arn, block_hashes, &map_digests)
+    {
+        recorded_digests.push(("blockMapHash", hex));
+    }
+
     Ok(WrittenMap {
         arn: map_arn,
         image_arn,
         size,
+        digests: recorded_digests,
     })
 }
 
@@ -198,12 +458,22 @@ pub fn write_map(
     entries: &[MapEntry],
     targets: &[String],
     size: u64,
+    block_hashes: &[crate::write::stream_writer::BlockHashDigest],
     locus: &crate::error::Locus,
 ) -> Result<WrittenMap> {
     let volume_arn = writer.volume_arn().as_str().to_owned();
     let map_arn = format!("{volume_arn}/map");
     let image_arn = format!("{volume_arn}/image");
-    write_map_as(writer, &map_arn, &image_arn, entries, targets, size, locus)
+    write_map_as(
+        writer,
+        &map_arn,
+        &image_arn,
+        entries,
+        targets,
+        size,
+        block_hashes,
+        locus,
+    )
 }
 
 /// Write a deduplicated file's Map, whose targets are Block Hash ARNs
@@ -316,9 +586,7 @@ pub fn write_slice_map(
         idx_bytes.push(b'\n');
     }
 
-    writer.add_stored_segment(&format!("{base}/{}", crate::map::MAP_SEGMENT), &map_bytes)?;
-    writer.add_stored_segment(&format!("{base}/{}", crate::map::IDX_SEGMENT), &idx_bytes)?;
-    writer.add_stored_segment(&format!("{base}/{}", crate::map::MAP_PATH_SEGMENT), &[])?;
+    let _ = write_map_segments(writer, &base, file_arn, &map_bytes, &idx_bytes, &[])?;
 
     // The file is now map-backed as well as being a FileImage: exactly the
     // `FileImage, Image, Map` type triple `broken-dedupe.aff4` carries.
@@ -328,6 +596,108 @@ pub fn write_slice_map(
     graph.add(
         file_arn,
         &lexicon.iri(lexicon.data_stream),
+        TurtleTerm::iri(file_arn),
+    );
+
+    Ok(())
+}
+
+/// Map one file onto a contiguous run of a shared `ImageStream`.
+///
+/// The AFF4-L Standard v1.0-ALPHA §6.3 form, in the first of that clause's two
+/// shapes: `aff4:Map` is added to the `FileImage`'s own type list, so one subject
+/// is both Image and Map. The second shape, where `aff4l:dataStream` reaches a
+/// separate Map subject, is read but never written — see decision D6 in
+/// `docs/superpowers/specs/2026-09-08-phase-9-storage-streams-design.md`.
+///
+/// # One entry, not one per chunk
+///
+/// A file appended to a shared stream occupies one unbroken byte range, so its
+/// whole content is a single map entry. This is what separates the form from
+/// AFF4-L 2019 §4 deduplication, where a file is reassembled from scattered
+/// chunks and needs an entry each. One entry per file is why the form's
+/// metadata cost stays flat as files grow.
+///
+/// `target_offset` is the file's first byte within the shared stream and is
+/// generally not chunk-aligned: files are packed end to end, which is the
+/// rounding waste this form exists to avoid paying per file.
+///
+/// # Errors
+///
+/// [`Error::Malformed`](crate::error::Error::Malformed) if `file_arn` names no
+/// member of the writer's volume.
+pub fn write_shared_map(
+    writer: &mut ContainerWriter,
+    file_arn: &str,
+    stream_arn: &str,
+    target_offset: u64,
+    size: u64,
+    locus: &crate::error::Locus,
+) -> Result<()> {
+    let volume = writer.volume_arn().clone();
+    let volume_arn = volume.as_str().to_owned();
+
+    let mapping = writer.name_mapping();
+    let base = crate::arn::Arn::parse(file_arn, locus)?
+        .member_name(&volume, mapping)
+        .ok_or_else(|| {
+            crate::error::Error::malformed(
+                locus.clone(),
+                format!("file {file_arn} names no member of volume {volume_arn}"),
+            )
+        })?;
+
+    // AFF4 Standard v1.0a §4: mappedOffset, length, targetOffset, targetId.
+    // The file's address space starts at 0 and the shared stream is target 0,
+    // this map having exactly one target.
+    //
+    // A zero-length file gets an empty map rather than a zero-length entry: an
+    // entry covering no bytes is a run that does not exist, and a reader
+    // summing entry lengths would have to special-case it.
+    let mut map_bytes = Vec::with_capacity(MAP_ENTRY_LEN);
+    if size > 0 {
+        map_bytes.extend_from_slice(&0u64.to_le_bytes());
+        map_bytes.extend_from_slice(&size.to_le_bytes());
+        map_bytes.extend_from_slice(&target_offset.to_le_bytes());
+        map_bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    let mut idx_bytes = Vec::with_capacity(stream_arn.len() + 1);
+    idx_bytes.extend_from_slice(stream_arn.as_bytes());
+    idx_bytes.push(b'\n');
+
+    // mapPath is empty for a single-volume acquisition, and present so
+    // `mapPathHash` has a defined input rather than being absent.
+    //
+    // The four map segment digests are recorded here; **the block map digest is
+    // not, and cannot be.** AFF4 Standard v1.0a §6.2 composes it from "all
+    // BlockHashes in the ImageStream", and this map's stream is shared with
+    // every other file in the band — its `blockHashesHash` is not known until
+    // the acquisition ends, long after this file's map is written, and its value
+    // describes every file's chunks rather than this file's.
+    //
+    // A per-file digest composed from the whole shared stream would be
+    // identical for every file in the band while appearing to attest each one
+    // individually, which is worse than its absence. Each file's own `aff4:hash`
+    // covers its bytes, and the shared stream's block hashes cover the storage,
+    // so nothing here is unattested.
+    let _ = write_map_segments(writer, &base, file_arn, &map_bytes, &idx_bytes, &[])?;
+
+    let lexicon = crate::lexicon::STANDARD;
+    let graph = writer.graph_mut();
+    graph.add_type(file_arn, &lexicon.iri(lexicon.map));
+    graph.add(
+        file_arn,
+        &lexicon.iri(lexicon.dependent_stream),
+        TurtleTerm::iri(stream_arn),
+    );
+    // The inverse edge AFF4 Standard v1.0a §2.2 puts on a stream, letting a
+    // consumer given the stream find a map that assembles it. Many files share
+    // this stream, so it accumulates one per file — which is correct: each is a
+    // parent of some part of it.
+    graph.add(
+        stream_arn,
+        &lexicon.iri(lexicon.target),
         TurtleTerm::iri(file_arn),
     );
 
@@ -362,6 +732,7 @@ mod tests {
             chunks_per_segment: 2,
             codec: crate::codec::Codec::Lz4,
             block_hashes: true,
+            block_algorithm: None,
         };
         let stream = write_image_stream(
             &mut writer,
@@ -383,6 +754,7 @@ mod tests {
             &entries,
             std::slice::from_ref(&stream.arn),
             stream.size,
+            &[],
             &locus,
         )
         .unwrap();
@@ -465,6 +837,7 @@ mod tests {
             &entries,
             &targets,
             150,
+            &[],
             &Locus::new("m"),
         )
         .unwrap();
@@ -528,6 +901,7 @@ mod tests {
             &entries,
             &targets,
             20,
+            &[],
             &Locus::new("t"),
         )
         .unwrap();
@@ -596,6 +970,7 @@ mod tests {
             &entries,
             &targets,
             20,
+            &[],
             &Locus::new("s"),
         )
         .unwrap();

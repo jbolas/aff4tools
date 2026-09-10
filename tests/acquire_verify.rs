@@ -83,6 +83,7 @@ fn options(codec: Codec) -> StreamOptions {
         chunks_per_segment: 4,
         codec,
         block_hashes: true,
+        block_algorithm: None,
     }
 }
 

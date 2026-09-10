@@ -90,6 +90,16 @@ pub mod terms {
     /// That standard defines no `child` edge, which makes this the property a
     /// consumer splits `originalPathName` on to recover the acquired tree.
     pub const PATH_SEPARATOR: &str = "pathSeparator";
+    /// A file's extended attribute, as a class (AFF4-L v1.0-ALPHA §4.2).
+    pub const FILE_EXTENDED_ATTRIBUTE: &str = "FileExtendedAttribute";
+    /// Reaches a `FileExtendedAttribute` from its parent
+    /// (AFF4-L v1.0-ALPHA §4.3).
+    pub const EXTENDED_ATTRIBUTE: &str = "extendedAttribute";
+    /// A substream's name (AFF4-L v1.0-ALPHA §4.3).
+    pub const NAME: &str = "name";
+    /// Carries a stream's bytes inside the metadata
+    /// (AFF4-L v1.0-ALPHA §6.2).
+    pub const DATA_STREAM: &str = "dataStream";
     /// Marks content stored directly as a ZIP segment (AFF4-L 2019 §3.8).
     pub const ZIP_SEGMENT: &str = "zip_segment";
 
@@ -162,6 +172,78 @@ const ALSO_ILLEGAL_IN_IRI: &[char] = &['[', ']', '"'];
 /// `aff4:zip_segment` joins the type list only when the file really is stored
 /// that way.
 pub const MAX_SEGMENT_RESIDENT_SIZE: u64 = 1024 * 1024;
+
+/// The largest stream stored inside the metadata.
+///
+/// AFF4-L v1.0-ALPHA §6.2 forbids in-metadata storage above one kilobyte, and
+/// this takes that ceiling as the policy rather than choosing a lower one.
+///
+/// **In-metadata storage is for substreams, never for a primary file.** That
+/// restriction is a property of [`StreamKind`], not of this value: no size
+/// makes the form worth using for a primary stream. Measured at every content
+/// size from 64 bytes to 1 KiB, an in-metadata subject costs more turtle than a
+/// ZIP segment subject before it carries a single byte — 691 bytes of fixed
+/// cost against 671 — because the `aff4l:dataStream` property with its literal
+/// and datatype costs more than the extra `rdf:type` a segment declares.
+///
+/// For a substream that reasoning does not apply: it needs its own subject
+/// either way, so its base64 payload competes against one ZIP member per
+/// extended attribute rather than against a cheaper subject shape. A survey of
+/// 4.15 million files on a real macOS filesystem measured a median attribute of
+/// 11 bytes, with 99.96% at or under this ceiling. AFF4-L v1.0-ALPHA §6.2
+/// introduces the form naming exactly this case.
+///
+/// The remaining 0.04% is not theoretical: 992 attributes exceeded the ceiling,
+/// the largest at 6.4 MB. Those fall back to a segment.
+///
+/// See `docs/working/storage-stream-study.md`.
+pub const RESIDENT_DATA_THRESHOLD: u64 = 1024;
+
+/// At or below this, a v2.1 primary stream is stored as one ZIP segment.
+///
+/// AFF4-L v1.0-ALPHA §6.1 says a writer SHOULD NOT use a ZIP segment for a
+/// stream of one gibibyte or more; this sits well inside that bound, and the
+/// reason it is not higher is measured rather than inherited.
+///
+/// **Metadata cost does not depend on file size.** Holding the file count
+/// fixed and varying only the size the metadata claims, across a 128,000-fold
+/// range, leaves the triple count identical and grows the turtle only by the
+/// extra digits in each `aff4:size` literal. So raising this value costs
+/// nothing directly and in fact *reduces* total ZIP members, by keeping files
+/// out of the one form whose member count grows with size — an image stream
+/// spends two members per 32 MiB bevy.
+///
+/// **Seek cost is what caps it.** AFF4-L v1.0-ALPHA §6.1's warning that ZIP
+/// segments are "NOT efficiently seekable for large files when compressed" is
+/// exactly right, and the penalty is linear in member size because deflate has
+/// no random access. Reading 1 KiB from the middle of a member measured 2.2 ms
+/// at 16 MiB, 16.8 ms at 128 MiB, and 139 ms at 1 GiB, against a flat 0.02 ms
+/// for the one chunk a stream would decompress.
+///
+/// 16 MiB takes nearly all of the metadata benefit — total members land within
+/// 1% of what a 128 MiB threshold gives — while holding worst-case single-file
+/// retrieval to 2.2 ms rather than 16.8 ms. See
+/// `docs/working/storage-stream-study.md`.
+pub const ZIPSEGMENT_THRESHOLD: u64 = 16 * 1024 * 1024;
+
+/// At or below this, a v2.1 primary stream shares an image stream through a
+/// map; above it, the file gets its own image stream.
+///
+/// An upper bound on eligibility to *share*, not a size at which indirection
+/// starts to pay. AFF4-L v1.0-ALPHA §6.3 permits storing "the datastreams of
+/// multiple source files in a single Image Stream".
+///
+/// **Sharing costs two ZIP members per file** — a `map` segment and an `idx`
+/// segment — while the bevies holding the bytes exist either way. What it buys
+/// back is bevy rounding: a stream of its own pads to a whole 32 MiB bevy, and
+/// that waste is bounded by one bevy however large the file is. So the benefit
+/// is large for a file of tens of megabytes and vanishes above a few hundred:
+/// 100% padding at 16 MiB, 28% at 100 MiB, and 0.0% by 1 GiB.
+///
+/// 256 MiB is where the two effects balance. Below it, rounding waste exceeds
+/// the map's own overhead; above it, a file would pay two extra members for a
+/// map that saves it nothing. See `docs/working/storage-stream-study.md`.
+pub const COMMONMAP_THRESHOLD: u64 = 256 * 1024 * 1024;
 
 /// Percent-encode one character.
 fn percent_encode(out: &mut String, ch: char) {
@@ -283,6 +365,80 @@ pub fn segment_name_for_arn(volume_arn: &str, arn: &str, profile: LogicalProfile
 #[must_use]
 pub fn is_segment_resident(size: u64) -> bool {
     size <= MAX_SEGMENT_RESIDENT_SIZE
+}
+
+/// Whether a stream is a file's primary content or one of its substreams.
+///
+/// AFF4-L v1.0-ALPHA §6's size bands govern primary streams. A substream is an
+/// extended attribute or an alternate data stream, and what it *is* decides its
+/// storage before its size does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    /// A file's own content.
+    Primary,
+    /// An extended attribute or alternate data stream.
+    Substream,
+}
+
+/// Where an acquisition stores a stream of this kind and size.
+///
+/// The writer's single selection point, mirroring the reader's
+/// [`crate::storage_form::storage_form_of`]. Both naming one enum is what keeps
+/// the round trip honest: a form the writer can emit is a form the reader must
+/// name.
+///
+/// [`LogicalProfile::Legacy`] returns only two forms, split at
+/// [`MAX_SEGMENT_RESIDENT_SIZE`], because the AFF4-L 2019 paper defines only
+/// those two. Its output is therefore frozen by construction rather than by
+/// careful editing, which is what makes the byte-identical corpus gate
+/// meaningful as a regression check.
+///
+/// The v2.1 bands come from measurement; see
+/// `docs/working/storage-stream-study.md` and the constants' own documentation.
+#[must_use]
+pub fn choose_storage(
+    kind: StreamKind,
+    size: u64,
+    profile: LogicalProfile,
+) -> crate::storage_form::StorageForm {
+    use crate::storage_form::StorageForm;
+
+    if !profile.is_v1_alpha() {
+        return if size <= MAX_SEGMENT_RESIDENT_SIZE {
+            StorageForm::ZipSegment
+        } else {
+            StorageForm::OwnImageStream
+        };
+    }
+
+    // A substream goes in the metadata whatever its size, up to the ceiling
+    // AFF4-L v1.0-ALPHA §6.2 sets. That clause's MUST NOT binds this writer's
+    // own output, so an attribute above it falls back to a segment rather than
+    // being written in a form the standard forbids.
+    if kind == StreamKind::Substream {
+        return if size <= RESIDENT_DATA_THRESHOLD {
+            StorageForm::InMetadata
+        } else {
+            StorageForm::ZipSegment
+        };
+    }
+
+    // A primary stream is never stored in the metadata. Measured at every
+    // content size, an in-metadata subject costs more turtle than a ZIP segment
+    // subject before it carries a single byte, so there is no size at which the
+    // form pays for a file's own content.
+    //
+    // The three bands above that are measured, not chosen: a segment while the
+    // whole file must be held to write it, a share of one stream while bevy
+    // rounding waste is still a large fraction of the file, and its own stream
+    // once that waste has become a rounding error.
+    if size <= ZIPSEGMENT_THRESHOLD {
+        StorageForm::ZipSegment
+    } else if size <= COMMONMAP_THRESHOLD {
+        StorageForm::SharedMap
+    } else {
+        StorageForm::OwnImageStream
+    }
 }
 
 /// The paths AFF4 reserves at the volume root, which a logical file must not
@@ -671,6 +827,109 @@ fn v1_alpha_iri(local_name: &str) -> String {
     format!("{namespace}{local_name}")
 }
 
+/// Write a file's extended attributes as `FileExtendedAttribute` subjects.
+///
+/// AFF4-L v1.0-ALPHA §4.2 defines the class and §4.3 the `extendedAttribute`
+/// property reaching it from the parent. Each attribute becomes its own
+/// subject, carrying its name, its size, a `target` back to the file it belongs
+/// to, and its bytes.
+///
+/// **v2.1 only.** The AFF4-L 2019 paper defines neither the class nor the
+/// property, so writing them into a legacy container would put terms in it that
+/// its governing document does not define — the writer-side leniency this
+/// project does not permit.
+///
+/// Storage follows [`choose_storage`] with [`StreamKind::Substream`]: in the
+/// metadata up to the AFF4-L v1.0-ALPHA §6.2 ceiling, and as a ZIP segment
+/// above it. A survey of 4.15 million files found 99.96% of real attributes
+/// under that ceiling and 992 above it, so both paths are exercised by real
+/// evidence.
+///
+/// Returns how many attributes were written.
+fn write_extended_attributes(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    path: &Path,
+    parent_arn: &str,
+    volume_arn: &str,
+    options: &LogicalOptions,
+    result: &mut LogicalAcquisition,
+) -> usize {
+    use crate::write::turtle::{TurtleTerm, XSD_BASE64_BINARY, XSD_LONG, XSD_STRING};
+
+    if !options.profile.is_v1_alpha() {
+        return 0;
+    }
+
+    let lexicon = crate::lexicon::STANDARD;
+    let attributes = crate::write::xattr::attributes_of(path);
+    let mut written = 0;
+
+    for (index, attribute) in attributes.iter().enumerate() {
+        // The substream's own ARN. Derived from the parent's plus the
+        // attribute's position so a re-acquisition of the same tree names the
+        // same subjects, which a random GUID would not.
+        let child = format!("{parent_arn}/xattr/{index}");
+        let size = attribute.value.len() as u64;
+
+        writer
+            .graph_mut()
+            .add_type(&child, &v1_alpha_iri(terms::FILE_EXTENDED_ATTRIBUTE));
+        writer.graph_mut().add(
+            &child,
+            &v1_alpha_iri(terms::NAME),
+            TurtleTerm::typed(attribute.name.clone(), XSD_STRING),
+        );
+        writer.graph_mut().add(
+            &child,
+            &lexicon.iri(lexicon.size),
+            TurtleTerm::typed(size.to_string(), XSD_LONG),
+        );
+        writer.graph_mut().add(
+            &child,
+            &lexicon.iri(lexicon.target),
+            TurtleTerm::iri(parent_arn),
+        );
+
+        if choose_storage(StreamKind::Substream, size, options.profile)
+            == crate::storage_form::StorageForm::InMetadata
+        {
+            writer.graph_mut().add(
+                &child,
+                &v1_alpha_iri(terms::DATA_STREAM),
+                TurtleTerm::typed(
+                    crate::naming::base64_encode(&attribute.value),
+                    XSD_BASE64_BINARY,
+                ),
+            );
+        } else {
+            // Above the AFF4-L v1.0-ALPHA §6.2 ceiling, so the bytes go in a
+            // member of their own and the type says so.
+            let segment = segment_name_for_arn(volume_arn, &child, options.profile);
+            if let Err(e) = writer.add_deflated_segment(&segment, &attribute.value) {
+                result.skipped.push((
+                    path.to_path_buf(),
+                    format!("extended attribute {:?}: {e}", attribute.name),
+                ));
+                continue;
+            }
+            writer
+                .graph_mut()
+                .add_type(&child, &lexicon.iri(terms::ZIP_SEGMENT_V21));
+        }
+
+        // The parent's edge to it, last, so the child subject is complete
+        // before anything points at it.
+        writer.graph_mut().add(
+            parent_arn,
+            &v1_alpha_iri(terms::EXTENDED_ATTRIBUTE),
+            TurtleTerm::iri(&child),
+        );
+        written += 1;
+    }
+
+    written
+}
+
 /// What deduplication achieved over one acquisition.
 #[derive(Debug, Clone, Copy)]
 pub struct DedupeSummary {
@@ -710,6 +969,14 @@ pub struct LogicalAcquisition {
     pub folders: u64,
     /// Bytes of file content stored.
     pub bytes: u64,
+    /// Extended attributes acquired, each written as its own subject
+    /// (AFF4-L v1.0-ALPHA §4.2).
+    ///
+    /// Reported so an examiner can see that substreams were looked for at all.
+    /// A count of zero on a macOS acquisition would be surprising — a survey of
+    /// one such system found half its files carrying at least one — and the
+    /// figure makes that visible rather than silent.
+    pub substreams: usize,
     /// Paths that could not be read, with the reason.
     pub skipped: Vec<(std::path::PathBuf, String)>,
     /// Files whose length on disk differed from the length the walk recorded,
@@ -748,11 +1015,8 @@ pub fn acquire_logical(
     let volume_arn = writer.volume_arn().as_str().to_owned();
     let lexicon = crate::lexicon::STANDARD;
     let mut result = LogicalAcquisition::default();
-    // The pool spans the whole acquisition, so identical content is stored once
-    // *across* files rather than merely within one.
-    let mut pool = options
-        .deduplicate
-        .then(|| crate::write::dedupe::ChunkPool::new(options.stream.chunk_size));
+    // Storage that spans the whole acquisition rather than one file.
+    let mut storage = SharedStorage::for_options(options);
 
     // AFF4-L 2019 §3.6: one acquisition task, naming each root. A named ARN rather than
     // the paper's blank node `_:1` — a blank node cannot be referenced across
@@ -772,7 +1036,7 @@ pub fn acquire_logical(
             items.into_iter(),
             &volume_arn,
             options,
-            pool.as_mut(),
+            &mut storage,
             &mut result,
             on_progress,
         )?;
@@ -795,10 +1059,47 @@ pub fn acquire_logical(
         TurtleTerm::iri(&volume_arn),
     );
 
-    finish_dedupe(writer, &mut result, pool, options, locus)?;
+    finish_dedupe(writer, &mut result, storage.pool, options, locus)?;
+    finish_shared_stream(writer, storage.shared, locus)?;
 
     let _ = (XSD_DATE_TIME, XSD_LONG, XSD_STRING);
     Ok(result)
+}
+
+/// The storage an acquisition shares between files.
+///
+/// Both members hold content spanning many files, and both are absent unless
+/// something asks for them, so an acquisition that uses neither writes neither.
+///
+/// **They are mutually exclusive in practice.** Deduplication makes every file
+/// a map over the chunk pool whatever its size, so no file is left in the band
+/// that would reach for the shared stream. Kept as two fields rather than an
+/// enum because the exclusion is a consequence of `record_file`'s ordering
+/// rather than something this type should assert.
+#[derive(Default)]
+pub struct SharedStorage {
+    /// The AFF4-L 2019 §4 chunk pool, present with `--deduplicate`.
+    pub pool: Option<crate::write::dedupe::ChunkPool>,
+    /// The AFF4-L v1.0-ALPHA §6.3 shared stream, created on first use.
+    ///
+    /// Lazy because most acquisitions have no file in the map band, and an
+    /// empty `ImageStream` in the container would describe storage that holds
+    /// nothing.
+    pub shared: Option<crate::write::shared_stream::SharedStream>,
+}
+
+impl SharedStorage {
+    /// The storage `options` calls for, before any file is written.
+    fn for_options(options: &LogicalOptions) -> Self {
+        Self {
+            // The pool spans the whole acquisition, so identical content is
+            // stored once *across* files rather than merely within one.
+            pool: options
+                .deduplicate
+                .then(|| crate::write::dedupe::ChunkPool::new(options.stream.chunk_size)),
+            shared: None,
+        }
+    }
 }
 
 /// Write the shared chunk stream and every deduplicated file's map.
@@ -842,6 +1143,32 @@ fn finish_dedupe(
     Ok(())
 }
 
+/// Close the AFF4-L v1.0-ALPHA §6.3 shared stream, if one was opened.
+///
+/// Writes the trailing bevy and the stream's own metadata. Each file's map was
+/// already written as its bytes were appended, so nothing here depends on the
+/// files: the stream is closed, not assembled.
+///
+/// **No `aff4:hash` is recorded for the stream.** Every byte in it belongs to
+/// some file, each file's own digest covers its own bytes, and the per-chunk
+/// block hashes cover the storage. A digest over the concatenation would attest
+/// an object no examiner reasons about — the accidental order in which files
+/// happened to be walked.
+///
+/// # Errors
+///
+/// [`Error::Io`](crate::error::Error::Io) if a container write fails.
+fn finish_shared_stream(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    shared: Option<crate::write::shared_stream::SharedStream>,
+    locus: &crate::error::Locus,
+) -> crate::error::Result<()> {
+    if let Some(shared) = shared {
+        shared.finish(writer, &[], locus)?;
+    }
+    Ok(())
+}
+
 /// What a scanned acquisition tells its caller as it runs.
 ///
 /// The acquisition state, and the scanner's running totals as
@@ -878,9 +1205,7 @@ pub fn acquire_logical_scanned(
     let volume_arn = writer.volume_arn().as_str().to_owned();
     let lexicon = crate::lexicon::STANDARD;
     let mut result = LogicalAcquisition::default();
-    let mut pool = options
-        .deduplicate
-        .then(|| crate::write::dedupe::ChunkPool::new(options.stream.chunk_size));
+    let mut storage = SharedStorage::for_options(options);
 
     let task_arn = format!("{volume_arn}/acquisition");
     open_acquisition_task(writer, &task_arn, options.profile);
@@ -903,7 +1228,7 @@ pub fn acquire_logical_scanned(
             items.into_iter(),
             &volume_arn,
             options,
-            pool.as_mut(),
+            &mut storage,
             &mut result,
             &mut report,
         )
@@ -935,7 +1260,8 @@ pub fn acquire_logical_scanned(
         TurtleTerm::iri(&volume_arn),
     );
 
-    finish_dedupe(writer, &mut result, pool, options, locus)?;
+    finish_dedupe(writer, &mut result, storage.pool, options, locus)?;
+    finish_shared_stream(writer, storage.shared, locus)?;
     Ok(result)
 }
 
@@ -967,9 +1293,7 @@ pub fn acquire_logical_prescanned(
     let volume_arn = writer.volume_arn().as_str().to_owned();
     let lexicon = crate::lexicon::STANDARD;
     let mut result = LogicalAcquisition::default();
-    let mut pool = options
-        .deduplicate
-        .then(|| crate::write::dedupe::ChunkPool::new(options.stream.chunk_size));
+    let mut storage = SharedStorage::for_options(options);
 
     let task_arn = format!("{volume_arn}/acquisition");
     open_acquisition_task(writer, &task_arn, options.profile);
@@ -979,7 +1303,7 @@ pub fn acquire_logical_prescanned(
         items.into_iter(),
         &volume_arn,
         options,
-        pool.as_mut(),
+        &mut storage,
         &mut result,
         on_progress,
     )?;
@@ -998,7 +1322,8 @@ pub fn acquire_logical_prescanned(
         TurtleTerm::iri(&volume_arn),
     );
 
-    finish_dedupe(writer, &mut result, pool, options, locus)?;
+    finish_dedupe(writer, &mut result, storage.pool, options, locus)?;
+    finish_shared_stream(writer, storage.shared, locus)?;
     Ok(result)
 }
 
@@ -1150,7 +1475,7 @@ fn acquire_from_items(
     items: impl Iterator<Item = crate::write::scan::ScanItem>,
     volume_arn: &str,
     options: &LogicalOptions,
-    mut pool: Option<&mut crate::write::dedupe::ChunkPool>,
+    storage: &mut SharedStorage,
     result: &mut LogicalAcquisition,
     on_progress: &mut dyn FnMut(&LogicalAcquisition),
 ) -> crate::error::Result<Vec<String>> {
@@ -1236,7 +1561,7 @@ fn acquire_from_items(
                     size,
                     volume_arn,
                     options,
-                    pool.as_deref_mut(),
+                    storage,
                     result,
                 );
                 // A regular file that reached the writer is a child, whether or
@@ -1301,7 +1626,7 @@ fn record_file(
     size: u64,
     volume_arn: &str,
     options: &LogicalOptions,
-    pool: Option<&mut crate::write::dedupe::ChunkPool>,
+    storage: &mut SharedStorage,
     result: &mut LogicalAcquisition,
 ) {
     use crate::write::turtle::{TurtleTerm, XSD_LONG};
@@ -1316,11 +1641,16 @@ fn record_file(
         Err(_) => FsMetadata::default(),
     };
 
+    // Which of AFF4-L v1.0-ALPHA §6's forms holds this file's bytes. For the
+    // legacy profile this reproduces the AFF4-L 2019 §3.3 split exactly, so
+    // that output is frozen by construction.
+    let form = choose_storage(StreamKind::Primary, size, options.profile);
+
     // A large file's bytes go through `write_image_stream_as`, which emits
     // `aff4:stored` for the stream it writes. That stream's ARN *is* the file's
     // own (see `record_large_file`), so letting Table 3 emit it too put the
     // same triple on the same subject twice.
-    let stream_will_record_stored = !is_segment_resident(size);
+    let stream_will_record_stored = form == crate::storage_form::StorageForm::OwnImageStream;
     write_table_3(
         writer,
         arn,
@@ -1338,18 +1668,22 @@ fn record_file(
         .graph_mut()
         .add_type(arn, &lexicon.iri(lexicon.image));
 
+    // The file's extended attributes, before its content, so every subject the
+    // parent will point at exists by the time the parent is finished. A v2.1
+    // acquisition only; the AFF4-L 2019 paper defines no term for them.
+    result.substreams += write_extended_attributes(writer, path, arn, volume_arn, options, result);
+
     // AFF4-L 2019 §4: with deduplication on, every file becomes a Map over the shared chunk
     // pool regardless of size — the AFF4-L 2019 §3.3 threshold does not apply, because no
     // file has its own storage to choose a form for.
-    if let Some(pool) = pool {
+    if let Some(pool) = storage.pool.as_mut() {
         record_deduplicated_file(writer, path, arn, size, pool, options, result);
         return;
     }
 
-    // AFF4-L 2019 §3.3: small files are ZIP segments, large ones ImageStreams. The large
-    // path streams — a file above the threshold must never be read whole into
-    // memory, which is the whole reason the threshold exists.
-    if !is_segment_resident(size) {
+    // The large path streams: a file above the segment threshold must never be
+    // read whole into memory, which is the whole reason the threshold exists.
+    if form == crate::storage_form::StorageForm::OwnImageStream {
         record_large_file(
             writer,
             path,
@@ -1358,6 +1692,15 @@ fn record_file(
             options.stream,
             options.algorithms(),
             result,
+        );
+        return;
+    }
+
+    // AFF4-L v1.0-ALPHA §6.3: a share of one stream, with a map over the range
+    // this file occupies. Streams for the same reason the large path does.
+    if form == crate::storage_form::StorageForm::SharedMap {
+        record_shared_file(
+            writer, path, arn, size, volume_arn, options, storage, result,
         );
         return;
     }
@@ -1554,6 +1897,24 @@ fn record_large_file(
     use crate::write::stream_writer::write_image_stream_as;
     use crate::write::turtle::{TurtleTerm, XSD_LONG};
 
+    // A file with its own image stream always records per-chunk digests,
+    // whatever the run-wide `--block-hashes` setting says.
+    //
+    // The threshold that sent it here is the point: this file is large enough
+    // that its own bevy rounding waste is a rounding error, which is another
+    // way of saying it is large. "This file is corrupt" is not a useful finding
+    // about a gigabyte; "chunk 41,022 of it is" is. AFF4 Standard v1.0a §6.2
+    // leaves the choice to the implementation, and this is the case where the
+    // cost is clearly worth paying.
+    //
+    // Legacy output is unaffected by the flag for exactly this reason: the 2019
+    // paper's split sends every file above its threshold here, and a file below
+    // it becomes a ZIP segment, which never carried block hashes at all.
+    let stream = crate::write::stream_writer::StreamOptions {
+        block_hashes: true,
+        ..stream
+    };
+
     let lexicon = crate::lexicon::STANDARD;
     let locus = crate::error::Locus::new(path);
 
@@ -1596,6 +1957,122 @@ fn record_large_file(
 
     result.files += 1;
     result.bytes += written.size;
+}
+
+/// The ARN of the acquisition's one shared stream.
+///
+/// Derived from the volume rather than minted, so the name is the same whatever
+/// order files are walked in and an acquisition rerun over the same volume ARN
+/// names it identically.
+fn shared_stream_arn(volume_arn: &str) -> String {
+    format!("{volume_arn}/shared")
+}
+
+/// Record one file as a range of the acquisition's shared `ImageStream`.
+///
+/// The AFF4-L Standard v1.0-ALPHA §6.3 form. The file's bytes are appended to
+/// one stream spanning the acquisition, and a one-entry map addresses the range
+/// they occupy. Per design decision D6 the map is the file's own subject, which
+/// gains the `aff4:Map` type alongside `aff4:Image`.
+///
+/// Streams rather than reading whole, for the same reason
+/// [`record_large_file`] does: a file in this band is at least
+/// [`ZIPSEGMENT_THRESHOLD`] and holding it entire would defeat the point of not
+/// making it a segment.
+#[allow(clippy::too_many_arguments)]
+fn record_shared_file(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    path: &std::path::Path,
+    arn: &str,
+    size: u64,
+    volume_arn: &str,
+    options: &LogicalOptions,
+    storage: &mut SharedStorage,
+    result: &mut LogicalAcquisition,
+) {
+    use crate::write::turtle::{TurtleTerm, XSD_LONG};
+
+    let lexicon = crate::lexicon::STANDARD;
+    let locus = crate::error::Locus::new(path);
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            result
+                .skipped
+                .push((path.to_path_buf(), explain_io_error(&e)));
+            return;
+        }
+    };
+
+    // Opened on the first file that needs it, so an acquisition with nothing in
+    // this band writes no stream at all.
+    if storage.shared.is_none() {
+        let stream_arn = shared_stream_arn(volume_arn);
+        match crate::write::shared_stream::SharedStream::new(
+            writer,
+            &stream_arn,
+            options.stream,
+            &locus,
+        ) {
+            Ok(s) => storage.shared = Some(s),
+            Err(e) => {
+                result.skipped.push((path.to_path_buf(), e.to_string()));
+                return;
+            }
+        }
+    }
+    let Some(shared) = storage.shared.as_mut() else {
+        // Unreachable: the block above either set it or returned.
+        return;
+    };
+    let stream_arn = shared.arn().to_owned();
+
+    // AFF4-L 2019 §3.7 requires linear digests over the bytes stored. These
+    // cover this file alone, computed as its bytes pass into the stream.
+    let placed = match shared.append(&mut file, options.algorithms(), writer, &locus) {
+        Ok(p) => p,
+        Err(e) => {
+            result.skipped.push((path.to_path_buf(), e.to_string()));
+            return;
+        }
+    };
+
+    // The size recorded is what the read produced, not what the walk predicted.
+    if placed.size != size {
+        result.changed.push((path.to_path_buf(), size, placed.size));
+    }
+
+    {
+        let graph = writer.graph_mut();
+        for digest in &placed.digests {
+            graph.add(
+                arn,
+                &lexicon.iri(lexicon.hash),
+                TurtleTerm::typed(digest.hex(), lexicon.iri(digest.algorithm().name())),
+            );
+        }
+        graph.add(
+            arn,
+            &lexicon.iri(lexicon.size),
+            TurtleTerm::typed(placed.size.to_string(), XSD_LONG),
+        );
+    }
+
+    if let Err(e) = crate::write::map_writer::write_shared_map(
+        writer,
+        arn,
+        &stream_arn,
+        placed.offset,
+        placed.size,
+        &locus,
+    ) {
+        result.skipped.push((path.to_path_buf(), e.to_string()));
+        return;
+    }
+
+    result.files += 1;
+    result.bytes += placed.size;
 }
 
 /// The last component of a recorded path — the entry's own name.
@@ -1762,6 +2239,133 @@ mod tests {
     use super::*;
 
     const VOLUME: &str = "aff4://e6bae91b-14d231833e18";
+
+    // --- storage selection (AFF4-L v1.0-ALPHA §6) --------------------------
+
+    use crate::storage_form::StorageForm;
+
+    /// The AFF4-L 2019 §3.3 split, unchanged. The legacy profile's output is
+    /// frozen: the byte-identical corpus gate only means something while this
+    /// stays true.
+    #[test]
+    fn legacy_splits_at_one_mebibyte_and_uses_two_forms() {
+        let p = LogicalProfile::Legacy;
+        assert_eq!(
+            choose_storage(StreamKind::Primary, 1024, p),
+            StorageForm::ZipSegment
+        );
+        assert_eq!(
+            choose_storage(StreamKind::Primary, MAX_SEGMENT_RESIDENT_SIZE, p),
+            StorageForm::ZipSegment
+        );
+        assert_eq!(
+            choose_storage(StreamKind::Primary, MAX_SEGMENT_RESIDENT_SIZE + 1, p),
+            StorageForm::OwnImageStream
+        );
+    }
+
+    /// Legacy never reaches a form the AFF4-L 2019 paper does not define,
+    /// whatever the size or kind.
+    #[test]
+    fn legacy_never_uses_the_forms_its_document_does_not_define() {
+        let p = LogicalProfile::Legacy;
+        for kind in [StreamKind::Primary, StreamKind::Substream] {
+            for size in [0, 1, 100, 5000, 1 << 20, 1 << 30, u64::MAX] {
+                let form = choose_storage(kind, size, p);
+                assert!(
+                    matches!(form, StorageForm::ZipSegment | StorageForm::OwnImageStream),
+                    "legacy chose {form:?} for {kind:?} at {size}"
+                );
+            }
+        }
+    }
+
+    /// The v2.1 primary bands, at each boundary and just past it.
+    ///
+    /// Each boundary is asserted twice, at the threshold and one byte past it,
+    /// because an off-by-one here silently moves files into a different storage
+    /// form and nothing else would catch it.
+    #[test]
+    fn v1_alpha_walks_the_primary_bands_in_order() {
+        let p = LogicalProfile::V1Alpha;
+        let at = |size| choose_storage(StreamKind::Primary, size, p);
+
+        assert_eq!(at(0), StorageForm::ZipSegment);
+        assert_eq!(at(ZIPSEGMENT_THRESHOLD), StorageForm::ZipSegment);
+        assert_eq!(at(ZIPSEGMENT_THRESHOLD + 1), StorageForm::SharedMap);
+        assert_eq!(at(COMMONMAP_THRESHOLD), StorageForm::SharedMap);
+        assert_eq!(at(COMMONMAP_THRESHOLD + 1), StorageForm::OwnImageStream);
+    }
+
+    /// A primary stream is never stored in the metadata, however small. The
+    /// study measured no size at which the form pays for a file's own content.
+    #[test]
+    fn a_primary_stream_is_never_stored_in_the_metadata() {
+        let p = LogicalProfile::V1Alpha;
+        for size in [0, 1, 11, 64, 512, RESIDENT_DATA_THRESHOLD, 4096] {
+            assert_ne!(
+                choose_storage(StreamKind::Primary, size, p),
+                StorageForm::InMetadata,
+                "a primary stream of {size} bytes went in the metadata"
+            );
+        }
+    }
+
+    /// D1: kind decides before size does. A substream goes in the metadata at
+    /// any size the AFF4-L v1.0-ALPHA §6.2 ceiling admits.
+    #[test]
+    fn a_substream_goes_in_the_metadata_up_to_the_ceiling() {
+        let p = LogicalProfile::V1Alpha;
+        for size in [0, 1, 11, 512, RESIDENT_DATA_THRESHOLD] {
+            assert_eq!(
+                choose_storage(StreamKind::Substream, size, p),
+                StorageForm::InMetadata,
+                "a substream of {size} bytes should be resident"
+            );
+        }
+    }
+
+    /// AFF4-L v1.0-ALPHA §6.2's MUST NOT binds this writer's own output, so an
+    /// attribute above the ceiling falls back rather than being written in a
+    /// form the standard forbids. The macOS survey found 992 such attributes,
+    /// the largest at 6.4 MB, so this path is real.
+    #[test]
+    fn an_oversized_substream_falls_back_to_a_segment() {
+        let p = LogicalProfile::V1Alpha;
+        for size in [RESIDENT_DATA_THRESHOLD + 1, 4096, 6_399_981] {
+            assert_eq!(
+                choose_storage(StreamKind::Substream, size, p),
+                StorageForm::ZipSegment,
+                "a substream of {size} bytes exceeds the ceiling"
+            );
+        }
+    }
+
+    /// Every form the writer can emit is one the reader can name. The two
+    /// functions are mirrors, and a form appearing on one side only would be a
+    /// container this project writes and cannot read.
+    #[test]
+    fn every_form_the_writer_chooses_is_one_the_reader_names() {
+        let locus = crate::error::Locus::new("/evidence/case.aff4");
+        for profile in [LogicalProfile::Legacy, LogicalProfile::V1Alpha] {
+            for kind in [StreamKind::Primary, StreamKind::Substream] {
+                for size in [0, 1024, 1 << 20, 1 << 25, 1 << 30] {
+                    let chosen = choose_storage(kind, size, profile);
+                    let (types, resident): (Vec<&str>, bool) = match chosen {
+                        StorageForm::ZipSegment => (vec!["FileImage", "ZipSegment"], false),
+                        StorageForm::InMetadata => (vec!["FileImage"], true),
+                        StorageForm::SharedMap => (vec!["FileImage", "Map"], false),
+                        StorageForm::OwnImageStream => (vec!["FileImage", "ImageStream"], false),
+                    };
+                    assert_eq!(
+                        crate::storage_form::storage_form_of(&types, resident, &locus).unwrap(),
+                        chosen,
+                        "{chosen:?} for {kind:?} at {size} under {profile:?}"
+                    );
+                }
+            }
+        }
+    }
 
     /// **Table 1 of the paper.** These are the specification's own worked
     /// examples, so they are the closest thing to an external oracle this
@@ -2101,7 +2705,7 @@ mod tests {
             items.into_iter(),
             &volume_arn,
             &LogicalOptions::default(),
-            None,
+            &mut SharedStorage::default(),
             &mut result,
             &mut noop,
         )
@@ -2185,7 +2789,7 @@ mod tests {
             items.into_iter(),
             &volume_arn,
             &LogicalOptions::default(),
-            None,
+            &mut SharedStorage::default(),
             &mut result,
             &mut noop,
         )
@@ -2246,7 +2850,7 @@ mod tests {
             items.into_iter(),
             &volume_arn,
             &LogicalOptions::default(),
-            None,
+            &mut SharedStorage::default(),
             &mut result,
             &mut noop,
         )

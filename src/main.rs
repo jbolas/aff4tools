@@ -256,6 +256,25 @@ enum Command {
         #[arg(long, requires = "logical", conflicts_with_all = ["images", "device"])]
         deduplicate: bool,
 
+        /// Record a digest of every chunk, not only of each whole file.
+        /// `--logical` only.
+        ///
+        /// AFF4 Standard v1.0a §6.2 makes block map hashing optional. It costs
+        /// a digest of every byte beyond the whole-file digests, and two ZIP
+        /// members per bevy, and it buys the ability to say *which* chunk of a
+        /// file is corrupt rather than only that the file is.
+        ///
+        /// **Off by default for logical acquisition**, where most files are
+        /// small enough that a whole-file digest already localizes a fault to
+        /// something an examiner can act on.
+        ///
+        /// Two cases do not need the flag and always record block hashes: a
+        /// physical acquisition (`--device` or `--image`), and a logical file
+        /// large enough to hold its own image stream. In both the object is too
+        /// large for "this is corrupt" to be a useful answer.
+        #[arg(long, requires = "logical", conflicts_with_all = ["images", "device"])]
+        block_hashes: bool,
+
         /// Which digests to record. Repeatable, or comma-separated.
         ///
         /// Defaults to SHA-512 and BLAKE3. Valid names: md5, sha1, sha256,
@@ -455,9 +474,17 @@ impl ObjectFilter {
         match self {
             Self::All => true,
             Self::None => false,
+            // A substream is admitted alongside the images because it carries a
+            // file's content, just not its primary stream.
+            // AFF4-L v1.0-ALPHA §4.2 makes it a class of its own, and an
+            // extended attribute omitted from the listing would be evidence the
+            // container holds and the report never mentions.
             Self::Images => {
                 object.role.is_image()
-                    || matches!(object.role, ObjectRole::ImageStream | ObjectRole::Map)
+                    || matches!(
+                        object.role,
+                        ObjectRole::ImageStream | ObjectRole::Map | ObjectRole::FileSubStream
+                    )
             }
         }
     }
@@ -564,6 +591,7 @@ fn run() -> ExitCode {
             multi_part,
             no_verify,
             deduplicate,
+            block_hashes,
             log,
             scan_first,
             aff4l_legacy,
@@ -595,6 +623,7 @@ fn run() -> ExitCode {
                     chunks_per_bevy,
                     verify_written_container: !no_verify,
                     deduplicate,
+                    block_hashes,
                     multi_part_after: multi_part.map(PartSize::bytes),
                     scan_first,
                     // Clap enforces the exclusion, so the two flags cannot both be
@@ -1105,19 +1134,28 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
             alterations.push(alteration);
         }
 
-        // AFF4-L 2019 §3.4 stores a small file as a ZIP segment and a larger
-        // one as
-        // an ImageStream whose ARN is the file's own. Both are FileImage
-        // objects, so the type list is what distinguishes them — reading only
-        // segments silently skipped every file above 1 MiB.
+        // A file's bytes live in one of AFF4-L v1.0-ALPHA §6's forms, and the
+        // type list is what says which. Reading only ZIP segments silently
+        // skipped every file above the segment threshold; reading only segments
+        // and streams silently skipped every map-backed one.
+        //
         // Types are full IRIs, so compare the local name after the fragment
         // separator: `http://aff4.org/Schema#ImageStream`.
-        let is_stream = object
-            .types
-            .iter()
-            .any(|t| t.rsplit(['#', '/']).next() == Some("ImageStream"));
+        let local_type = |name: &str| {
+            object
+                .types
+                .iter()
+                .any(|t| t.rsplit(['#', '/']).next() == Some(name))
+        };
+        // AFF4-L v1.0-ALPHA §6.4: the file's ARN is itself an ImageStream.
+        let is_stream = local_type("ImageStream");
+        // AFF4-L v1.0-ALPHA §6.3: the file's ARN is a Map over a stream it
+        // shares with others.
+        // Checked before the segment fallback, because a map-backed file has no
+        // member of its own and would otherwise be reported unreadable.
+        let is_map = local_type("Map");
 
-        let bytes = if is_stream {
+        let bytes = if is_stream || is_map {
             // Parsed once, on the first stream-backed file, and reused for
             // every later one. Lazy rather than eager so a container holding
             // only ZIP segments never parses the graph at all.
@@ -1132,7 +1170,16 @@ fn run_export_logical(path: &std::path::Path, target: &std::path::Path) -> ExitC
                     }
                 },
             };
-            match read_logical_stream(&mut container, graph, object, &locus_for(path)) {
+            // A subject typed both is a container contradicting itself about
+            // where its bytes are, which `conformance` reports as an ambiguous
+            // storage form. The map is followed, since it is the form that
+            // names its target explicitly rather than by convention.
+            let read = if is_map {
+                read_mapped_file(&mut container, graph, object, &locus_for(path))
+            } else {
+                read_logical_stream(&mut container, graph, object, &locus_for(path))
+            };
+            match read {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("  skipped {recorded}: {e}");
@@ -1307,6 +1354,52 @@ fn read_logical_stream(
         },
         locus,
     )?;
+    Ok(out)
+}
+
+/// Read one map-backed logical file, per AFF4-L v1.0-ALPHA §6.3.
+///
+/// The file's own ARN carries the `aff4:Map` type, so its bytes are a range of
+/// a stream shared with other files rather than a member of its own. Resolved
+/// through [`aff4tools::image::Image`], which is the same path `verify` uses —
+/// the two must agree about which bytes are a given file's, or one of them is
+/// reporting on content the other would not extract.
+fn read_mapped_file(
+    container: &mut aff4tools::Container,
+    graph: &aff4tools::rdf::Graph,
+    object: &aff4tools::model::Aff4Object,
+    locus: &aff4tools::Locus,
+) -> Result<Vec<u8>, aff4tools::Error> {
+    let lexicon = container.lexicon();
+    let mapping = container.name_mapping();
+    let image = aff4tools::image::Image::open(
+        &object.arn,
+        container.volume_mut(),
+        graph,
+        lexicon,
+        mapping,
+        locus,
+    )?;
+
+    let size = usize::try_from(image.size()).unwrap_or_default();
+    let mut out = vec![0u8; size];
+    let mut filled = 0;
+    // `read_at` is short only at the end of the image, so a short read that
+    // leaves the buffer unfilled means the map covers less than it declared.
+    // Looping rather than asserting one call keeps that a real read result.
+    while filled < out.len() {
+        let read = image.read_at(
+            container.volume_mut(),
+            filled as u64,
+            &mut out[filled..],
+            locus,
+        )?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    out.truncate(filled);
     Ok(out)
 }
 
@@ -1612,14 +1705,18 @@ fn describe_estimate(estimate: &WorkEstimate, logical: bool) -> String {
         format!(" ({})", estimate.codecs.join(", "))
     };
 
+    // The total spans every storage form the container uses, not only the
+    // bevy-backed ones — on a logical container most of it is ZIP segments.
+    // The bevy count is stated as a property of the streams rather than of the
+    // total, because "9.1 GiB across 126 bevies" read as though 126 bevies held
+    // all of it when they held about a third.
     let mut out = format!(
-        "Reading {} across {} bevies{codecs}",
+        "Reading {} of content{codecs}",
         human_bytes(estimate.bytes_to_read),
-        estimate.bevies,
     );
     if estimate.bytes_on_disk > 0 && estimate.bytes_on_disk != estimate.bytes_to_read {
         out.push_str(&format!(
-            ", from {} compressed on disk",
+            ", stored in {} on disk",
             human_bytes(estimate.bytes_on_disk)
         ));
     }
@@ -1644,35 +1741,30 @@ fn describe_estimate(estimate: &WorkEstimate, logical: bool) -> String {
         return finish_estimate(out, estimate);
     }
 
+    // **A stream's size and codec are not stated here.** They named an object
+    // an examiner has no way to identify — "372.4 MiB (lz4)" says nothing about
+    // which file it is — and on a logical container the list was seven lines of
+    // interior structure before the run had begun.
+    //
+    // What survives is the one fact that is a finding rather than description:
+    // a recorded digest that will not be recomputed. That says something the
+    // container declares will go unchecked, which must never be silent.
+    //
+    // **A stream carrying no `aff4:hash` of its own is not reported here, and
+    // saying it was undigested was wrong.** The AFF4-L v1.0-ALPHA §6.3 shared
+    // stream deliberately records none: its bytes belong to the files packed
+    // into it, each of which carries its own content digest and the four AFF4
+    // Standard v1.0a §6.2 map digests locating it. A digest over the whole
+    // concatenation would attest the order files happened to be walked in.
+    //
+    // On a real acquisition that produced "2.0 GiB of stored data carries no
+    // recomputable digest" about a stream whose 33 files were covered by 165
+    // digests, every one recomputed and matched. Whether a *stream* names a
+    // digest is not the same question as whether its *bytes* are protected, and
+    // only the second is worth an examiner's attention.
     for stream in &estimate.streams {
-        let linear = if stream.linear.is_empty() {
-            "no recomputable acquisition hash".to_owned()
-        } else {
-            let names: Vec<String> = stream.linear.iter().map(ToString::to_string).collect();
-            format!("acquisition hash {}", names.join(" + "))
-        };
-        out.push_str(&format!(
-            "  {} ({}): {linear}\n",
-            human_bytes(stream.size),
-            stream.codec,
-        ));
-
-        if !stream.block_hashes.is_empty() {
-            let names: Vec<String> = stream
-                .block_hashes
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            out.push_str(&format!(
-                "    per-chunk block hashes: {}\n",
-                names.join(" + ")
-            ));
-        } else if estimate.block_hashes {
-            out.push_str("    per-chunk block hashes: none stored\n");
-        }
-
         for (predicate, reason) in &stream.not_recomputed {
-            out.push_str(&format!("    not recomputed: {predicate} — {reason}\n"));
+            out.push_str(&format!("  not recomputed: {predicate} — {reason}\n"));
         }
     }
 
@@ -1731,8 +1823,6 @@ fn describe_streams_in_bulk(estimate: &WorkEstimate) -> String {
             blocks.into_iter().collect::<Vec<_>>().join(" + "),
             thousands(with_blocks),
         ));
-    } else if estimate.block_hashes {
-        out.push_str("    per-chunk block hashes: none stored\n");
     }
 
     if not_recomputed > 0 {
@@ -1937,20 +2027,6 @@ impl aff4tools::ProgressObserver for ProgressReporter {
                     format!("/{:.1} GiB | {percent:.0}%", total / GIB)
                 });
 
-                // Explicitly scoped. `BevyCompleted` counts one stream's
-                // bevies, so beside a meter spanning nine parts a bare
-                // "5/32 bevies" reads as the whole set and is off by an order
-                // of magnitude. Naming the part makes the smaller number right
-                // rather than misleading.
-                let bevies =
-                    self.bevies
-                        .map_or_else(String::new, |(done, total)| match self.part {
-                            Some((part, parts)) => {
-                                format!("{done}/{total} bevies in part {part}/{parts}")
-                            }
-                            None => format!("{done}/{total} bevies"),
-                        });
-
                 // Time remaining
                 let remaining = total.map_or_else(String::new, |total| {
                     #[allow(clippy::cast_precision_loss)]
@@ -1971,11 +2047,11 @@ impl aff4tools::ProgressObserver for ProgressReporter {
                 // Single-spaced, and 73 columns at its widest. Staying inside
                 // 80 is what makes the repaint work at all: a wrapped line
                 // cannot be overwritten by the carriage return.
+                // No bevy count. It appeared only while a bevy-backed stream
+                // was being read and vanished between them, so the line's width
+                // jumped as it came and went — and the number itself told an
+                // examiner nothing about progress that the byte meter did not.
                 let mut line = format!("{done_gib:.1}{share} | {}/s", human_bytes(rate as u64));
-                if !bevies.is_empty() {
-                    line.push_str(" | ");
-                    line.push_str(&bevies);
-                }
                 if !remaining.is_empty() {
                     line.push_str(" | ");
                     line.push_str(&remaining);
@@ -2125,31 +2201,99 @@ fn write_verification(
     let values = report.recorded_value_count();
     let chunks = report.chunk_digest_count();
 
+    // Files whose bytes were read but which record no digest at all.
+    //
+    // **The check count alone cannot show this.** A container recording no
+    // digests produces no checks for those files, so the total simply comes out
+    // smaller — "2 checks attempted; 2 completed" on a container where two
+    // files went entirely unverified reads as a clean pass. Nothing was
+    // established about those bytes, and that has to be said rather than
+    // inferred from a number that is not there.
+    //
+    // # Two conditions, both learned from a false positive
+    //
+    // A first attempt counted every accounting entry with no check naming it,
+    // and reported a fully verified 465 GiB APFS image as unverified. Two
+    // separate reasons, and the fix needs both:
+    //
+    // **`traversed` must be true.** An entry can describe an image whose
+    // composition was read from its map without the bytes being produced, and
+    // that is not a file whose digest is missing.
+    //
+    // **A digest may live on a related subject.** A `DiskImage`'s bytes are
+    // covered by the `aff4:hash` on the `ImageStream` beneath it, whose ARN is
+    // the image's own with a suffix. Comparing ARNs for equality called that
+    // image undigested while both its digests matched.
+    //
+    // What remains is narrow and true: an image this run actually read, with no
+    // digest recorded against it or anything under it.
+    // **Both directions are hashed, never scanned.** A check's subject is
+    // either the image itself or a child of it, so the set holds each subject
+    // *and* the prefix before its final `/`. Membership is then two lookups per
+    // image rather than a walk of every check.
+    //
+    // The scan this replaced was quadratic and allocated inside the inner loop:
+    // 130,503 images against 130,625 checks is 17 billion comparisons, each
+    // building a `String` to test a prefix. It ran at 99% of one core and had
+    // not finished after minutes — a hang, on the report of a run whose actual
+    // verification had already completed.
+    let mut covered: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(report.checks.len() * 2);
+    for check in &report.checks {
+        let subject = check.subject.as_str();
+        covered.insert(subject);
+        // A digest recorded on a child, such as the `ImageStream` beneath a
+        // `DiskImage`, covers the parent. Registering the parent here is what
+        // makes that a lookup instead of a prefix search.
+        if let Some((parent, _)) = subject.rsplit_once('/') {
+            covered.insert(parent);
+        }
+    }
+    let unverified = report
+        .read_accounting
+        .iter()
+        .filter(|entry| entry.traversed && !covered.contains(entry.image.as_str()))
+        .count();
+
     writeln!(out)?;
     // Stated before the results, not after them: how deep the verification
     // went qualifies every number that follows, and an examiner who reads only
     // the top of the report still needs it. It used to sit below the whole
     // per-check listing, which on a large container put it a million lines
     // away from the figures it qualifies.
-    if report.block_hashes_verified && !logical.is_empty() {
+    // Not gated on the container being logical. A disk image records block
+    // hashes over its one stream, and how many per-chunk digests were
+    // recomputed is the same fact about the same work — gating it on AFF4-L
+    // meant a physical image reported the coverage nowhere at all.
+    if report.block_hashes_verified {
         let files = block_hash_subject_count(report);
+        // The digest count leads, because it is the figure that says how much
+        // work was done. The earlier form put it last behind "6 of 130,480",
+        // a ratio that read as though 130,474 files had gone unchecked when
+        // every one of them had its content digest verified — those files
+        // simply store no per-chunk digests to recompute.
         writeln!(
             out,
-            "Block hashes: per-chunk digests recomputed for {} of {} file(s) \
-             ({} digests)",
+            "Block hashes: {} per-chunk digests recomputed for {} file(s).",
+            thousands(chunks),
             thousands(files),
-            thousands(file_check_subjects(report, &logical)),
-            thousands(chunks)
         )?;
     }
     writeln!(out, "Verification results:")?;
     writeln!(out, "{attempted} checks attempted; {checked} completed.")?;
     if chunks > 0 {
+        // Four numbers, and the last two need their relationship stated. A
+        // block-hash check compares a whole sequence rather than one stored
+        // value, so the per-chunk digests are the leaves inside a handful of
+        // checks and not a separate tally beside them. Naming the files they
+        // belong to is what makes the two figures reconcile.
+        let block_files = block_hash_subject_count(report);
         writeln!(
             out,
-            "{matched} of {checked} matched ({values} recorded digest value(s), \
-             {} per-chunk digests)",
-            thousands(chunks)
+            "{matched} of {checked} matched ({values} recorded hash value(s), \
+             plus {} file(s) in ImageStreams with {} per-chunk digests)",
+            thousands(block_files),
+            thousands(chunks),
         )?;
     } else {
         writeln!(
@@ -2161,6 +2305,16 @@ fn write_verification(
         writeln!(
             out,
             " *********** {declined} recorded digest(s) were not recomputed ***********"
+        )?;
+    }
+    // A different finding from a declined digest: there was no digest to
+    // decline. The container describes these files and stores their bytes, and
+    // records nothing to check them against.
+    if unverified > 0 {
+        writeln!(
+            out,
+            " *********** {} file(s) record no digest and could not be verified ***********",
+            thousands(unverified)
         )?;
     }
     // Named separately from the count above, because the two are different
@@ -2257,8 +2411,14 @@ fn write_verification(
         if collapse {
             for (shape, subjects) in group_notes(&report.notes) {
                 match subjects.len() {
-                    0 => {}
-                    1 => writeln!(out, "  {shape}")?,
+                    // Zero and one both print the note as it stands. Zero means
+                    // the note is not an `image <ARN> ...` note at all — it is
+                    // prose about the container, and the chunk-localization
+                    // note ("the first block-hash difference is at chunk N") is
+                    // one of those. That case used to be discarded silently, so
+                    // a real integrity finding vanished and left an empty
+                    // "Notes" header standing above nothing.
+                    0 | 1 => writeln!(out, "  {shape}")?,
                     _ => {
                         writeln!(out, "  {} images {shape}", subjects.len())?;
                         for subject in subjects {
@@ -2274,26 +2434,57 @@ fn write_verification(
         }
     }
 
-    writeln!(out)?;
-    // Describe what was done with block hashes. The header already stated the
-    // coverage, so this is the closing confirmation rather than the only
-    // mention.
-    if report.block_hashes_verified {
-        writeln!(out, "All per-chunk block hashes were recomputed.")?;
-    } else if block_hashes_requested {
-        writeln!(out, "This container stores no per-chunk block hashes.")?;
-    } else {
-        writeln!(
-            out,
-            "Per-chunk block hashes were not recomputed, per --no-block-hashing."
-        )?;
+    // Only the cases where per-chunk digests were *not* recomputed say so. The
+    // success case is already stated above, by the "Block hashes: N per-chunk
+    // digests recomputed for M file(s)" line — repeating it as a closing
+    // sentence said the same thing twice.
+    //
+    // The two remaining branches are not repetition: each reports work that did
+    // not happen, which nothing else in the report states.
+    if !report.block_hashes_verified {
+        writeln!(out)?;
+        if block_hashes_requested {
+            writeln!(out, "This container stores no per-chunk block hashes.")?;
+        } else {
+            writeln!(
+                out,
+                "Per-chunk block hashes were not recomputed, per --no-block-hashing."
+            )?;
+        }
     }
 
+    // The closing verdict. An examiner who reads only the last line of a long
+    // report must not be told nothing is wrong when something is.
+    //
+    // Three outcomes, and the middle one used to be silent here: a container
+    // whose bytes could not be read reported its starred count near the top and
+    // then ended on the routine "List every digest" line, which reads as a
+    // clean finish. A digest that could not be recomputed is not a mismatch,
+    // but it is equally not a pass — nothing was established about those bytes.
+    //
+    // **The rule these three branches encode**: a star banner appears only when
+    // a recorded digest failed, or when some recorded data was not covered by a
+    // digest that ran. A verification where every recorded digest matched and
+    // those digests cover all recorded data gets no banner at all — a star on
+    // a clean result trains an examiner to ignore stars.
+    //
+    // Both non-mismatch branches are therefore narrow. `declined` counts
+    // digests the container records that this run could not recompute.
+    // `unverified` counts images actually traversed with no digest against them
+    // or anything beneath them — see its definition for the two false positives
+    // that shaped it. A digest recorded on a related subject, such as the
+    // `ImageStream` under a `DiskImage`, is coverage and is not counted.
     if report.has_mismatch() {
         writeln!(
             out,
             "\n******** At least one recomputed digest does not match the value the \
              container recorded. ********"
+        )?;
+    } else if declined > 0 || unverified > 0 {
+        writeln!(
+            out,
+            "\n******** This container was NOT fully verified: {declined} recorded \
+             digest(s) could not be recomputed and {unverified} file(s) record none. ********"
         )?;
     } else if checked == 0 {
         writeln!(out, "\nNo hash digest was recomputed.")?;
@@ -2306,7 +2497,7 @@ fn write_verification(
     } else if collapse && !matches.is_empty() {
         writeln!(
             out,
-            "Every digest is listed with --verbose, or written as TSV with \
+            "List every digest with --verbose, or write to TSV with \
              --full-listing <PATH>."
         )?;
     }
@@ -2358,25 +2549,17 @@ fn note_shape(note: &str) -> Option<(String, Option<String>)> {
     if !arn.starts_with("aff4://") {
         return None;
     }
-    // The complaint repeats the ARN in its error chain. Take the leading
-    // sentence, and the trailing explanation after the last occurrence of the
-    // ARN — the part that says *why*, which is what distinguishes "nothing was
-    // recorded to read" from a failed comparison. The middle is the chain,
-    // which only restates the subject.
+    // The complaint repeats the ARN in its error chain, so only the leading
+    // sentence is kept. The subjects are listed under it, and each is a
+    // clickable ARN an examiner can look up.
+    //
+    // **The trailing explanation is deliberately dropped.** It said why the
+    // image could not be resolved, which is the same reason for every subject
+    // in the group — a paragraph of reasoning printed once above a list of 23
+    // ARNs, where the first clause already carried the finding. The full text
+    // stays in the per-note form used when the report is not collapsed.
     let head = complaint.split(':').next().unwrap_or(complaint).trim();
-    let tail = complaint
-        .rfind(arn)
-        .map(|at| {
-            complaint[at + arn.len()..]
-                .trim_start_matches([' ', ':'])
-                .trim()
-        })
-        .filter(|tail| !tail.is_empty());
-    let shape = match tail {
-        Some(tail) => format!("{head} — {tail}"),
-        None => head.to_string(),
-    };
-    Some((shape, Some(arn.to_string())))
+    Some((format!("{head}."), Some(arn.to_string())))
 }
 
 /// The ARNs of images that are logical files or folders.
@@ -2403,20 +2586,6 @@ fn block_hash_subject_count(report: &VerificationReport) -> usize {
         .checks
         .iter()
         .filter(|c| c.outcome.was_checked() && c.digests_covered.is_some())
-        .map(|c| c.subject.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-}
-
-/// How many distinct files carry a per-file digest.
-fn file_check_subjects(
-    report: &VerificationReport,
-    logical: &std::collections::HashSet<&str>,
-) -> usize {
-    report
-        .checks
-        .iter()
-        .filter(|c| logical.contains(c.subject.as_str()))
         .map(|c| c.subject.as_str())
         .collect::<std::collections::HashSet<_>>()
         .len()
@@ -2943,6 +3112,27 @@ fn run_info(
 }
 
 /// How an acquisition should chunk, compress, and check itself.
+/// Which algorithm digests each chunk, given the run's `--hash` selection.
+///
+/// AFF4 Standard v1.0a §6.2's table names five algorithms a block hash segment
+/// may use. `--hash` accepts eleven, so a selection may name none of the five —
+/// SHA3-512 and BLAKE3 among them. Those record per-chunk digests in SHA-256,
+/// the default, rather than under a segment suffix no reader would look for.
+///
+/// **The first match in the user's own order wins**, not a preference order of
+/// this tool's. An examiner who wrote `--hash sha512,sha256` asked for SHA-512
+/// first and gets it.
+///
+/// Returns `None` for "unset", which resolves to SHA-256 in
+/// [`StreamOptions::resolved_block_algorithm`]. One place decides the default.
+fn block_algorithm_from(
+    algorithms: &[aff4tools::HashAlgorithm],
+) -> Option<aff4tools::write::stream_writer::BlockHashAlgorithm> {
+    algorithms
+        .iter()
+        .find_map(aff4tools::write::stream_writer::BlockHashAlgorithm::of)
+}
+
 /// Not `Copy`: `algorithms` is a `Vec`, since `--hash` takes an arbitrary
 /// selection rather than one of a fixed few.
 #[derive(Debug, Clone)]
@@ -2954,6 +3144,14 @@ struct AcquireOptions {
     verify_written_container: bool,
     /// Whether a logical acquisition deduplicates content (AFF4-L 2019 §4).
     deduplicate: bool,
+    /// Whether a logical acquisition records per-chunk block hashes for files
+    /// that would not otherwise get them.
+    ///
+    /// AFF4 Standard v1.0a §6.2 makes the approach optional. A physical
+    /// acquisition ignores this and always records them; so does a logical file
+    /// large enough to hold its own image stream, where the decision is made
+    /// per file rather than per run.
+    block_hashes: bool,
     /// When set, write the image across several parts, starting a new one once
     /// the current part reaches this many bytes on disk. Applies to the
     /// byte-stream sources, `--image` and `--device`; `--logical` is refused.
@@ -3036,6 +3234,7 @@ fn run_acquire(
         chunks_per_bevy,
         verify_written_container,
         multi_part_after,
+        ref algorithms,
         ..
     } = settings;
     use aff4tools::write::acquire::ImageSource;
@@ -3202,7 +3401,13 @@ names for this format; writing {}",
         chunk_size,
         chunks_per_segment: chunks_per_bevy,
         codec: compression.into(),
+        // Unconditional for a physical acquisition, and not reachable by
+        // `--block-hashes`. An image of a whole device is far too large for
+        // "this image is corrupt" to tell an examiner anything actionable, so
+        // per-chunk digests are what make a fault locatable. AFF4 Standard
+        // v1.0a §6.2 leaves the choice open; this is where it is worth its cost.
         block_hashes: true,
+        block_algorithm: block_algorithm_from(algorithms),
     };
     let _ = writeln!(
         out,
@@ -3305,6 +3510,10 @@ names for this format; writing {}",
         &entries,
         std::slice::from_ref(&written.arn),
         written.size,
+        // The stream's own BlockHashes digests, which the block map digest
+        // composes. A physical acquisition always records block hashes, so
+        // this is never empty here.
+        &written.block_hash_digests,
         &locus,
     ) {
         Ok(m) => m,
@@ -3324,7 +3533,7 @@ names for this format; writing {}",
         human_bytes(written.size),
         written.bevy_count
     );
-    write_acquired_digests(out, &written);
+    write_acquired_digests(out, &written, Some(&mapped));
 
     // The same split the device log draws: reading the source is done, and
     // what follows is checking what was written.
@@ -3434,6 +3643,7 @@ fn run_acquire_from_aff4(
         chunks_per_bevy,
         verify_written_container,
         multi_part_after,
+        ref algorithms,
         ..
     } = settings;
 
@@ -3473,7 +3683,13 @@ fn run_acquire_from_aff4(
         chunk_size,
         chunks_per_segment: chunks_per_bevy,
         codec: compression.into(),
+        // Unconditional for a physical acquisition, and not reachable by
+        // `--block-hashes`. An image of a whole device is far too large for
+        // "this image is corrupt" to tell an examiner anything actionable, so
+        // per-chunk digests are what make a fault locatable. AFF4 Standard
+        // v1.0a §6.2 leaves the choice open; this is where it is worth its cost.
         block_hashes: true,
+        block_algorithm: block_algorithm_from(algorithms),
     };
     let _ = writeln!(
         out,
@@ -3563,6 +3779,10 @@ fn run_acquire_from_aff4(
         &entries,
         std::slice::from_ref(&written.arn),
         written.size,
+        // The stream's own BlockHashes digests, which the block map digest
+        // composes. A physical acquisition always records block hashes, so
+        // this is never empty here.
+        &written.block_hash_digests,
         &locus,
     ) {
         Ok(m) => m,
@@ -3582,7 +3802,7 @@ fn run_acquire_from_aff4(
         human_bytes(written.size),
         written.bevy_count
     );
-    write_acquired_digests(out, &written);
+    write_acquired_digests(out, &written, Some(&mapped));
     stamp_acquisition_complete(out);
 
     let _ = writeln!(out);
@@ -3782,6 +4002,7 @@ fn run_acquire_logical(
         chunk_size,
         chunks_per_bevy,
         deduplicate,
+        block_hashes,
         verify_written_container,
         // `run_acquire` refuses `--multi-part` alongside `--logical` with a
         // worded error, so it never reaches here.
@@ -3795,7 +4016,11 @@ fn run_acquire_logical(
             chunk_size,
             chunks_per_segment: chunks_per_bevy,
             codec: compression.into(),
-            block_hashes: true,
+            // The run-wide setting. A file large enough to hold its own image
+            // stream overrides it to `true` in `record_large_file`, because the
+            // decision belongs to the file's size rather than to the run.
+            block_hashes,
+            block_algorithm: block_algorithm_from(&algorithms),
         },
         deduplicate,
         profile: logical_profile,
@@ -3808,14 +4033,9 @@ fn run_acquire_logical(
     }
     let _ = writeln!(out, "Output:      {}", output.display());
     let _ = writeln!(out, "Log:         {}", log_path.display());
-    let _ = writeln!(
-        out,
-        "Large files: ImageStream above {} ({} chunks, {} per bevy){}",
-        human_bytes(aff4tools::write::logical::MAX_SEGMENT_RESIDENT_SIZE),
-        chunk_size,
-        chunks_per_bevy,
-        if deduplicate { ", deduplicated" } else { "" }
-    );
+    if deduplicate {
+        let _ = writeln!(out, "Storage:     deduplicated");
+    }
     let _ = writeln!(out);
 
     // `--scan-first` inventories the tree to completion before the container
@@ -4185,6 +4405,7 @@ fn run_acquire_device(
         chunks_per_bevy,
         verify_written_container,
         multi_part_after,
+        ref algorithms,
         ..
     } = settings;
     use aff4tools::write::container_writer::ContainerWriter;
@@ -4257,7 +4478,13 @@ fn run_acquire_device(
         chunk_size,
         chunks_per_segment: chunks_per_bevy,
         codec: compression.into(),
+        // Unconditional for a physical acquisition, and not reachable by
+        // `--block-hashes`. An image of a whole device is far too large for
+        // "this image is corrupt" to tell an examiner anything actionable, so
+        // per-chunk digests are what make a fault locatable. AFF4 Standard
+        // v1.0a §6.2 leaves the choice open; this is where it is worth its cost.
         block_hashes: true,
+        block_algorithm: block_algorithm_from(algorithms),
     };
     let _ = writeln!(
         out,
@@ -4388,15 +4615,22 @@ fn run_acquire_device(
         target_offset: 0,
         target_id: 0,
     }];
-    if let Err(e) = aff4tools::write::map_writer::write_map(
+    // Kept rather than discarded: the map carries its own digests, and the
+    // acquisition log accounts for every digest the container records.
+    let mapped = match aff4tools::write::map_writer::write_map(
         &mut writer,
         &entries,
         std::slice::from_ref(&written.arn),
         written.size,
+        // The stream's own BlockHashes digests, which the block map digest
+        // composes. A physical acquisition always records block hashes, so
+        // this is never empty here.
+        &written.block_hash_digests,
         &locus,
     ) {
-        return ExitCode::from(report_error(&e));
-    }
+        Ok(mapped) => mapped,
+        Err(e) => return ExitCode::from(report_error(&e)),
+    };
 
     if let Err(e) = writer.finish() {
         return ExitCode::from(report_error(&e));
@@ -4409,7 +4643,7 @@ fn run_acquire_device(
         human_bytes(written.size),
         written.bevy_count
     );
-    write_acquired_digests(out, &written);
+    write_acquired_digests(out, &written, Some(&mapped));
 
     // Unreadable regions are a finding about the evidence and are reported
     // prominently, never folded into a summary line.
@@ -4480,6 +4714,7 @@ fn run_acquire_device(
 fn write_acquired_digests(
     out: &mut impl Write,
     written: &aff4tools::write::stream_writer::WrittenStream,
+    mapped: Option<&aff4tools::write::map_writer::WrittenMap>,
 ) {
     /// The trailing path element of an ARN, which is how the container names
     /// the object an examiner is looking at (`data`, `blockhash.md5`).
@@ -4501,6 +4736,22 @@ fn write_acquired_digests(
             // SHA-512 always: the segment digest's algorithm is fixed by the
             // format, and is not the algorithm of the per-chunk hashes inside.
             let _ = writeln!(out, "  {} SHA512 {}", suffix(&digest.arn), digest.hex);
+        }
+    }
+
+    // The map's own digests, which Phase 10 began recording. Without these the
+    // log named two digests while verification counted eleven, and the nine it
+    // never showed were exactly the ones protecting the map — the structure
+    // that says which bytes belong where.
+    //
+    // SHA-512 always: AFF4 Standard v1.0a §6.2 fixes the algorithm for this
+    // construction rather than following `--hash`.
+    if let Some(mapped) = mapped
+        && !mapped.digests.is_empty()
+    {
+        let _ = writeln!(out, "Map hashes:");
+        for (property, hex) in &mapped.digests {
+            let _ = writeln!(out, "  {property} SHA512 {hex}");
         }
     }
 }
@@ -5551,25 +5802,99 @@ fn report_error(err: &Error) -> u8 {
 
 /// Group a count with thousands separators: `978880` becomes `978,880`.
 ///
-/// Digest counts reach the hundreds of thousands on a real acquisition, where
-/// an ungrouped run of digits is easy to misread by an order of magnitude.
-fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
+/// Re-exported from the library so the binary's report and the library's own
+/// share one implementation. Two would eventually disagree about a boundary.
+use aff4tools::thousands;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use aff4tools::{Feature, Locus, NotAff4Reason};
+
+    /// Writing the report stays linear in the number of files.
+    ///
+    /// **This is a hang guard, not a speed test.** The unverified-file check
+    /// once scanned every check for every accounting entry, building a `String`
+    /// inside the inner loop to test a prefix. On a real acquisition of 130,503
+    /// files that is 17 billion comparisons: the run pinned one core at 99% and
+    /// never returned, *after* every digest had already been verified. The
+    /// verification was correct and complete; only the report never arrived.
+    ///
+    /// Correctness tests cannot catch this. Every fixture in the suite holds a
+    /// handful of files, where a quadratic scan finishes instantly.
+    ///
+    /// The bound is deliberately loose. Eight times the files should cost about
+    /// eight times as much; 24x leaves room for allocator noise and a loaded
+    /// machine while still failing decisively on anything quadratic, which
+    /// would cost 64x.
+    #[test]
+    fn writing_the_report_stays_linear_in_file_count() {
+        use aff4tools::map::ReadAccounting;
+        use aff4tools::verify::{
+            Coverage, HashCheck, ImageAccounting, Outcome, VerificationReport,
+        };
+        use aff4tools::{Arn, HashAlgorithm, ObjectRole};
+
+        fn write_report_for(files: usize) -> std::time::Duration {
+            let mut report = VerificationReport {
+                source_path: std::path::PathBuf::from("scale.aff4l"),
+                checks: Vec::with_capacity(files),
+                read_accounting: Vec::with_capacity(files),
+                notes: Vec::new(),
+                block_hashes_verified: false,
+            };
+            for i in 0..files {
+                let arn = Arn::parse(
+                    &format!("aff4://00000000-0000-4000-8000-{i:012}"),
+                    &Locus::new("scale"),
+                )
+                .expect("a well-formed test ARN");
+                report.checks.push(HashCheck {
+                    subject: arn.clone(),
+                    role: ObjectRole::FileImage,
+                    predicate: "hash".to_owned(),
+                    algorithm: HashAlgorithm::Sha256,
+                    coverage: Coverage::WholeImage,
+                    expected: "a".repeat(64),
+                    actual: "a".repeat(64),
+                    outcome: Outcome::Match,
+                    digests_covered: None,
+                });
+                report.read_accounting.push(ImageAccounting {
+                    image: arn,
+                    accounting: ReadAccounting {
+                        stored: 1024,
+                        described: 0,
+                        unknown_placeholder: 0,
+                        gap_filled: 0,
+                        gap_fill: None,
+                    },
+                    traversed: true,
+                });
+            }
+
+            let start = std::time::Instant::now();
+            let mut out: Vec<u8> = Vec::new();
+            write_verification(&mut out, &report, false, false, None)
+                .expect("writing to a Vec cannot fail");
+            let elapsed = start.elapsed();
+            assert!(!out.is_empty());
+            elapsed
+        }
+
+        // Warm up, so the first allocation is not inside a measurement.
+        let _ = write_report_for(500);
+
+        let small = write_report_for(2_000);
+        let large = write_report_for(16_000);
+
+        assert!(
+            large.as_secs_f64() < small.as_secs_f64() * 24.0,
+            "reporting 8x the files took {large:?} against {small:?} for the \
+             smaller run, which is the shape of a quadratic scan"
+        );
+    }
 
     /// Guards the distinction the taxonomy exists for: an unsupported feature
     /// must not be annotated as an evidence-integrity finding.
@@ -5668,6 +5993,7 @@ mod tests {
                 chunks_per_segment: 2,
                 codec: aff4tools::Codec::Stored,
                 block_hashes: true,
+                block_algorithm: None,
             },
             multi_part_after: 64 * 1024,
         };

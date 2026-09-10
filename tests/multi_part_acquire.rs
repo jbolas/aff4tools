@@ -39,6 +39,7 @@ fn options(multi_part_after: u64) -> MultiPartOptions {
             chunks_per_segment: 2,
             codec: Codec::Stored,
             block_hashes: true,
+            block_algorithm: None,
         },
         multi_part_after,
     }
@@ -368,9 +369,13 @@ fn splitting_does_not_change_the_digests_of_the_stored_data() {
         for path in paths {
             let file = std::fs::File::open(path).unwrap();
             let mut archive = zip::ZipArchive::new(file).unwrap();
+            // Any block-hash segment, whatever algorithm produced it. Naming
+            // one would make this a test of the default `--hash` selection
+            // rather than of splitting, which is what it broke as when the
+            // default moved off SHA-1 in Phase 10.
             let mut names: Vec<String> = archive
                 .file_names()
-                .filter(|n| n.ends_with(".blockHash.sha1"))
+                .filter(|n| n.contains(".blockHash."))
                 .map(str::to_owned)
                 .collect();
             names.sort();
@@ -959,8 +964,12 @@ fn multi_part_reports_block_hashes_recomputed() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
 
+    // The closing "All per-chunk block hashes were recomputed." sentence was
+    // removed as repetition: the count line above already says it, and with a
+    // number. What this test means is unchanged — the set's block hashes were
+    // recomputed — so it now asserts against the line that states it.
     assert!(
-        stdout.contains("All per-chunk block hashes were recomputed."),
+        stdout.contains("per-chunk digests recomputed for"),
         "multi-part set did not report full block-hash coverage: {stdout}"
     );
     assert!(

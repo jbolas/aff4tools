@@ -93,20 +93,24 @@ impl ImageStream {
         let chunk_size = required_u64(graph, arn, &chunk_size_iri, "chunkSize", &locus)?;
         let chunks_in_segment = required_u64(graph, arn, &chunks_iri, "chunksInSegment", &locus)?;
 
-        let codec_iri = graph
+        // A stream that names no compression method stores its chunks
+        // verbatim. AFF4 Standard v1.0a §3.3: "Where compression is used
+        // within the Image Stream, the object must have a property
+        // aff4:compressionMethod set to a resource identifying the compression
+        // algorithm. Where there is no compressionMethod set, it is assumed
+        // that chunks are stored."
+        //
+        // The absence is therefore a statement, not an omission, and refusing
+        // it would declare a conformant container malformed and leave its
+        // digests unverified — a false finding about the evidence.
+        let codec = match graph
             .object(arn.as_str(), &codec_predicate)
             .and_then(crate::rdf::Value::as_iri)
-            .ok_or_else(|| {
-                Error::malformed(
-                    locus.clone().predicate(&codec_predicate),
-                    "the stream declares no compression method; it cannot be \
-                     read without knowing how its chunks are encoded"
-                        .to_owned(),
-                )
-            })?;
-
-        let codec = Codec::from_iri(codec_iri)
-            .ok_or_else(|| Codec::unsupported(codec_iri, format!("reading stream {arn}")))?;
+        {
+            Some(codec_iri) => Codec::from_iri(codec_iri)
+                .ok_or_else(|| Codec::unsupported(codec_iri, format!("reading stream {arn}")))?,
+            None => Codec::Stored,
+        };
 
         let chunk_size = usize::try_from(chunk_size).map_err(|_| {
             Error::malformed(

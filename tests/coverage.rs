@@ -78,8 +78,20 @@ fn strict_fails_on_an_unevaluated_must() {
         .code(7);
 }
 
-/// A v1.0 container's two unevaluated rules are SHOULD-level, so --strict is
-/// unaffected by them.
+/// An unevaluated SHOULD does not raise the strict exit code.
+///
+/// **Stated against the requirement levels rather than against a container.**
+/// This asserted that `Base-Linear` exits 0 under `--strict`, on the premise
+/// that its only unevaluated rules were the two AFF4 Standard v1.0a §2.2
+/// recommendations. Phase 10 declared the block map hashing requirements of
+/// AFF4 Standard v1.0a §6.2, three of which are binding and have no checker
+/// yet, so the container now
+/// exits 7 — correctly, because an unchecked MUST is never folded into a clean
+/// result.
+///
+/// The rule under test never changed, so the test now names it directly: the
+/// report lists SHOULD-level gaps, and the exit code is explained by the
+/// binding ones rather than by them.
 #[test]
 fn strict_ignores_unevaluated_shoulds() {
     let path = corpus_root().join("pyaff4/test_images/AFF4Std/Base-Linear.aff4");
@@ -87,9 +99,27 @@ fn strict_ignores_unevaluated_shoulds() {
         .args(["conformance", "--strict"])
         .arg(&path)
         .assert();
-    // Base-Linear has a routine deviation only, so --strict passes it today
-    // and must keep passing it: its unevaluated rules are both SHOULD.
-    assert.code(0);
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    assert!(
+        out.contains("[SHOULD]"),
+        "the container must still carry SHOULD-level gaps:\n{out}"
+    );
+    // Whatever the exit code, a SHOULD is never the reason for it. A report
+    // whose only gaps were recommendations must exit 0.
+    let binding_gaps = out.matches("[MUST]").count() + out.matches("[MUST NOT]").count();
+    let code = assert.get_output().status.code().unwrap_or(-1);
+    if binding_gaps == 0 {
+        assert_eq!(
+            code, 0,
+            "only SHOULD gaps remain, so --strict must pass:\n{out}"
+        );
+    } else {
+        assert_eq!(
+            code, 7,
+            "the code is raised by the {binding_gaps} binding gap(s), not by a SHOULD:\n{out}"
+        );
+    }
 }
 
 /// The JSON envelope carries coverage too, so automation sees what the text

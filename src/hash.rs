@@ -421,6 +421,33 @@ pub fn digest_of(algorithm: &HashAlgorithm, bytes: &[u8]) -> Option<Digest> {
     hasher.finish().into_iter().next()
 }
 
+/// Compute one digest over a slice as raw bytes rather than hex.
+///
+/// AFF4 Standard v1.0a §6.2 is explicit that a block hash segment holds the
+/// digests as bytes: "Block Hash Segments store each hash as bytes and not in
+/// encoded form (eg Hex)". Every other digest this crate records is hex in the
+/// turtle, so this is the one place raw bytes are wanted.
+///
+/// Returns `None` for an algorithm this build cannot compute.
+#[must_use]
+pub fn digest_bytes_of(algorithm: &HashAlgorithm, bytes: &[u8]) -> Option<Vec<u8>> {
+    let digest = digest_of(algorithm, bytes)?;
+    let hex = digest.hex().as_bytes();
+    // The hex a `Digest` carries is this crate's own output, so it is always
+    // even-length and valid; decoding cannot fail. Returning `None` rather than
+    // panicking keeps that assumption from becoming a crash if it ever stops
+    // holding.
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_chunks::<2>().0 {
+        let text = std::str::from_utf8(pair).ok()?;
+        out.push(u8::from_str_radix(text, 16).ok()?);
+    }
+    Some(out)
+}
+
 /// Render bytes as lowercase hex.
 fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;

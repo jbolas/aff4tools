@@ -184,6 +184,11 @@ fn pyaff4_sees_our_container_as_a_physical_image() {
         &entries,
         std::slice::from_ref(&stream.arn),
         stream.size,
+        // The stream's own BlockHashes digests, so this container carries the
+        // AFF4 Standard v1.0a §6.2 block map digest exactly as an acquisition
+        // does. Passing an empty slice would make this a test of a shape
+        // aff4tools never writes.
+        &stream.block_hash_digests,
         &locus,
     )
     .unwrap();

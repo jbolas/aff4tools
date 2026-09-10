@@ -689,7 +689,7 @@ impl Container {
             // pass has not reached yet.
             defer_object_references(&object, &mut deferred);
 
-            report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
+            report_any_generation(&object, &volume_context, &mut deviations);
             report_v21(&object, &volume_context, &mut deviations);
 
             if matches!(object.locality, Locality::Local) {
@@ -898,9 +898,9 @@ v1.0-ALPHA §10.1 requires SHA-256 or stronger",
                 // Deferred rather than decided: the target may name a subject
                 // this pass has not reached yet.
                 defer_object_references(&object, &mut deferred);
-                report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
+                report_any_generation(&object, &volume_context, &mut deviations);
                 report_v21(&object, &volume_context, &mut deviations);
-                counts.observe(&object.role, has_bitstream_hash(&object));
+                observe_object(&object, &mut counts);
                 objects.push(object);
             }
             Ok(())
@@ -1049,9 +1049,9 @@ v1.0-ALPHA §10.1 requires SHA-256 or stronger",
                 &mut deviations,
             ) {
                 defer_object_references(&object, &mut deferred);
-                report_missing_zip_segment_type(&object, &volume_context, &mut deviations);
+                report_any_generation(&object, &volume_context, &mut deviations);
                 report_v21(&object, &volume_context, &mut deviations);
-                counts.observe(&object.role, has_bitstream_hash(&object));
+                observe_object(&object, &mut counts);
                 if brief_renders(&object, candidates_kept, &mut seen_types) {
                     if has_bitstream_hash(&object) {
                         candidates_kept += 1;
@@ -2263,6 +2263,48 @@ fn brief_renders(
 
 /// Whether `--brief`'s `Bitstream` section would show this object's digests.
 ///
+/// Record one object in the running counts, by role and by storage form.
+///
+/// One entry point so a caller cannot add the role count and forget the
+/// storage count, matching the pattern `report_any_generation` uses for the
+/// checkers.
+fn observe_object(object: &Aff4Object, counts: &mut crate::model::ObjectCounts) {
+    counts.observe(&object.role, has_bitstream_hash(object));
+    count_storage_form(object, counts);
+}
+
+/// Count which AFF4-L v1.0-ALPHA §6 form holds one file's bytes.
+///
+/// Only `FileImage` objects are counted. A folder has no content, and the
+/// streams and maps that carry content are not files — counting a shared stream
+/// beside the files inside it would report the same bytes twice.
+///
+/// A file recording no form at all is counted as such rather than skipped. An
+/// acquisition that could not read a file still records that it existed, and
+/// the count is what lets a report say so instead of leaving the totals not
+/// adding up.
+fn count_storage_form(object: &Aff4Object, counts: &mut crate::model::ObjectCounts) {
+    if !matches!(object.role, crate::model::ObjectRole::FileImage) {
+        return;
+    }
+    // A content-free record: no size and no digest. `storage_form_of` would
+    // report it as declaring nothing, which is true and is what `None` says
+    // here — the distinction the report needs is between "no bytes stored" and
+    // "bytes stored somewhere", not which error describes the first.
+    if object.size.is_none() && object.hashes.is_empty() {
+        counts.observe_storage(None);
+        return;
+    }
+    let form = crate::storage_form::storage_form_of_with_reference(
+        &object.types,
+        object.has_resident_stream(),
+        object.has_stream_reference(),
+        &crate::error::Locus::new(""),
+    )
+    .ok();
+    counts.observe_storage(form);
+}
+
 /// Mirrors the filter in `report::write_brief_bitstream`: a linear bitstream
 /// hash or a block-map root, not any digest the object happens to carry.
 fn has_bitstream_hash(object: &Aff4Object) -> bool {
@@ -2583,6 +2625,89 @@ tell where its content lives"
     ));
 }
 
+/// The four digests AFF4 Standard v1.0a §6.2 defines over a map's own segments.
+///
+/// `mapHash` covers the three concatenated; the others cover one segment each.
+const MAP_SEGMENT_DIGESTS: [&str; 4] = ["mapPointHash", "mapIdxHash", "mapPathHash", "mapHash"];
+
+/// Report a map that records no digest over its own segments.
+///
+/// AFF4 Standard v1.0a §6.2's map property table. **A map is the instruction
+/// sheet for reassembling an image**, so a corrupted map yields a wrong image
+/// while every stream digest still matches — the streams were never touched.
+/// Without these digests the two cases are indistinguishable.
+///
+/// # What is not reported
+///
+/// A map carrying *some* of the four is not reported. The clause defines four
+/// properties without saying an implementation must write all of them, and one
+/// digest over the `map` segment already makes corruption detectable. Demanding
+/// the complete set would report conforming containers.
+///
+/// A subject that is not a map is not reported, obviously — but neither is one
+/// whose map segments are absent. That is a different finding, an image with
+/// nothing to read, and reporting it here would misdescribe it.
+fn report_map_segment_digests(
+    object: &Aff4Object,
+    volume: &VolumeContext,
+    deviations: &mut Vec<Deviation>,
+) {
+    if !declares_local_type(object, "Map") {
+        return;
+    }
+
+    // The map's own segments must actually be present. A Map subject naming no
+    // member of this volume describes storage held elsewhere, and this check
+    // has nothing to say about it.
+    let Some(base) = object.arn.member_name(volume.volume_arn, volume.mapping) else {
+        return;
+    };
+    if !volume
+        .segment_present
+        .contains(format!("{base}/{}", crate::map::MAP_SEGMENT).as_str())
+    {
+        return;
+    }
+
+    if object
+        .hashes
+        .iter()
+        .any(|hash| MAP_SEGMENT_DIGESTS.contains(&hash.predicate.as_str()))
+    {
+        return;
+    }
+
+    deviations.push(Deviation::new(
+        volume.locus.clone().subject(object.arn.as_str()),
+        DeviationKind::MissingMapSegmentDigest,
+        format!(
+            "this map records no digest over its own segments, so a corrupted \
+map would reassemble the image wrongly while every stream digest still \
+matched; AFF4 Standard v1.0a §6.2 defines {} for this",
+            MAP_SEGMENT_DIGESTS
+                .iter()
+                .map(|p| format!("aff4:{p}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ));
+}
+
+/// Every check that applies whatever generation wrote the container.
+///
+/// Both cite the AFF4 Standard v1.0a, which governs the ZIP structure and map
+/// rules of every generation — a 1.1 or 2.1 container layers its logical
+/// vocabulary above that base rather than replacing it. One entry point so a
+/// caller cannot add one and forget the other, matching [`report_v21`].
+fn report_any_generation(
+    object: &Aff4Object,
+    volume: &VolumeContext,
+    deviations: &mut Vec<Deviation>,
+) {
+    report_missing_zip_segment_type(object, volume, deviations);
+    report_map_segment_digests(object, volume, deviations);
+}
+
 /// Every AFF4-L v1.0-ALPHA check one described object is subject to.
 ///
 /// The two halves are separate because they answer different questions —
@@ -2593,6 +2718,153 @@ fn report_v21(object: &Aff4Object, volume: &VolumeContext, deviations: &mut Vec<
     report_v21_identity(object, volume, deviations);
     report_v21_names(object, volume, deviations);
     report_v21_namespaces(object, volume, deviations);
+    report_v21_storage_form(object, volume, deviations);
+}
+
+/// The largest in-metadata storage stream AFF4-L v1.0-ALPHA §6.2 permits.
+///
+/// Its "1Kb" is read as 1024 bytes, the binary kilobyte the rest of the format
+/// uses for chunk and bevy sizes.
+const RESIDENT_STREAM_CAP: u64 = 1024;
+
+/// Report a stream whose declared storage form names no bytes, or names two
+/// (AFF4-L v1.0-ALPHA §6).
+///
+/// That section makes the `rdf:type` list the statement of where a stream's
+/// content is, so a reader selects its access path from the declared type. Both
+/// failures leave such a reader with nothing to act on: no form names no place
+/// to look, and two forms name two places with no way to tell which is
+/// authoritative.
+///
+/// **Neither is repaired by searching.** Bytes found somewhere other than where
+/// the container said would be some other stream's, and a verification reported
+/// over them would be a clean result computed on the wrong data. So the finding
+/// is recorded and the file's digests go unverified, which the `verify` report
+/// states in full.
+///
+/// Reported per subject. One self-contradicting object must not suppress the
+/// findings about the rest, which is the rule `build_object` already follows
+/// for a subject that is not a valid ARN.
+fn report_v21_storage_form(
+    object: &Aff4Object,
+    volume: &VolumeContext,
+    deviations: &mut Vec<Deviation>,
+) {
+    // AFF4-L v1.0-ALPHA §6 governs v2.1 containers, which are the ones whose
+    // ARNs map to member names literally. An earlier generation's file image
+    // is placed by the AFF4-L 2019 rules and is not measured against this
+    // clause.
+    if volume.mapping != crate::arn::NameMapping::Literal {
+        return;
+    }
+
+    // Only a logical file carries a primary stream to place. Folders hold no
+    // bytes, and the volume, case metadata, and block-hash objects are not
+    // streams at all.
+    if !matches!(object.role, crate::model::ObjectRole::FileImage) {
+        return;
+    }
+
+    // A file recorded without content at all. An acquisition that could not
+    // read a file still records that the file existed, with its name, times,
+    // and mode, and stores no bytes for it — so there is no storage form to
+    // declare and nothing here to check.
+    //
+    // **This is a completeness finding, not a conformance one, and the
+    // acquisition already makes it.** Every such path is listed individually
+    // with its reason in the SKIPPED report, which also raises the strict exit
+    // code. Reporting it a second time as a self-contradicting container would
+    // describe an honest record of an unreadable file as a malformed one.
+    //
+    // The shape is unambiguous: no `aff4:size` and no digest. A file whose
+    // bytes were stored always carries both, whichever form holds them.
+    if object.size.is_none() && object.hashes.is_empty() {
+        return;
+    }
+
+    let types: Vec<&str> = object.types.iter().map(|t| &**t).collect();
+    let form = match crate::storage_form::storage_form_of_with_reference(
+        &types,
+        object.has_resident_stream(),
+        object.has_stream_reference(),
+        volume.locus,
+    ) {
+        Ok(form) => form,
+        Err(error) => {
+            // `storage_form_of` distinguishes the two cases in its message; the
+            // kind is chosen from which one it reported.
+            let text = error.to_string();
+            let kind = if text.contains("ambiguous") {
+                DeviationKind::AmbiguousStorageForm
+            } else {
+                DeviationKind::StorageFormNotFound
+            };
+            deviations.push(Deviation::new(
+                volume.locus.clone().subject(object.arn.as_str()),
+                kind,
+                text,
+            ));
+            return;
+        }
+    };
+
+    // A resident stream whose literal is not valid base64. The form is
+    // declared and the bytes are not recoverable from it, which is the same
+    // failure as a missing member and is reported as such.
+    if form == crate::storage_form::StorageForm::InMetadata
+        && object.resident_bytes(volume.locus).is_err()
+    {
+        deviations.push(Deviation::new(
+            volume.locus.clone().subject(object.arn.as_str()),
+            DeviationKind::StorageFormNotFound,
+            "declared an in-metadata storage stream whose aff4l:dataStream literal is not valid base64, so the bytes AFF4-L v1.0-ALPHA §6.2 says are stored here cannot be recovered".to_owned(),
+        ));
+        return;
+    }
+
+    // A declared ZIP segment whose member is absent. The other three forms are
+    // resolved by `verify`, which reads them; this check is the one an
+    // inspection of the metadata alone can make.
+    // AFF4-L v1.0-ALPHA §6.2 caps the in-metadata form at one kilobyte. The
+    // bytes are present and unambiguously this stream's, so the container is
+    // read normally and the departure is reported: this says the writer chose
+    // a form the standard forbids at that size, not that the evidence is
+    // damaged.
+    if form == crate::storage_form::StorageForm::InMetadata
+        && let Ok(Some(bytes)) = object.resident_bytes(volume.locus)
+        && bytes.len() as u64 > RESIDENT_STREAM_CAP
+    {
+        deviations.push(Deviation::new(
+            volume.locus.clone().subject(object.arn.as_str()),
+            DeviationKind::OversizedResidentStream,
+            format!(
+                "an in-metadata storage stream holds {} bytes, above the one-kilobyte cap AFF4-L v1.0-ALPHA §6.2 sets for the form",
+                bytes.len()
+            ),
+        ));
+    }
+
+    // Both spellings are tried before concluding the bytes are absent. A v2.1
+    // container should store the member under the unescaped ARN, and one that
+    // escaped it anyway still holds the bytes — that departure is
+    // `EscapedV21MemberName`, reported by its own check. Calling it missing
+    // content as well would report one fault twice and misdescribe the second.
+    if form == crate::storage_form::StorageForm::ZipSegment
+        && let Some(member) = object.arn.member_name(volume.volume_arn, volume.mapping)
+        && !volume.segment_present.contains(member.as_str())
+        && !object
+            .arn
+            .member_name(volume.volume_arn, crate::arn::NameMapping::Escaped)
+            .is_some_and(|escaped| volume.segment_present.contains(escaped.as_str()))
+    {
+        deviations.push(Deviation::new(
+            volume.locus.clone().subject(object.arn.as_str()),
+            DeviationKind::StorageFormNotFound,
+            format!(
+                "declared a ZIP segment storage stream, but the volume holds no                  member named {member:?}; AFF4-L v1.0-ALPHA §6.1 stores such a                  stream under the instance's own ARN"
+            ),
+        ));
+    }
 }
 
 /// Report terms written under a namespace their defining standard does not

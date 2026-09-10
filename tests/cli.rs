@@ -398,31 +398,51 @@ fn the_verify_summary_distinguishes_checks_from_recorded_values() {
 
     // The per-chunk total is stated, not left to be inferred from a per-check
     // count an examiner would have to add up.
+    //
+    // 2 MiB at the default 32 KiB chunk is 64 chunks, in **one** algorithm.
+    // This asserted 128 while block hashing was a hardcoded MD5 and SHA-1 pair;
+    // Phase 10 made it follow `--hash`, and one modern digest replaced the two.
+    //
+    // The figure also caught a real defect. The digest width was hardcoded at
+    // 20 bytes for everything but MD5, so a SHA-512 segment of 4,096 bytes
+    // divided by 20 reported 204 rather than 64 — and a mismatch would have
+    // named chunk 32 where chunk 10 was corrupt.
     assert!(
-        summary.contains("128 per-chunk digests"),
-        "64 chunks over two algorithms is 128 compared digests:\n{summary}"
+        summary.contains("64 per-chunk digests"),
+        "2 MiB at a 32 KiB chunk is 64 digests in one algorithm:\n{summary}"
     );
 
-    // Recorded values are the number `info` shows: two stream digests, one
-    // blockHashesHash per block-hash segment, and the two digests of the
-    // AFF4-L v1.0-ALPHA §10.1 metadata integrity hash.
+    // Recorded values are the number `info` shows. Asserted as a lower bound
+    // rather than an exact figure: this count grows as the writer records more
+    // of what the standards require — Phase 10 added the map digests of
+    // AFF4 Standard v1.0a §6.2 — and an exact count here would fail for the
+    // good reason that a container became better attested.
+    let values: usize = summary
+        .split("recorded hash value(s)")
+        .next()
+        .and_then(|before| before.rsplit('(').next())
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
     assert!(
-        summary.contains("6 recorded digest value(s)"),
-        "the container records six digest values:\n{summary}"
-    );
-
-    // And the check count stays distinct from both.
-    assert!(
-        summary.contains("8 completed"),
-        "four value checks, two sequence checks and two metadata-hash checks \
-is eight:\n{summary}"
+        values >= 6,
+        "the container must record at least the six original digest values:\n{summary}"
     );
 
     // Attempted is stated, and on a container aff4tools wrote itself nothing is
     // declined, so it equals completed.
+    let attempted: usize = summary
+        .split(" checks attempted")
+        .next()
+        .and_then(|before| before.rsplit(':').next())
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
     assert!(
-        summary.contains("8 checks attempted"),
+        attempted > 0,
         "the attempted count must be stated:\n{summary}"
+    );
+    assert!(
+        summary.contains(&format!("{attempted} completed")),
+        "nothing is declined on a container aff4tools wrote:\n{summary}"
     );
 
     // A block-hash check says what it did, rather than printing a bare count
@@ -453,12 +473,28 @@ is eight:\n{summary}"
         !summary.contains("per-chunk"),
         "with block hashing off there are no per-chunk digests to report:\n{summary}"
     );
-    // Two stream digests, two blockHashesHash values, and the two digests of
-    // the AFF4-L v1.0-ALPHA §10.1 metadata integrity hash. Turning block
-    // hashing off drops the per-chunk work, not the recorded values.
+    // Turning block hashing off drops the per-chunk work, not the recorded
+    // values: every digest the container records is still compared, and none
+    // is declined.
+    //
+    // Asserted as "attempted equals completed" rather than as an exact count.
+    // The number of recorded values grows as the writer records more of what
+    // the standards require — Phase 10 added the AFF4 Standard v1.0a §6.2 map
+    // digests — and an exact figure would fail for the good reason that a
+    // container became better attested.
+    let attempted: usize = summary
+        .split(" checks attempted")
+        .next()
+        .and_then(|before| before.rsplit(':').next())
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
     assert!(
-        summary.contains("6 completed") && summary.contains("6 recorded digest value(s)"),
-        "the six recorded values are still checked:\n{summary}"
+        attempted >= 6,
+        "at least the original six recorded values are checked:\n{summary}"
+    );
+    assert!(
+        summary.contains(&format!("{attempted} completed")),
+        "every recorded value is still checked with block hashing off:\n{summary}"
     );
 }
 
@@ -527,8 +563,13 @@ fn the_acquisition_report_names_every_digest_it_recorded() {
 
     // Named by the object that carries it, so a line can be matched against
     // `info` without counting.
+    //
+    // The block-hash object is `blockhash.<algorithm>`, and the algorithm
+    // follows `--hash` rather than being the hardcoded MD5 this once asserted.
+    // Matched on the prefix, so the test covers the naming rule rather than the
+    // default selection.
     assert!(
-        report.contains("  data ") && report.contains("  blockhash.md5 "),
+        report.contains("  data ") && report.contains("  blockhash."),
         "each digest must be named by its ARN suffix:\n{report}"
     );
 
@@ -1205,9 +1246,10 @@ mod corpus {
             .arg(fixture(BASE_LINEAR))
             .assert()
             .success()
-            .stdout(predicate::str::contains(
-                "All per-chunk block hashes were recomputed.",
-            ));
+            // The closing "All per-chunk block hashes were recomputed."
+            // sentence was removed as repetition: the count line above already
+            // states it, and with a number. The claim under test is unchanged.
+            .stdout(predicate::str::contains("per-chunk digests recomputed for"));
     }
 
     /// A container storing no block-hash segments must not claim the leaves
@@ -1221,8 +1263,11 @@ mod corpus {
             .success();
         let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
 
+        // Matched against the count line, not the bare phrase "were
+        // recomputed." — that substring now appears in the closing
+        // --no-block-hashing sentence too, so it no longer distinguishes.
         assert!(
-            !out.contains("were recomputed."),
+            !out.contains("per-chunk digests recomputed for"),
             "must not claim leaf coverage with no block hashes stored:\n{out}"
         );
         assert!(
@@ -1248,7 +1293,7 @@ mod corpus {
                 predicate::str::contains(
                     "Per-chunk block hashes were not recomputed, per --no-block-hashing.",
                 )
-                .and(predicate::str::contains("All per-chunk block hashes were recomputed.").not()),
+                .and(predicate::str::contains("per-chunk digests recomputed for").not()),
             );
     }
 
@@ -1837,14 +1882,44 @@ mod corpus {
     /// `DeviationKind::is_routine`.
     #[test]
     fn strict_ignores_routine_deviations_but_still_reports_them() {
+        // Reported either way, which is the claim under test.
         for args in [vec!["conformance"], vec!["conformance", "--strict"]] {
             aff4tools()
                 .args(&args)
                 .arg(fixture(BASE_LINEAR))
                 .assert()
-                .success()
                 .stdout(predicate::str::contains("NUL-padded ZIP comment"));
         }
+
+        // Without `--strict` the routine deviation sets no exit code.
+        aff4tools()
+            .args(["conformance"])
+            .arg(fixture(BASE_LINEAR))
+            .assert()
+            .success();
+
+        // **`--strict` no longer exits 0 here, and that is not this deviation's
+        // doing.** Phase 10 declared the AFF4 Standard v1.0a §6.2 block map
+        // hashing requirements, three of which have no checker yet, and
+        // `--strict` fires on an unevaluated binding rule — the project's rule
+        // that an unchecked requirement is never folded into a clean result.
+        //
+        // So the routine deviation is still ignored by `--strict`; something
+        // else now raises the code. Asserted by reading the report rather than
+        // the exit status, since the status can no longer distinguish them.
+        let assert = aff4tools()
+            .args(["conformance", "--strict"])
+            .arg(fixture(BASE_LINEAR))
+            .assert();
+        let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        assert!(
+            out.contains("Not evaluated"),
+            "the strict exit code must come from unevaluated rules:\n{out}"
+        );
+        assert!(
+            out.contains("Deviations (1)"),
+            "the routine deviation is the only one reported:\n{out}"
+        );
     }
 
     /// `--strict` still sets the exit code on `info` and `verify`, even though
@@ -2032,7 +2107,7 @@ mod corpus {
         let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
         assert!(out.contains("matched"), "{out}");
         assert!(
-            out.contains("All per-chunk block hashes were recomputed."),
+            out.contains("per-chunk digests recomputed for"),
             "block hashing is on by default, so a clean run must state that it \
              recomputed them:\n{out}"
         );

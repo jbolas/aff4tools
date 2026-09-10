@@ -14,6 +14,7 @@ They are test inputs for an AFF4-L reader that has no other v2.1 containers to r
 
 import argparse
 import hashlib
+import struct
 import zipfile
 from pathlib import Path
 
@@ -109,6 +110,27 @@ def _write(path: Path, turtle: str, members: dict) -> None:
         z.writestr("information.turtle", body)
         z.writestr("information.turtle.hashes", _metadata_hashes(body.encode()))
         z.comment = VOLUME.encode()
+
+
+def _map_digests(entry: bytes, idx: bytes, mappath: bytes = b"") -> str:
+    """The four AFF4 Standard v1.0a section 6.2 digests over a map's segments.
+
+    mapPointHash covers the map segment, mapIdxHash the idx segment,
+    mapPathHash the mapPath segment, and mapHash the three concatenated in
+    that order. The construction is confirmed against Base-Linear.aff4, whose
+    recorded values it reproduces exactly.
+
+    A conforming fixture must carry these: without them aff4tools reports the
+    map as missing its integrity digests, which is a true finding about the
+    fixture rather than a false positive.
+    """
+    h = lambda b: hashlib.sha512(b).hexdigest()
+    return (
+        f'''    aff4:mapPointHash       "{h(entry)}"^^aff4:SHA512 ;
+    aff4:mapIdxHash         "{h(idx)}"^^aff4:SHA512 ;
+    aff4:mapPathHash        "{h(mappath)}"^^aff4:SHA512 ;
+    aff4:mapHash            "{h(entry + idx + mappath)}"^^aff4:SHA512 ;'''
+    )
 
 
 def write_tree(path: Path) -> None:
@@ -280,14 +302,20 @@ def _is_bad_utf8(raw: bytes) -> bool:
         return True
 
 
-def _section5(path: Path, subject: str) -> None:
-    """A container holding one section 5 fixture subject."""
+def _section5(path: Path, subject: str, members: dict = None) -> None:
+    """A container holding one section 5 fixture subject.
+
+    The subject declares aff4:ZipSegment, so the member it names is stored:
+    a container that declares a storage form and holds nothing under it is
+    reporting its own bytes missing, which is a separate fault from the naming
+    rule each of these fixtures exists to isolate.
+    """
     turtle = f"""
 <{VOLUME}>
     a           aff4:ZipVolume ;
     aff4:stored "{path.name}" .
 """ + subject
-    _write(path, turtle, {})
+    _write(path, turtle, members or {})
 
 
 def write_section5_fixtures(outdir: Path) -> int:
@@ -324,7 +352,7 @@ def write_section5_fixtures(outdir: Path) -> int:
             lowercase=True, omit_raw=True),
     }
     for name, subject in cases.items():
-        _section5(outdir / name, subject)
+        _section5(outdir / name, subject, {F: content})
     return len(cases)
 
 
@@ -367,8 +395,377 @@ def write_namespace_fixtures(outdir: Path) -> int:
     a           aff4:ZipVolume ;
     aff4:stored "{name}" .
 """ + subject
-        _write(outdir / name, turtle, {})
+        # The subject declares aff4:ZipSegment, so its member is stored. These
+        # fixtures isolate a namespace fault and must carry no other.
+        _write(outdir / name, turtle, {F: content})
     return len(cases)
+
+
+
+# --- AFF4-L v1.0-ALPHA section 6 storage forms -------------------------------
+#
+# Section 6 defines four ways a logical stream's bytes may be stored, and
+# requires a reader to support all of them. Each emitter below writes one form,
+# so a reader can be tested against every one without this project's writer
+# having produced any of them.
+
+CHUNK_SIZE = 32 * 1024
+
+
+def _volume_subject(path: Path) -> str:
+    return f"""
+<{VOLUME}>
+    a           aff4:ZipVolume ;
+    aff4:stored "{path.name}" .
+"""
+
+
+def _bevy(content: bytes) -> tuple:
+    """One bevy holding one chunk, stored uncompressed.
+
+    AFF4 Standard v1.0a section 3.2: a chunk whose stored length equals
+    chunkSize is uncompressed, so the chunk is padded to chunkSize here and
+    trimmed on read by aff4:size.
+    """
+    padded = content + b"\x00" * (CHUNK_SIZE - len(content))
+    index = struct.pack("<QI", 0, CHUNK_SIZE)
+    return padded, index
+
+
+def write_in_metadata(path: Path) -> None:
+    """A file whose bytes live in the turtle (AFF4-L v1.0-ALPHA section 6.2).
+
+    Under the 1 Kb ceiling that clause sets. No aff4:hash: the same clause
+    permits omitting digests for this form, relying on the metadata integrity
+    hash, and a fixture that always carried them would never exercise that.
+    """
+    content = b"resident bytes, stored in the metadata"
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "resident.txt" ;
+    aff4:originalPathName   "/case/resident.txt" ;
+    aff4:stored             <{VOLUME}> ;
+    aff4l:dataStream        "{_b64(content)}"^^xsd:base64Binary .
+"""
+    _write(path, turtle, {})
+
+
+def write_zipsegment(path: Path) -> None:
+    """A file stored as one ZIP segment (AFF4-L v1.0-ALPHA section 6.1)."""
+    content = b"segment content, stored as a single ZIP member\n"
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;
+    aff4:hash               "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "segment.txt" ;
+    aff4:originalPathName   "/case/segment.txt" ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {FILE_IMAGE: content})
+
+
+def write_image_stream(path: Path) -> None:
+    """A file stored as its own ImageStream (AFF4-L v1.0-ALPHA section 6.4)."""
+    content = b"image stream content " * 8
+    padded, index = _bevy(content)
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image , aff4:ImageStream ;
+    aff4:hash               "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:chunkSize          "{CHUNK_SIZE}"^^xsd:int ;
+    aff4:chunksInSegment    "1"^^xsd:int ;
+    aff4:fileName           "stream.txt" ;
+    aff4:originalPathName   "/case/stream.txt" ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {
+        f"{FILE_IMAGE}/00000000": padded,
+        f"{FILE_IMAGE}/00000000.index": index,
+    })
+
+
+def write_map(path: Path) -> None:
+    """A FileImage carrying the Map type (AFF4-L v1.0-ALPHA section 6.3).
+
+    The first of that clause's two forms: the aff4:Map type is added to the
+    FileImage instance, so one subject is both Image and Map. The second form,
+    where aff4l:dataStream points at a separate Map subject, is written by
+    write_map_indirect.
+    """
+    content = b"mapped content, addressed through a map entry"
+    padded, index = _bevy(content)
+    stream = "aff4://0947bfd0-1265-42d3-95b6-8d7bed108e9b"
+    # AFF4 Standard v1.0a section 4: mappedOffset, length, targetOffset, target id.
+    entry = struct.pack("<QQQI", 0, len(content), 0, 0)
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image , aff4:Map ;
+    aff4:dependentStream    <{stream}> ;
+{_map_digests(entry, (stream + chr(10)).encode())}
+    aff4:hash               "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "mapped.txt" ;
+    aff4:originalPathName   "/case/mapped.txt" ;
+    aff4:stored             <{VOLUME}> .
+
+<{stream}>
+    a                       aff4:ImageStream ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:chunkSize          "{CHUNK_SIZE}"^^xsd:int ;
+    aff4:chunksInSegment    "1"^^xsd:int ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {
+        f"{FILE_IMAGE}/map": entry,
+        f"{FILE_IMAGE}/idx": (stream + "\n").encode(),
+        f"{stream}/00000000": padded,
+        f"{stream}/00000000.index": index,
+    })
+
+
+def write_map_indirect(path: Path) -> None:
+    """The second AFF4-L v1.0-ALPHA section 6.3 form: a separate Map subject.
+
+    The FileImage reaches its Map through aff4l:dataStream. This project's
+    writer never emits this shape, and a reader must still handle it.
+    """
+    content = b"indirectly mapped content"
+    padded, index = _bevy(content)
+    themap = "aff4://31aa452b-bddf-4257-a998-5bb75a80f9b1"
+    stream = "aff4://0947bfd0-1265-42d3-95b6-8d7bed108e9b"
+    entry = struct.pack("<QQQI", 0, len(content), 0, 0)
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "indirect.txt" ;
+    aff4:originalPathName   "/case/indirect.txt" ;
+    aff4:stored             <{VOLUME}> ;
+    aff4l:dataStream        <{themap}> .
+
+<{themap}>
+    a                       aff4:Map ;
+    aff4:dependentStream    <{stream}> ;
+{_map_digests(entry, (stream + chr(10)).encode())}
+    aff4:hash               "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:stored             <{VOLUME}> .
+
+<{stream}>
+    a                       aff4:ImageStream ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:chunkSize          "{CHUNK_SIZE}"^^xsd:int ;
+    aff4:chunksInSegment    "1"^^xsd:int ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {
+        f"{themap}/map": entry,
+        f"{themap}/idx": (stream + "\n").encode(),
+        f"{stream}/00000000": padded,
+        f"{stream}/00000000.index": index,
+    })
+
+
+def write_substreams(path: Path) -> None:
+    """A file carrying an extended attribute and an alternate data stream.
+
+    AFF4-L v1.0-ALPHA section 4.2 defines FileExtendedAttribute and
+    FileSubStream; section 4.3 gives the properties that reach them. The ADS is
+    present because a reader must handle the shape even though acquisition on a
+    supported platform never produces one.
+    """
+    content = b"parent file content\n"
+    attr = b"attribute value"
+    ads = b"alternate stream value"
+    xattr_arn = "aff4://bfcecaf5-7272-4476-8f57-e72017271b1c"
+    ads_arn = "aff4://c4e11a37-9d52-4f80-b6a3-1e7c0d8f2b95"
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                          aff4:FileImage , aff4:Image , aff4:ZipSegment ;
+    aff4:hash                  "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size                  "{len(content)}"^^xsd:long ;
+    aff4:fileName              "parent.txt" ;
+    aff4:originalPathName      "/case/parent.txt" ;
+    aff4:stored                <{VOLUME}> ;
+    aff4l:extendedAttribute    <{xattr_arn}> ;
+    aff4l:alternateDataStream  <{ads_arn}> .
+
+<{xattr_arn}>
+    a                       aff4:FileExtendedAttribute ;
+    aff4:size               "{len(attr)}"^^xsd:long ;
+    aff4:name               "user.comment" ;
+    aff4:target             <{FILE_IMAGE}> ;
+    aff4l:dataStream        "{_b64(attr)}"^^xsd:base64Binary .
+
+<{ads_arn}>
+    a                       aff4:FileSubStream , aff4:Image ;
+    aff4:size               "{len(ads)}"^^xsd:long ;
+    aff4:name               "hidden" ;
+    aff4:target             <{FILE_IMAGE}> ;
+    aff4l:dataStream        "{_b64(ads)}"^^xsd:base64Binary .
+"""
+    _write(path, turtle, {FILE_IMAGE: content})
+
+
+# --- Negative fixtures for strict dispatch ----------------------------------
+#
+# AFF4-L v1.0-ALPHA section 6 makes the rdf:type list the dispatch key. Each of
+# these states where its bytes are and is wrong about it, which must be refused
+# rather than worked around: a reader that searched could match another
+# stream's bytes and report success over the wrong data.
+
+def write_bad_missing_member(path: Path) -> None:
+    """Typed ZipSegment, with no such member in the container."""
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;
+    aff4:size               "19"^^xsd:long ;
+    aff4:fileName           "absent.txt" ;
+    aff4:originalPathName   "/case/absent.txt" ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {})
+
+
+def write_bad_undecodable_base64(path: Path) -> None:
+    """An aff4l:dataStream literal whose content is not valid base64."""
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ;
+    aff4:size               "10"^^xsd:long ;
+    aff4:fileName           "bad.txt" ;
+    aff4:originalPathName   "/case/bad.txt" ;
+    aff4:stored             <{VOLUME}> ;
+    aff4l:dataStream        "!!!not base64!!!"^^xsd:base64Binary .
+"""
+    _write(path, turtle, {})
+
+
+def write_bad_two_storage_types(path: Path) -> None:
+    """Both ZipSegment and ImageStream: the bytes are named in two places."""
+    content = b"hello"
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ,
+                            aff4:ZipSegment , aff4:ImageStream ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "two.txt" ;
+    aff4:originalPathName   "/case/two.txt" ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {FILE_IMAGE: content})
+
+
+
+def write_in_metadata_hashed(path: Path) -> None:
+    """An in-metadata stream that does record a digest.
+
+    AFF4-L v1.0-ALPHA section 6.2 permits omitting digests for this form;
+    write_in_metadata exercises that. This one records a digest so the
+    comparison path is exercised too.
+    """
+    content = b"resident bytes with a recorded digest"
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ;
+    aff4:hash               "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "resident-hashed.txt" ;
+    aff4:originalPathName   "/case/resident-hashed.txt" ;
+    aff4:stored             <{VOLUME}> ;
+    aff4l:dataStream        "{_b64(content)}"^^xsd:base64Binary .
+"""
+    _write(path, turtle, {})
+
+
+def write_in_metadata_wrong_digest(path: Path) -> None:
+    """An in-metadata stream whose recorded digest does not match its bytes.
+
+    The bytes decode and the form is well formed, so this is not malformed: it
+    is an integrity failure, and verify must report a mismatch rather than
+    passing it over.
+    """
+    content = b"resident bytes that do not match"
+    wrong = hashlib.sha512(b"different content entirely").hexdigest()
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ;
+    aff4:hash               "{wrong}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "resident-bad.txt" ;
+    aff4:originalPathName   "/case/resident-bad.txt" ;
+    aff4:stored             <{VOLUME}> ;
+    aff4l:dataStream        "{_b64(content)}"^^xsd:base64Binary .
+"""
+    _write(path, turtle, {})
+
+
+
+def write_oversized_resident(path: Path) -> None:
+    """An in-metadata stream above the AFF4-L v1.0-ALPHA section 6.2 cap.
+
+    That clause forbids the form above 1 Kb. The bytes are present and
+    unambiguously this stream's, so a reader must read it and report the
+    departure rather than refusing the container.
+    """
+    content = bytes((i % 251) for i in range(4096))
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ;
+    aff4:hash               "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "oversized.bin" ;
+    aff4:originalPathName   "/case/oversized.bin" ;
+    aff4:stored             <{VOLUME}> ;
+    aff4l:dataStream        "{_b64(content)}"^^xsd:base64Binary .
+"""
+    _write(path, turtle, {})
+
+
+
+def write_unreadable_file_record(path: Path) -> None:
+    """A file recorded without content, because it could not be read.
+
+    An acquisition that hits a permission error still records that the file
+    existed, with its name, times, and mode, and stores no bytes for it. There
+    is no storage form to declare, so a container holding one is not
+    contradicting itself: the omission is a completeness finding the
+    acquisition reports in its own SKIPPED list.
+
+    The shape is no aff4:size and no aff4:hash. Real acquisitions produce it:
+    a scan of /Library on a stock macOS system recorded 23 such files.
+    """
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image ;
+    aff4:fileName           "unreadable.plist" ;
+    aff4:originalPathName   "/case/unreadable.plist" ;
+    aff4:fileMode           "33184"^^xsd:long ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {})
+
+
+def write_storage_fixtures(outdir: Path) -> int:
+    """Every AFF4-L v1.0-ALPHA section 6 storage form, and the negatives."""
+    write_in_metadata(outdir / "storage-in-metadata.aff4l")
+    write_in_metadata_hashed(outdir / "storage-in-metadata-hashed.aff4l")
+    write_in_metadata_wrong_digest(outdir / "storage-in-metadata-wrong.aff4l")
+    write_zipsegment(outdir / "storage-zipsegment.aff4l")
+    write_image_stream(outdir / "storage-imagestream.aff4l")
+    write_map(outdir / "storage-map.aff4l")
+    write_map_indirect(outdir / "storage-map-indirect.aff4l")
+    write_substreams(outdir / "storage-substreams.aff4l")
+    write_oversized_resident(outdir / "storage-oversized-resident.aff4l")
+    write_unreadable_file_record(outdir / "storage-unreadable-record.aff4l")
+    write_bad_missing_member(outdir / "bad-missing-member.aff4l")
+    write_bad_undecodable_base64(outdir / "bad-undecodable-base64.aff4l")
+    write_bad_two_storage_types(outdir / "bad-two-storage-types.aff4l")
+    return 13
 
 
 def main() -> None:
@@ -385,6 +782,7 @@ def main() -> None:
     write_nameless(args.outdir / "nameless.aff4l")
     extra = write_section5_fixtures(args.outdir)
     extra += write_namespace_fixtures(args.outdir)
+    extra += write_storage_fixtures(args.outdir)
     print(f"wrote {6 + extra} v2.1 containers to {args.outdir}")
 
 

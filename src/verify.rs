@@ -2044,17 +2044,35 @@ fn block_hash_segments(volume: &dyn Volume, base: &str, suffix: &str) -> Vec<Str
 /// `verify`'s runtime. `wanted` is decided once, before the read begins.
 #[derive(Default)]
 struct BlockDigests {
-    md5: Option<Vec<u8>>,
-    sha1: Option<Vec<u8>>,
+    /// One accumulator per algorithm the stream actually records, paired with
+    /// the segment suffix it was found under.
+    ///
+    /// A list rather than a field per algorithm: AFF4 Standard v1.0a §6.2 names
+    /// five and says implementations "MAY generate Block Hashes using multiple
+    /// algorithms", so which are present is a property of the container being
+    /// read, not something a reader can enumerate in advance. It was two fields
+    /// until Phase 10, which silently ignored a container recording SHA-256.
+    accumulators: Vec<(HashAlgorithm, &'static str, Vec<u8>)>,
 }
 
+/// Every algorithm AFF4 Standard v1.0a §6.2's table names, with its suffix.
+const BLOCK_HASH_ALGORITHMS: &[(HashAlgorithm, &str)] = &[
+    (HashAlgorithm::Md5, "md5"),
+    (HashAlgorithm::Sha1, "sha1"),
+    (HashAlgorithm::Sha256, "sha256"),
+    (HashAlgorithm::Sha512, "sha512"),
+    (HashAlgorithm::Blake2b, "blake2b"),
+];
+
 impl BlockDigests {
-    /// Both algorithms enabled, for tests that exercise chunking itself.
+    /// Every algorithm enabled, for tests that exercise chunking itself.
     #[cfg(test)]
     fn all() -> Self {
         Self {
-            md5: Some(Vec::new()),
-            sha1: Some(Vec::new()),
+            accumulators: BLOCK_HASH_ALGORITHMS
+                .iter()
+                .map(|(a, s)| (a.clone(), *s, Vec::new()))
+                .collect(),
         }
     }
 
@@ -2063,15 +2081,15 @@ impl BlockDigests {
     /// Returns [`None`] when the stream records none, so the caller can skip
     /// per-chunk hashing entirely rather than run it into a void.
     fn wanted(volume: &dyn Volume, base: &str) -> Option<Self> {
-        let md5 = !block_hash_segments(volume, base, "md5").is_empty();
-        let sha1 = !block_hash_segments(volume, base, "sha1").is_empty();
-        if !md5 && !sha1 {
+        let accumulators: Vec<_> = BLOCK_HASH_ALGORITHMS
+            .iter()
+            .filter(|(_, suffix)| !block_hash_segments(volume, base, suffix).is_empty())
+            .map(|(algorithm, suffix)| (algorithm.clone(), *suffix, Vec::new()))
+            .collect();
+        if accumulators.is_empty() {
             return None;
         }
-        Some(Self {
-            md5: md5.then(Vec::new),
-            sha1: sha1.then(Vec::new),
-        })
+        Some(Self { accumulators })
     }
 }
 
@@ -2106,15 +2124,10 @@ impl BlockDigests {
     }
 
     fn emit(&mut self, chunk: &[u8]) {
-        if let Some(acc) = self.md5.as_mut()
-            && let Some(digest) = digest_of(&HashAlgorithm::Md5, chunk)
-        {
-            acc.extend_from_slice(&hex_to_bytes(digest.hex()));
-        }
-        if let Some(acc) = self.sha1.as_mut()
-            && let Some(digest) = digest_of(&HashAlgorithm::Sha1, chunk)
-        {
-            acc.extend_from_slice(&hex_to_bytes(digest.hex()));
+        for (algorithm, _, acc) in &mut self.accumulators {
+            if let Some(digest) = digest_of(algorithm, chunk) {
+                acc.extend_from_slice(&hex_to_bytes(digest.hex()));
+            }
         }
     }
 }
@@ -2138,20 +2151,9 @@ fn verify_block_hashes(
         return;
     };
 
-    for (algorithm, computed) in [
-        (HashAlgorithm::Md5, blocks.md5.as_ref()),
-        (HashAlgorithm::Sha1, blocks.sha1.as_ref()),
-    ] {
-        // Not computed, because no segment of this algorithm exists to compare
-        // against. `block_hash_segments` below agrees, but skipping here keeps
-        // the two decisions from drifting apart.
-        let Some(computed) = computed else {
-            continue;
-        };
-        let suffix = match algorithm {
-            HashAlgorithm::Md5 => "md5",
-            _ => "sha1",
-        };
+    for (algorithm, suffix, computed) in &blocks.accumulators {
+        let algorithm = algorithm.clone();
+        let computed: &Vec<u8> = computed;
 
         // Block hashes are per bevy: one segment per bevy, each holding that
         // bevy's chunk digests back to back. Ask which exist rather than
@@ -2175,10 +2177,23 @@ fn verify_block_hashes(
             }
         }
 
-        let width = if algorithm == HashAlgorithm::Md5 {
-            16
-        } else {
-            20
+        // The digest's real byte width, from the algorithm itself.
+        //
+        // **This was a hardcoded 16 for MD5 and 20 for everything else**, which
+        // was true only while block hashing was fixed to MD5 and SHA-1. Phase
+        // 10 made the algorithm follow `--hash`, and a SHA-512 segment was then
+        // divided by 20: a 4,096-byte segment holding 64 digests was reported
+        // as 204, and `first_difference` would have named the wrong chunk on a
+        // mismatch.
+        //
+        // An algorithm with no known length is skipped rather than guessed. A
+        // wrong width turns a real corruption into a wrong chunk number, which
+        // is worse than declining to localize it.
+        let Some(width) = algorithm.hex_length().map(|hex| hex / 2) else {
+            session.note(format!(
+                "block hashes for stream {stream_arn} are recorded in {algorithm},                  whose digest length this build does not know; the sequence was                  not compared"
+            ));
+            continue;
         };
         let stored_hash = StoredHash {
             algorithm: algorithm.clone(),
@@ -2383,6 +2398,92 @@ fn read_map_segments(base: &str, volume: &mut dyn Volume) -> Result<MapSegments>
     Ok(MapSegments { map, idx, path })
 }
 
+/// The four predicates AFF4 Standard v1.0a §6.2 defines over a map's segments.
+///
+/// Each is a digest of the map's own bytes, **not** of the image's content. A
+/// verifier that recomputed one over the address space would report a mismatch
+/// on an intact container — which is exactly what happened when these were
+/// first written, because the dispatch keyed on the datatype alone and they
+/// carry an ordinary `aff4:SHA512`.
+pub(crate) const MAP_SEGMENT_DIGEST_PREDICATES: [&str; 4] =
+    ["mapPointHash", "mapIdxHash", "mapPathHash", "mapHash"];
+
+/// Verify one of the four digests a map records over its own segments.
+///
+/// `mapPointHash` covers the `map` segment, `mapIdxHash` the `idx` segment,
+/// `mapPathHash` the `mapPath` segment, and `mapHash` the three concatenated in
+/// that order. Confirmed against `Base-Linear.aff4`, whose recorded values this
+/// construction reproduces.
+fn verify_map_segment_digest(
+    object: &crate::model::Aff4Object,
+    image: &Image,
+    volume: &mut dyn Volume,
+    mapping: NameMapping,
+    hash: &StoredHash,
+    session: &mut Session,
+) {
+    let volume_arn = volume.arn().clone();
+
+    let Some(map_base) = image.map().arn().member_name(&volume_arn, mapping) else {
+        session.push(HashCheck::declined(
+            &object.arn,
+            object.role.clone(),
+            hash,
+            Coverage::Composite,
+            "the map's segments are stored in another volume".to_owned(),
+        ));
+        return;
+    };
+
+    let segments = match read_map_segments(&map_base, volume) {
+        Ok(segments) => segments,
+        Err(error) => {
+            session.push(HashCheck::from_read_error(
+                &object.arn,
+                object.role.clone(),
+                hash,
+                Coverage::Composite,
+                format!("the map's segments could not be read: {error}"),
+                &error,
+            ));
+            return;
+        }
+    };
+
+    let subject: Vec<u8> = match hash.predicate.as_str() {
+        "mapPointHash" => segments.map.clone(),
+        "mapIdxHash" => segments.idx.clone(),
+        "mapPathHash" => segments.path.clone(),
+        _ => {
+            let mut whole =
+                Vec::with_capacity(segments.map.len() + segments.idx.len() + segments.path.len());
+            whole.extend_from_slice(&segments.map);
+            whole.extend_from_slice(&segments.idx);
+            whole.extend_from_slice(&segments.path);
+            whole
+        }
+    };
+
+    let Some(computed) = crate::hash::digest_of(&hash.algorithm, &subject) else {
+        session.push(HashCheck::declined(
+            &object.arn,
+            object.role.clone(),
+            hash,
+            Coverage::Composite,
+            format!("this build cannot compute {}", hash.algorithm),
+        ));
+        return;
+    };
+
+    session.push(HashCheck::compared(
+        &object.arn,
+        object.role.clone(),
+        hash,
+        Coverage::Composite,
+        &computed,
+    ));
+}
+
 /// Verify a `BlockHashes` object: the SHA512 over one block-hash segment.
 fn verify_block_hash_segment(
     object: &crate::model::Aff4Object,
@@ -2498,12 +2599,25 @@ fn verify_image(
     session: &mut Session,
 ) {
     let Dialect { lexicon, mapping } = dialect;
+
+    if refused_for_ambiguous_storage(object, mapping, locus, session) {
+        return;
+    }
+
     // An AFF4-L logical image is often a `zip_segment`: its bytes are one ZIP
     // member, with no map and no ImageStream. `dream.aff4` is the simple case —
     // an 8688-byte file whose recorded MD5 and SHA-1 are digests over the
     // member exactly. Checking for this first avoids reporting "names no data
     // stream" about a container that is perfectly well formed.
     if is_zip_segment(object) && verify_zip_segment_image(object, volume, mapping, session) {
+        return;
+    }
+
+    // A stream stored inside the metadata (AFF4-L v1.0-ALPHA §6.2). Checked
+    // before anything that touches the volume, because the bytes are in the
+    // turtle already: there is no member to find and no map to resolve.
+    if object.has_resident_stream() {
+        verify_resident_image(object, locus, session);
         return;
     }
 
@@ -2528,6 +2642,30 @@ fn verify_image(
     // were perfectly well formed. Nothing is declined by returning: a folder
     // carries no `aff4:hash` to check.
     if matches!(object.role, crate::model::ObjectRole::FolderImage) {
+        return;
+    }
+
+    // A file recorded without content, for the same reason a folder returns
+    // above: there is nothing to read, so asking it for a data stream is a
+    // category error rather than a finding.
+    //
+    // An acquisition that could not read a file still records that it existed,
+    // with its name, times, and mode, and stores no bytes. **The completeness
+    // finding is already made, and made better**, by the acquisition's own
+    // SKIPPED report, which names every such path with its reason and raises
+    // the strict exit code. Repeating it here as an unresolvable image
+    // describes an honest record as a broken one.
+    //
+    // `conformance` has exempted this shape since Phase 9c
+    // (`report_v21_storage_form`). `verify` did not, so the two commands
+    // disagreed about the same 23 records on a real `/Library` acquisition:
+    // silence from one, a 23-line note from the other. The shape is
+    // unambiguous — no `aff4:size` and no digest — because a file whose bytes
+    // were stored always carries both, whichever form holds them.
+    //
+    // Nothing is declined by returning: an object with no digests has no check
+    // to decline.
+    if object.size.is_none() && object.hashes.is_empty() {
         return;
     }
 
@@ -2597,6 +2735,15 @@ fn verify_image(
     // once re-read the whole image once per algorithm.
     let mut whole: Vec<&StoredHash> = Vec::new();
     for hash in &object.hashes {
+        // The predicate is checked before the algorithm, because AFF4 Standard
+        // v1.0a §6.2's map digests carry an ordinary `aff4:SHA512` and are told
+        // apart only by the property that records them. Dispatching on the
+        // datatype alone sent all four down the whole-image path and reported a
+        // mismatch on an intact container.
+        if MAP_SEGMENT_DIGEST_PREDICATES.contains(&hash.predicate.as_str()) {
+            verify_map_segment_digest(object, &image, volume, mapping, hash, session);
+            continue;
+        }
         match &hash.algorithm {
             HashAlgorithm::BlockMapSha512 => {
                 verify_block_map_hash(object, &image, volume, mapping, hash, session);
@@ -2625,10 +2772,14 @@ fn verify_image(
 /// digest exists, but nothing here recomputes it, so no claim about the gap
 /// bytes rests on it.
 fn records_whole_image_digest(object: &crate::model::Aff4Object) -> bool {
-    object
-        .hashes
-        .iter()
-        .any(|h| h.algorithm != HashAlgorithm::BlockMapSha512 && is_computable(&h.algorithm))
+    object.hashes.iter().any(|h| {
+        h.algorithm != HashAlgorithm::BlockMapSha512
+            // A map segment digest covers the map, not the address space, so a
+            // container recording only those has nothing covering its filled
+            // gaps — the same reasoning that excludes `blockMapHash`.
+            && !MAP_SEGMENT_DIGEST_PREDICATES.contains(&h.predicate.as_str())
+            && is_computable(&h.algorithm)
+    })
 }
 
 /// Verify an image whose streams are spread across a set of volumes.
@@ -2697,6 +2848,25 @@ fn verify_image_in_set(
     // MD5 reads all of it twice at the image level.
     let mut whole: Vec<&StoredHash> = Vec::new();
     for hash in &object.hashes {
+        // The AFF4 Standard v1.0a §6.2 map digests cover the map's own bytes,
+        // not the image's, so they must never join the whole-image traversal —
+        // they carry an ordinary `aff4:SHA512` and the predicate is what tells
+        // them apart.
+        //
+        // Declined rather than recomputed here: a volume set's map segments
+        // live in whichever part holds the map, and this path has no single
+        // volume to read them from. Saying so is honest; recomputing against
+        // the wrong bytes would report a mismatch on an intact set.
+        if MAP_SEGMENT_DIGEST_PREDICATES.contains(&hash.predicate.as_str()) {
+            session.push(HashCheck::declined(
+                &object.arn,
+                object.role.clone(),
+                hash,
+                Coverage::Composite,
+                "a map digest is not recomputed across a volume set".to_owned(),
+            ));
+            continue;
+        }
         match &hash.algorithm {
             HashAlgorithm::BlockMapSha512 => {
                 verify_striped_block_map_hash(object, volumes, mapping, hash, session);
@@ -3248,6 +3418,22 @@ fn verify_zip_segment_image(
         traversed: true,
     });
 
+    // **Segment bytes count toward the run's progress.** The estimate's
+    // denominator includes them — `estimate_segment_stored` adds every ZIP
+    // segment's uncompressed size — so a path that read them without saying so
+    // left the meter measuring streams against a total covering everything.
+    //
+    // On a logical acquisition that is most of the run: 130,441 of 130,503
+    // files were segments, the bar advanced only while one of the seven streams
+    // was being read, and it stopped at 43% having verified every byte. Whole
+    // rather than incremental, because a segment is read in one call and there
+    // is no intermediate state to report.
+    session.progress.on(Progress::Bytes {
+        arn: &object.arn,
+        done: bytes.len() as u64,
+        total: Some(bytes.len() as u64),
+    });
+
     for hash in &object.hashes {
         push_digest_check(
             &object.arn,
@@ -3260,6 +3446,122 @@ fn verify_zip_segment_image(
     }
 
     true
+}
+
+/// Whether this file image was refused for naming two storage forms.
+///
+/// AFF4-L v1.0-ALPHA §6 gives one form per stream. A subject naming two says
+/// its bytes are in two places without saying which is authoritative, and
+/// reading either would produce a digest result computed on bytes that may not
+/// be this stream's — a clean report over the wrong data, which is worse than
+/// declining to read at all.
+///
+/// Only ambiguity is refused. A form that names *no* bytes falls through to the
+/// paths that look for it, each of which reports what it could not find;
+/// `conformance` names both cases as AFF4-L v1.0-ALPHA §6 deviations.
+///
+/// Confined to the generation that clause governs, which is the one mapping
+/// ARNs to member names literally. An AFF4-L 2019 container is placed by its own
+/// rules and is not measured against AFF4-L v1.0-ALPHA §6.
+fn refused_for_ambiguous_storage(
+    object: &crate::model::Aff4Object,
+    mapping: NameMapping,
+    locus: &Locus,
+    session: &mut Session,
+) -> bool {
+    if !matches!(object.role, crate::model::ObjectRole::FileImage)
+        || mapping != NameMapping::Literal
+    {
+        return false;
+    }
+
+    let types: Vec<&str> = object.types.iter().map(|t| &**t).collect();
+    let Err(error) = crate::storage_form::storage_form_of_with_reference(
+        &types,
+        object.has_resident_stream(),
+        object.has_stream_reference(),
+        locus,
+    ) else {
+        return false;
+    };
+    if !error.to_string().contains("ambiguous") {
+        return false;
+    }
+
+    for hash in &object.hashes {
+        session.push(HashCheck::declined(
+            &object.arn,
+            object.role.clone(),
+            hash,
+            Coverage::WholeImage,
+            format!("the stream's storage form is ambiguous: {error}"),
+        ));
+    }
+    session.note(format!(
+        "image {} declares more than one storage form, so its bytes were not \
+         read: {error}",
+        object.arn
+    ));
+    true
+}
+
+/// Verify a stream stored inside the metadata (AFF4-L v1.0-ALPHA §6.2).
+///
+/// The bytes are the decoded `aff4l:dataStream` literal, so nothing is read
+/// from the volume. AFF4-L v1.0-ALPHA §6.2 permits such a stream to record no
+/// digests of its own, "relying on the Metadata Integrity Hash for integrity" —
+/// so an object with no `aff4:hash` is complete as it stands, not a stream
+/// whose digests are missing.
+fn verify_resident_image(object: &crate::model::Aff4Object, locus: &Locus, session: &mut Session) {
+    let bytes = match object.resident_bytes(locus) {
+        Ok(Some(bytes)) => bytes,
+        // `has_resident_stream` was true, so this arm is unreachable in
+        // practice. Returning rather than asserting keeps a future change to
+        // either function from turning a mismatch into a panic.
+        Ok(None) => return,
+        Err(error) => {
+            for hash in &object.hashes {
+                session.push(HashCheck::declined(
+                    &object.arn,
+                    object.role.clone(),
+                    hash,
+                    Coverage::WholeImage,
+                    format!("the in-metadata storage stream could not be decoded: {error}"),
+                ));
+            }
+            session.note(format!(
+                "image {} declares an in-metadata storage stream that could \
+                 not be decoded: {error}",
+                object.arn
+            ));
+            return;
+        }
+    };
+
+    // Every byte is stored, in the turtle rather than in a member. None is
+    // described, so the accounting matches the ZIP segment case.
+    session.report.read_accounting.push(ImageAccounting {
+        image: object.arn.clone(),
+        accounting: ReadAccounting {
+            stored: bytes.len() as u64,
+            described: 0,
+            unknown_placeholder: 0,
+            gap_filled: 0,
+            gap_fill: None,
+        },
+        traversed: true,
+    });
+
+    for hash in &object.hashes {
+        push_digest_check(
+            &object.arn,
+            object.role.clone(),
+            hash,
+            Coverage::WholeImage,
+            &bytes,
+            session,
+        );
+    }
 }
 
 /// Recompute a digest over every byte of the image.
@@ -3757,16 +4059,35 @@ mod tests {
         }
         pieces.finish(&mut carry);
 
-        assert_eq!(whole.md5, pieces.md5);
-        assert_eq!(whole.sha1, pieces.sha1);
+        // However the bytes arrived, every algorithm's accumulator agrees.
+        assert_eq!(whole.accumulators.len(), pieces.accumulators.len());
+        for ((wa, ws, wd), (pa, ps, pd)) in
+            whole.accumulators.iter().zip(pieces.accumulators.iter())
+        {
+            assert_eq!(wa, pa);
+            assert_eq!(ws, ps);
+            assert_eq!(wd, pd, "{ws} digests must not depend on slice boundaries");
+        }
+
+        let digests_of_alg = |b: &BlockDigests, suffix: &str| -> Vec<u8> {
+            b.accumulators
+                .iter()
+                .find(|(_, s, _)| *s == suffix)
+                .map(|(_, _, d)| d.clone())
+                .expect("the algorithm is enabled")
+        };
 
         // Three chunks: 100, 100, and a short 50.
-        assert_eq!(whole.md5.as_ref().unwrap().len(), 3 * 16);
-        assert_eq!(whole.sha1.as_ref().unwrap().len(), 3 * 20);
+        assert_eq!(digests_of_alg(&whole, "md5").len(), 3 * 16);
+        assert_eq!(digests_of_alg(&whole, "sha1").len(), 3 * 20);
+        assert_eq!(digests_of_alg(&whole, "sha256").len(), 3 * 32);
 
         // The last one is the short chunk's digest, not a padded one.
         let expected = digest_of(&HashAlgorithm::Md5, &data[200..250]).unwrap();
-        assert_eq!(to_hex(&whole.md5.as_ref().unwrap()[32..48]), expected.hex());
+        assert_eq!(
+            to_hex(&digests_of_alg(&whole, "md5")[32..48]),
+            expected.hex()
+        );
     }
 
     /// A mismatch must localise itself: "chunk 47" is actionable, "the digests

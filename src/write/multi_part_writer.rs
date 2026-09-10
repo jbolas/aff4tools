@@ -406,8 +406,32 @@ fn finish_first_part(
     locus: &Locus,
 ) -> Result<()> {
     // The Map goes in part 001, naming every part's stream.
+    //
+    // No block map digest is composed for a multi-part set, and the empty slice
+    // is what says so. AFF4 Standard v1.0a §6.2 defines the digest over "all
+    // BlockHashes in the ImageStream", and a multi-part set has one stream per
+    // part while the map spans them all — so what the digest should cover is
+    // not settled by the clause.
+    //
+    // The reference set does not settle it either: `Base-Linear_1.aff4` and
+    // `Base-Linear_2.aff4` carry *different* `blockMapHash` values, so each
+    // part's covers its own stream rather than the set. That shape has no
+    // single value to put on the one Map this writes.
+    //
+    // Writing nothing is the honest result. A digest composed over part 001's
+    // block hashes alone would sit on a map describing every part and appear to
+    // attest all of them. The per-chunk block hashes and the per-part stream
+    // digests are still written and still checked, so no part goes unattested.
+    // Raised with the author; see the change-proposals document.
     write_map_as(
-        &mut first, map_arn, image_arn, entries, targets, total, locus,
+        &mut first,
+        map_arn,
+        image_arn,
+        entries,
+        targets,
+        total,
+        &[],
+        locus,
     )?;
 
     // The image digest belongs to the DiskImage, not to any one stream.

@@ -58,6 +58,7 @@ pub mod progress;
 pub mod rdf;
 /// The conformance rule registry.
 pub mod rules;
+pub mod storage_form;
 pub mod stream;
 pub mod verify;
 pub mod version;
@@ -99,6 +100,24 @@ pub use zip::{ArnSource, ParallelVolume, SegmentReader, Volume, ZipVolume};
 #[must_use]
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Group a count with thousands separators: `978880` becomes `978,880`.
+///
+/// Digest and file counts reach the hundreds of thousands on a real
+/// acquisition, where an ungrouped run of digits is easy to misread by an
+/// order of magnitude.
+#[must_use]
+pub fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Render a byte count with a binary-prefix approximation.

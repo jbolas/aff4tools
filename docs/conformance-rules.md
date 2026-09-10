@@ -22,6 +22,11 @@ registry in `src/rules/catalog.rs`.
 | `AFF4_V1_0A/2.2/2` (§2.2) | SHOULD | not implemented | Datatype IRIs are spelled as the standard defines them, not in a variant case. |
 | `AFF4_V1_0A/2.2/3` (§2.2) | MUST | detected | A literal's datatype is the one its property expects. |
 | `AFF4_V1_0A/6.1/1` (§6.1) | MUST | detected | A digest's length matches the algorithm its datatype declares. |
+| `AFF4_V1_0A/6.2/1` (§6.2) | MAY | honored | An implementation may adopt block map hashing, which digests each block and composes those digests into one hash protecting the stream and its map together. |
+| `AFF4_V1_0A/6.2/2` (§6.2) | MUST | not implemented | A writer that records block hashes also records the block map digest those hashes compose. |
+| `AFF4_V1_0A/6.2/3` (§6.2) | MUST | not implemented | A recorded block map digest is stored on the image, under a datatype naming the algorithm that produced it. |
+| `AFF4_V1_0A/6.2/4` (§6.2) | MUST | detected | A map records a digest of each segment it is built from, and one over their concatenation. |
+| `AFF4_V1_0A/6.2/5` (§6.2) | SHOULD | not implemented | A digest composed for block map hashing is computed with one of the two algorithms the standard names for it. |
 | `AFF4_V1_0A/5.4/1` (§5.4) | MUST | detected | The ZIP comment carries the volume ARN starting at offset 0, with nothing appended. |
 | `AFF4_V1_0A/5.4/2` (§5.4) | MUST | detected | The ZIP comment and container.description agree on the volume ARN. |
 | `AFF4_V1_0A/5.4/3` (§5.4) | MUST | detected | Every object the volume holds appears in its own aff4:contains manifest. |
@@ -67,15 +72,18 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/5/5` (§5) | MUST | detected | Percent escapes in a display name use uppercase hexadecimal. |
 | `AFF4L_V1_ALPHA/5/6` (§5) | MAY | not checkable | Two encoded names in one folder may share a display form, so a reader must not assume a display name is unique. |
 | `AFF4L_V1_ALPHA/5/7` (§5) | MUST | not implemented | A name is recorded byte for byte on a platform whose paths are not byte-oriented, in the encoding the standard names. |
-| `AFF4L_V1_ALPHA/6/1` (§6) | MUST | not implemented | A reader handles every storage stream form this section describes, not a chosen subset. |
-| `AFF4L_V1_ALPHA/6/2` (§6) | MUST | not implemented | A writer implements at least one of the storage stream forms this section describes. |
+| `AFF4L_V1_ALPHA/6/1` (§6) | MUST | honored | A reader handles every storage stream form this section describes, not a chosen subset. |
+| `AFF4L_V1_ALPHA/6/2` (§6) | MUST | honored | A writer implements at least one of the storage stream forms this section describes. |
 | `AFF4L_V1_ALPHA/6.1/1` (§6.1) | MUST | not implemented | A stream held as a ZIP segment is compressed with Stored or Deflate and no other method. |
 | `AFF4L_V1_ALPHA/6.1/2` (§6.1) | SHOULD NOT | not implemented | A ZIP segment storage stream holds no stream of one gibibyte or more. |
 | `AFF4L_V1_ALPHA/6.1/3` (§6.1) | MUST | not implemented | A writer records a linear digest of each ZIP segment storage stream in that stream's hash property. |
-| `AFF4L_V1_ALPHA/6.2/1` (§6.2) | MUST NOT | not implemented | An in-metadata storage stream holds no stream larger than one kilobyte. |
-| `AFF4L_V1_ALPHA/6.2/2` (§6.2) | MAY | not implemented | A stream carried inside the metadata need not record its own digests, since the metadata integrity hash covers it. |
+| `AFF4L_V1_ALPHA/6.2/1` (§6.2) | MUST NOT | detected | An in-metadata storage stream holds no stream larger than one kilobyte. |
+| `AFF4L_V1_ALPHA/6.2/2` (§6.2) | MAY | honored | A stream carried inside the metadata need not record its own digests, since the metadata integrity hash covers it. |
+| `AFF4L_V1_ALPHA/6/3` (§6) | MUST | detected | A stream's declared storage form holds the bytes that form is said to store. |
+| `AFF4L_V1_ALPHA/6/4` (§6) | MUST | detected | A stream declares one storage form, not several, so where its bytes are stored is unambiguous. |
+| `AFF4L_V1_ALPHA/6.3/1` (§6.3) | MAY | honored | A file image may carry the map type, storing its primary stream through a map over a shared image stream. |
 | `AFF4L_V1_ALPHA/6.3.1/1` (§6.3.1) | MUST | not implemented | A writer computes and records a block map digest for every map, under either of the two property spellings the standard allows. |
-| `AFF4L_V1_ALPHA/6.3.1/2` (§6.3.1) | MUST | not implemented | A reader accepts either block map digest spelling and can verify the block map digests of every map and dependent image stream. |
+| `AFF4L_V1_ALPHA/6.3.1/2` (§6.3.1) | MUST | honored | A reader accepts either block map digest spelling and can verify the block map digests of every map and dependent image stream. |
 | `AFF4L_V1_ALPHA/6.4/1` (§6.4) | MAY | honored | A file image may additionally be typed as an image stream, storing its primary stream that way. |
 | `AFF4L_V1_ALPHA/7/1` (§7) | MAY | honored | A container may signal its format by file extension, which is a hint and never decides how the container is read. |
 | `AFF4L_V1_ALPHA/8/1` (§8) | SHOULD | not implemented | Parts of a multi-part container signal their membership by sharing one file name, the second and later parts carrying an ordinal suffix counting from one. |
@@ -94,4 +102,4 @@ registry in `src/rules/catalog.rs`.
 
 ## Coverage
 
-25 of 64 declared rules are checked.
+29 of 72 declared rules are checked.

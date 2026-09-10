@@ -5,7 +5,7 @@ use std::io::Write;
 
 use aff4tools::{
     Aff4Object, ContainerSummary, EdgeKind, HashAlgorithm, Locality, ManifestIssue, ObjectCounts,
-    ObjectRole, StoredHash,
+    ObjectRole, StoredHash, thousands,
 };
 
 use crate::{ObjectFilter, human_bytes};
@@ -208,7 +208,65 @@ pub(crate) fn write_identity_block(
         "Content Type:",
         content_type(summary)
     )?;
-    write_version_lines(out, summary)
+    write_version_lines(out, summary)?;
+    write_storage_accounting(out, summary)
+}
+
+/// Where a logical container's files keep their bytes.
+///
+/// An examiner asks how many files a container holds far more often than how
+/// many digest comparisons ran, and which form holds a file decides what
+/// reading it costs. Printed in the identity block, which is the earliest point
+/// the figures exist — before a byte is read, and before any progress meter.
+///
+/// Only for containers that hold files. A disk image has one image and no file
+/// entries, so the block would be four zeros and a total of one.
+///
+/// A form holding nothing is omitted rather than printed as zero. What the
+/// container does hold is the finding; a list of absent forms is not.
+fn write_storage_accounting(
+    out: &mut impl Write,
+    summary: &ContainerSummary,
+) -> std::io::Result<()> {
+    let storage = summary.counts.storage;
+    if storage.total() == 0 {
+        return Ok(());
+    }
+
+    writeln!(
+        out,
+        "{:<LABEL_WIDTH$}{}",
+        "Total files:",
+        thousands(storage.total())
+    )?;
+    // The breakdown gets its own wider column, so an indented label still
+    // leaves its count aligned with the others in this block. Padding these to
+    // LABEL_WIDTH put "130,441" hard against "  Zip segments:", which is one
+    // character over the width and so was padded to nothing.
+    const BREAKDOWN_WIDTH: usize = LABEL_WIDTH + 4;
+    for (label, count) in [
+        ("  Zip segments:", storage.zip_segment),
+        ("  Map storage:", storage.shared_map),
+        ("  Own streams:", storage.own_stream),
+        ("  In metadata:", storage.in_metadata),
+    ] {
+        if count > 0 {
+            writeln!(out, "{label:<BREAKDOWN_WIDTH$}{}", thousands(count))?;
+        }
+    }
+    // Named, not hidden. These are files an acquisition recorded without being
+    // able to read — the acquisition's own SKIPPED report lists each one with
+    // its reason — and omitting them would leave the parts not summing to the
+    // total.
+    if storage.no_content > 0 {
+        writeln!(
+            out,
+            "{:<BREAKDOWN_WIDTH$}{} (recorded without content; see the acquisition log)",
+            "  Not read:",
+            thousands(storage.no_content)
+        )?;
+    }
+    Ok(())
 }
 
 /// Write the version and tool lines.

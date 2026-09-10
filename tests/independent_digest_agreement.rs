@@ -404,9 +404,14 @@ fn shared_block_hash_algorithms(path: &Path) -> AlgorithmCoverage {
     distinct.sort();
     distinct.dedup();
 
+    // The five AFF4 Standard v1.0a §6.2 names a block hash segment may carry.
+    // Listed rather than assumed to be all of them: a container using a suffix
+    // outside the table is one this reader would not find, and counting it here
+    // would overstate coverage.
+    const SUPPORTED: [&str; 5] = ["md5", "sha1", "sha256", "sha512", "blake2b"];
     let ours = distinct
         .iter()
-        .filter(|s| s.eq_ignore_ascii_case("md5") || s.eq_ignore_ascii_case("sha1"))
+        .filter(|s| SUPPORTED.iter().any(|k| s.eq_ignore_ascii_case(k)))
         .count();
     AlgorithmCoverage {
         ours,
@@ -414,26 +419,21 @@ fn shared_block_hash_algorithms(path: &Path) -> AlgorithmCoverage {
     }
 }
 
-/// aff4tools recomputes per-chunk digests for MD5 and SHA-1 only, and this
-/// pins that limit rather than letting it drift unnoticed.
+/// aff4tools recomputes per-chunk digests in **every** algorithm a container
+/// records, matching pyaff4 exactly.
 ///
 /// `Base-Linear-AllHashes.aff4` carries five block-hash algorithms — md5,
-/// sha1, sha256, sha512, blake2b — over 121 chunks. pyaff4 recomputes all 605;
-/// aff4tools recomputes 242. `BlockDigests` in `src/verify.rs` has fields for
-/// two algorithms and no more.
+/// sha1, sha256, sha512, blake2b — over 121 chunks, so 605 per-chunk digests.
 ///
-/// **This is a coverage limit, not a correctness bug, and the CLI says so**:
-/// `--no-block-hashing`'s help describes "per-chunk MD5 and SHA-1
-/// verification". The `blockHashesHash` over each of the other three segments
-/// *is* recomputed and compared, so a tampered sha256 segment is still caught —
-/// what is not checked is whether each individual sha256 chunk digest describes
-/// its chunk.
-///
-/// If aff4tools ever recomputes all five, this test fails and should be
-/// deleted, and the scaling in `pyaff4_and_aff4tools_compute_the_same_digests`
-/// becomes unnecessary.
+/// **This test previously pinned a limit of two.** `BlockDigests` in
+/// `src/verify.rs` had a field per algorithm, MD5 and SHA-1 and no more, so 363
+/// of the 605 chunk digests were never compared: a tampered sha256 *segment*
+/// was caught by its `blockHashesHash`, but a wrong individual sha256 chunk
+/// digest was not. Phase 10 made the reader discover which algorithms a
+/// container records rather than assuming, and its own doc comment said this
+/// test should be replaced when that happened.
 #[test]
-fn aff4tools_verifies_md5_and_sha1_chunks_only() {
+fn aff4tools_verifies_every_recorded_chunk_algorithm() {
     let path = reference_images()
         .into_iter()
         .find(|p| {
@@ -444,7 +444,10 @@ fn aff4tools_verifies_md5_and_sha1_chunks_only() {
 
     let coverage = shared_block_hash_algorithms(&path);
     assert_eq!(coverage.theirs, 5, "the fixture must carry five algorithms");
-    assert_eq!(coverage.ours, 2, "aff4tools covers md5 and sha1");
+    assert_eq!(
+        coverage.ours, coverage.theirs,
+        "aff4tools covers every algorithm the container records"
+    );
 
     let mut container = Container::open(&path).unwrap();
     let report =
@@ -452,8 +455,8 @@ fn aff4tools_verifies_md5_and_sha1_chunks_only() {
     assert!(!report.has_mismatch());
     assert_eq!(
         report.chunk_digest_count(),
-        242,
-        "121 chunks x 2 algorithms; if this grew, coverage improved"
+        605,
+        "121 chunks x 5 algorithms, the same total pyaff4 recomputes"
     );
 }
 

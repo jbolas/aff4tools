@@ -155,14 +155,22 @@ pub const fn is_escaped(byte: u8) -> bool {
 
 /// Whether §5 rule 2 applies: the name needs a raw form.
 ///
-/// True when the bytes are not valid UTF-8, or carry a character this module
+/// True when the bytes are not valid UTF-8 or carry a character this module
 /// escapes as a control.
 ///
-/// **The trigger and [`is_escaped`] must agree about controls.** If a byte
-/// were escaped without triggering rule 2, a name could be judged clean and
-/// then encoded anyway, producing a display form with a percent sequence and
-/// no raw property to explain it — a container contradicting itself. `0x7f` is
-/// in both for that reason.
+/// The trigger and [`is_escaped`] must agree. `0x7f` and `0x25` are both
+/// in this set for that reason.
+/// # `0x25` is a deliberate departure from the draft
+///
+/// AFF4-L v1.0-ALPHA §5 lists `0x25` in rule 1's escape set but does not make it
+/// trigger rule 2. Those two positions cannot both hold: a name containing `%`
+/// is then judged clean, stored literally, and carries no raw form, while the
+/// escape set says its display form should have been encoded.
+///
+/// Escaping is the safe half of the ambiguity. A `%` that triggers rule 2 gets
+/// both an encoded display form and a base64 raw form, so the original bytes
+/// survive exactly and a decoder can round-trip them. Leaving it literal makes
+/// `%41.txt` and a file whose display form encodes `A` indistinguishable.
 ///
 /// Bytes `0x80`-`0xff` do **not** trigger on their own. They appear in every
 /// valid UTF-8 name outside ASCII, and §5 rule 1 keeps such a name literal:
@@ -174,7 +182,7 @@ pub fn needs_raw_form(bytes: &[u8]) -> bool {
     if std::str::from_utf8(bytes).is_err() {
         return true;
     }
-    bytes.iter().any(|&b| b <= 0x1f || b == 0x7f)
+    bytes.iter().any(|&b| b <= 0x1f || b == 0x25 || b == 0x7f)
 }
 
 /// Build the §5 display form of `bytes`.
@@ -354,17 +362,40 @@ mod tests {
         assert_eq!(name.raw(), None, "an accented name needs no raw form");
     }
 
-    /// A literal percent in a real filename is left alone by rule 1.
+    /// A literal percent triggers rule 2, so the name gets both properties.
     ///
-    /// The case a careless decoder gets wrong: `100%.txt` is a valid name, is
-    /// stored literally, and must not be percent-decoded on the way out —
-    /// which is why the absence of a raw form is what tells a reader not to
-    /// decode.
+    /// **This inverts what the draft's rule 2 says, deliberately.** AFF4-L
+    /// v1.0-ALPHA §5 puts `0x25` in rule 1's escape set without making it
+    /// trigger rule 2, and those two positions contradict each other: a name
+    /// judged clean is stored literally, yet the escape set says its display
+    /// form should have been encoded.
+    ///
+    /// Escaping is the half that cannot lose information. `100%.txt` and a file
+    /// whose display form encodes `A` as `%41` are distinguishable here,
+    /// because the raw form carries the original bytes exactly. Left literal
+    /// they are not.
     #[test]
-    fn a_literal_percent_is_not_encoded_when_the_name_is_clean() {
+    fn a_literal_percent_triggers_the_raw_form() {
         let name = RecordedName::of(b"100%.txt");
-        assert_eq!(name.display(), "100%.txt");
-        assert_eq!(name.raw(), None);
+        assert_eq!(name.display(), "100%25.txt");
+        assert_eq!(name.raw(), Some(base64_encode(b"100%.txt").as_str()));
+        assert!(name.is_encoded());
+    }
+
+    /// The round trip that makes the departure worth it: two names whose
+    /// display forms would collide are told apart by their raw forms.
+    #[test]
+    fn a_percent_name_round_trips_distinctly() {
+        let literal = RecordedName::of(b"%41.txt");
+        let encoded = RecordedName::of(b"A.txt");
+
+        assert_ne!(
+            literal.display(),
+            encoded.display(),
+            "a literal %41 and the encoding of 'A' must not render alike"
+        );
+        assert_eq!(literal.raw(), Some(base64_encode(b"%41.txt").as_str()));
+        assert_eq!(encoded.raw(), None, "a clean name needs no raw form");
     }
 
     /// §5 rule 2: a control character triggers both properties.
@@ -428,20 +459,26 @@ mod tests {
     /// Asserted over the whole range rather than sampled: a byte escaped
     /// without triggering would make a container contradict itself, and this
     /// is the invariant that prevents it.
+    ///
+    /// **The two sets are now identical**, which they were not before. `0x25`
+    /// used to escape without triggering — the one exception, and the source of
+    /// 154 findings on a real macOS acquisition. Merging its arm into the
+    /// others is the point of the change rather than a tidy-up.
     #[test]
     fn the_escape_set_and_the_trigger_agree_about_controls() {
         for byte in 0..=255u8 {
             let escaped = is_escaped(byte);
             let triggers = needs_raw_form(&[byte]);
             match byte {
-                // Controls escape and trigger. High bytes do too, though for
-                // a different reason: a lone one is not valid UTF-8. The arms
-                // are merged because the assertion is the same, and the
-                // reasons are recorded here rather than in duplicate arms.
-                0x00..=0x1f | 0x7f | 0x80..=0xff => assert!(escaped && triggers, "{byte:#04x}"),
-                // Percent: escaped so the encoding round-trips, but a name
-                // that is only `%` is a clean name and stays literal.
-                0x25 => assert!(escaped && !triggers, "{byte:#04x}"),
+                // Controls escape and trigger. Percent does too, so a name
+                // carrying one gets a raw form that preserves it exactly. High
+                // bytes do as well, though for a different reason: a lone one
+                // is not valid UTF-8. The arms are merged because the assertion
+                // is the same, and the reasons are recorded here rather than in
+                // duplicate arms.
+                0x00..=0x1f | 0x25 | 0x7f | 0x80..=0xff => {
+                    assert!(escaped && triggers, "{byte:#04x}");
+                }
                 // Everything else is ordinary.
                 _ => assert!(!escaped && !triggers, "{byte:#04x}"),
             }

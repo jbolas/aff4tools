@@ -444,6 +444,54 @@ pub enum DeviationKind {
     /// unreported, `verify` silently declined that file's two recorded digests
     /// even though its bytes were present and matched.
     MissingZipSegmentType,
+    /// A map carries none of the digests that would show its own segments are
+    /// intact.
+    ///
+    /// AFF4 Standard v1.0a §6.2 defines four: `aff4:mapPointHash` over the
+    /// `map` segment, `aff4:mapIdxHash` over `idx`, `aff4:mapPathHash` over
+    /// `mapPath`, and `aff4:mapHash` over the three concatenated.
+    ///
+    /// **What this costs an examiner.** A map is the instruction sheet for
+    /// reassembling an image: which bytes come from where. Corrupt one entry
+    /// and the reconstructed image is wrong while every stream digest still
+    /// matches, because the streams were never touched. Without these digests a
+    /// damaged map is indistinguishable from an intact one.
+    ///
+    /// Not hypothetical. aff4tools itself wrote no map digest on any path until
+    /// Phase 10, and reported nothing, because AFF4 Standard v1.0a §6.2 was
+    /// absent from the rule registry entirely.
+    MissingMapSegmentDigest,
+    /// A logical stream whose declared storage form holds no bytes.
+    ///
+    /// AFF4-L v1.0-ALPHA §6 makes a subject's `rdf:type` list the statement of
+    /// where its content is: a ZIP segment, a map, an image stream, or the
+    /// metadata itself. When the named place holds nothing, the container
+    /// contradicts itself.
+    ///
+    /// **Reported rather than searched for.** Looking elsewhere for the bytes
+    /// could match another stream's content and then report a successful
+    /// verification over the wrong data, which is worse than declining to
+    /// verify at all. The file's digests are declined and the departure is
+    /// recorded.
+    StorageFormNotFound,
+    /// A logical stream naming two storage forms at once.
+    ///
+    /// AFF4-L v1.0-ALPHA §6 gives one form per stream. A subject typed both
+    /// `ZipSegment` and `ImageStream`, or carrying a resident `aff4l:dataStream`
+    /// literal beside a storage type, states its bytes are in two places and
+    /// gives no way to tell which is authoritative.
+    AmbiguousStorageForm,
+    /// An in-metadata storage stream larger than AFF4-L v1.0-ALPHA §6.2 allows.
+    ///
+    /// That clause caps the form at one kilobyte. The bytes are present and
+    /// unambiguously this stream's, so the container is read normally: this is
+    /// a conformance finding about how the writer chose to store them, not an
+    /// integrity finding about the evidence.
+    ///
+    /// Real sources reach it. A survey of 4.15 million files on one macOS
+    /// system found 992 extended attributes above the cap, the largest at
+    /// 6.4 MB.
+    OversizedResidentStream,
     /// A reference to an object stored in another volume, e.g. one stripe of a
     /// striped container. Expected when inspecting a single stripe.
     ExternalReference,
@@ -715,6 +763,10 @@ impl std::fmt::Display for DeviationKind {
             Self::MapGap => "discontiguous map gap",
             Self::DuplicateSegmentName => "duplicate segment name",
             Self::MissingZipSegmentType => "segment-stored file missing aff4:zip_segment",
+            Self::MissingMapSegmentDigest => "map missing its segment integrity digests",
+            Self::StorageFormNotFound => "declared storage form holds no bytes",
+            Self::AmbiguousStorageForm => "two storage forms declared for one stream",
+            Self::OversizedResidentStream => "in-metadata stream above the one-kilobyte cap",
             Self::ExternalReference => "reference to another volume",
             Self::ConflictingStreamValue => "volumes disagree about a stream",
             Self::DanglingReference => "reference to an object nothing describes",

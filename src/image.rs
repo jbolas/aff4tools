@@ -685,12 +685,45 @@ impl StreamSource for SetStreams<'_> {
     }
 }
 
+/// Whether this subject declares itself an `aff4:Map`.
+///
+/// Compared by local name, because the type is written as a full IRI and a
+/// container may spell the namespace either way under AFF4-L v1.0-ALPHA §4.1.
+fn declares_map_type(arn: &Arn, graph: &Graph) -> bool {
+    graph.types(arn.as_str()).into_iter().any(|iri| {
+        let local = iri.rsplit_once(['#', '/']).map_or(iri, |(_, n)| n);
+        local == "Map"
+    })
+}
+
 /// Follow an image's `dataStream` (or `dependentStream`) to its map.
+///
+/// An image that declares itself a `Map` is its own map and follows nothing.
+/// AFF4-L v1.0-ALPHA §6.3 stores a file's primary stream that way, by adding
+/// the `aff4:Map` type to the file image instance rather than pointing at a
+/// separate subject. One subject then carries both `aff4:Image` and
+/// `aff4:Map`, and its map segments are named by its own ARN.
 fn data_stream_of(arn: &Arn, graph: &Graph, lexicon: &Lexicon, locus: &Locus) -> Result<Arn> {
     let predicate = lexicon.iri(lexicon.data_stream);
 
+    if declares_map_type(arn, graph) {
+        return Ok(arn.clone());
+    }
+
+    // Both namespaces. AFF4-L v1.0-ALPHA §4.1 puts newly introduced terms in
+    // its own namespace and says a reader "MAY additionally honour either
+    // namespace prefix in support of backwards compatibility" — so a v2.1
+    // container writes `aff4l:dataStream` where an earlier one wrote
+    // `aff4:dataStream`, and both name the same edge.
+    let alpha_predicate = format!(
+        "{}{}",
+        crate::lexicon::namespace_for(crate::lexicon::Generation::Aff4L10, lexicon.data_stream),
+        lexicon.data_stream
+    );
+
     let iri = graph
         .object(arn.as_str(), &predicate)
+        .or_else(|| graph.object(arn.as_str(), &alpha_predicate))
         .and_then(crate::rdf::Value::as_iri)
         .ok_or_else(|| {
             Error::malformed(

@@ -67,6 +67,68 @@ pub(super) const AFF4_V1_0A: &[RuleInfo] = &[
         kind: Some(K::DigestLengthMismatch),
         routine: false,
     },
+    // AFF4 Standard v1.0a §6.2 opens by making the whole approach optional:
+    // implementations MAY adopt block map hashing. Nothing a container carries
+    // can depart from a permission, so this rule states that the option was
+    // taken up, and gives the four conditional requirements below something to
+    // hang from.
+    //
+    // aff4tools took it up long before this phase — it has always written
+    // per-chunk block hashes — while never writing the digests that complete
+    // the construction. That is a departure from a requirement, not a declined
+    // option, and it went unreported because these rules were not declared.
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 1),
+        requirement: May,
+        state: Honored,
+        statement: "An implementation may adopt block map hashing, which digests each block and composes those digests into one hash protecting the stream and its map together.",
+        kind: None,
+        routine: false,
+    },
+    // The conditional requirements. Each states its condition in the statement
+    // itself, because the registry has no conditional requirement level and
+    // adding one would touch every consumer of `Requirement`. A container that
+    // never adopted block map hashing satisfies all four trivially.
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 2),
+        requirement: Must,
+        // Task 7 moves this to Detected with kind Some(K::IncompleteBlockMapHash),
+        // once the checker exists. Declared now so the gap is reported.
+        state: NotImplemented,
+        statement: "A writer that records block hashes also records the block map digest those hashes compose.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 3),
+        requirement: Must,
+        // Task 7 moves this to Detected with kind Some(K::MisplacedBlockMapHash),
+        // once the checker exists. Declared now so the gap is reported.
+        state: NotImplemented,
+        statement: "A recorded block map digest is stored on the image, under a datatype naming the algorithm that produced it.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 4),
+        requirement: Must,
+        state: Detected,
+        statement: "A map records a digest of each segment it is built from, and one over their concatenation.",
+        kind: Some(K::MissingMapSegmentDigest),
+        routine: false,
+    },
+    // Declared but not checked: the clause says implementations "WILL employ"
+    // SHA-512 or SHA-256, and whether that is a MUST or a strong SHOULD is not
+    // settled by the wording. Recorded as a SHOULD, and left unevaluated rather
+    // than enforcing a reading the document does not clearly state.
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 5),
+        requirement: Should,
+        state: NotImplemented,
+        statement: "A digest composed for block map hashing is computed with one of the two algorithms the standard names for it.",
+        kind: None,
+        routine: false,
+    },
     declare_rule! {
         id: (Document::Aff4Standard10a, "§5.4", 1),
         requirement: Must,
@@ -403,18 +465,29 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
         kind: None,
         routine: false,
     },
+    // Honored rather than Detected: this rule binds the *reader*, so what
+    // satisfies it is aff4tools' own behaviour and not anything a container
+    // carries. Phase 9a made all four forms readable — in-metadata streams,
+    // ZIP segments, both AFF4-L v1.0-ALPHA §6.3 map shapes, and a file image
+    // typed as an image stream — each covered by `tests/storage_forms.rs`
+    // against fixtures this project's writer did not produce.
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6", 1),
         requirement: Must,
-        state: NotImplemented,
+        state: Honored,
         statement: "A reader handles every storage stream form this section describes, not a chosen subset.",
         kind: None,
         routine: false,
     },
+    // Honored: this binds the writer, and what satisfies it is aff4tools' own
+    // behaviour rather than anything a container carries. Phase 9c writes three
+    // of the four forms — ZIP segments and image streams for primary content,
+    // in-metadata streams for extended attributes — where the clause asks for
+    // at least one.
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6", 2),
         requirement: Must,
-        state: NotImplemented,
+        state: Honored,
         statement: "A writer implements at least one of the storage stream forms this section describes.",
         kind: None,
         routine: false,
@@ -446,16 +519,58 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6.2", 1),
         requirement: MustNot,
-        state: NotImplemented,
+        state: Detected,
         statement: "An in-metadata storage stream holds no stream larger than one kilobyte.",
-        kind: None,
+        kind: Some(K::OversizedResidentStream),
         routine: false,
     },
+    // A permission both sides take up: the writer records no digest on an
+    // in-metadata substream, and the reader verifies one that carries none
+    // without reporting a missing digest. Nothing a container holds could
+    // depart from a permission, so there is no deviation to raise.
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6.2", 2),
         requirement: May,
-        state: NotImplemented,
+        state: Honored,
         statement: "A stream carried inside the metadata need not record its own digests, since the metadata integrity hash covers it.",
+        kind: None,
+        routine: false,
+    },
+    // The container-side half of AFF4-L v1.0-ALPHA §6's dispatch model. The
+    // clause tells a reader to support every storage form; these two say the
+    // container must name exactly one of them per stream, since a reader that
+    // dispatches on the type list can do nothing with none or with two.
+    //
+    // Reported per subject and never raised as a whole-container failure: one
+    // self-contradicting subject must not suppress the findings about every
+    // other object, which is the same rule `build_object` follows for a
+    // subject that is not a valid ARN.
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§6", 3),
+        requirement: Must,
+        state: Detected,
+        statement: "A stream's declared storage form holds the bytes that form is said to store.",
+        kind: Some(K::StorageFormNotFound),
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§6", 4),
+        requirement: Must,
+        state: Detected,
+        statement: "A stream declares one storage form, not several, so where its bytes are stored is unambiguous.",
+        kind: Some(K::AmbiguousStorageForm),
+        routine: false,
+    },
+    // A permission, so nothing a container carries could depart from it. Both
+    // shapes AFF4-L v1.0-ALPHA §6.3 shows are read: the aff4:Map type added to
+    // the FileImage instance, which is the form this project writes, and the
+    // separate Map subject reached through aff4l:dataStream, which it does not
+    // write and must still read.
+    declare_rule! {
+        id: (Document::Aff4LStandard10Alpha, "§6.3", 1),
+        requirement: May,
+        state: Honored,
+        statement: "A file image may carry the map type, storing its primary stream through a map over a shared image stream.",
         kind: None,
         routine: false,
     },
@@ -467,10 +582,15 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
         kind: None,
         routine: false,
     },
+    // Also a reader-side obligation, so Honored for the same reason as
+    // AFF4-L v1.0-ALPHA §6/1. Both spellings were already accepted before
+    // Phase 9 — `aff4:hash` carrying a `blockMapHashSHA512`-style datatype and
+    // a plain `aff4:blockMapHash` — and Phase 9a made the maps they sit on
+    // reachable in both AFF4-L v1.0-ALPHA §6.3 shapes.
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6.3.1", 2),
         requirement: Must,
-        state: NotImplemented,
+        state: Honored,
         statement: "A reader accepts either block map digest spelling and can verify the block map digests of every map and dependent image stream.",
         kind: None,
         routine: false,

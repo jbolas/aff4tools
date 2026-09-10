@@ -71,15 +71,28 @@ pub fn compress_chunk(codec: Codec, chunk: &[u8], locus: &Locus) -> Result<Vec<u
 /// Per-chunk digests accumulated as a bevy is built.
 ///
 /// These are the leaves of the AFF4 hash tree. Written as
-/// `<bevy>.blockHash.md5` and `.sha1` segments, they let `verify` check that
-/// each chunk is intact individually rather than only in aggregate — which is
-/// what "checked from leaves to root" means.
+/// `<bevy>.blockHash.<algorithm>` segments, they let `verify` check that each
+/// chunk is intact individually rather than only in aggregate — which is what
+/// "checked from leaves to root" means.
+///
+/// # One algorithm, chosen by the caller
+///
+/// This held a hardcoded MD5 and SHA-1 pair until Phase 10. AFF4 Standard
+/// v1.0a §6.2 permits several — "Implementations MAY generate Block Hashes
+/// using multiple algorithms" — but neither of those two is a defensible
+/// default for new evidence, and computing both doubled the cost to say
+/// something one modern digest says better.
+///
+/// The algorithm now follows `--hash`. Several are still *read*: a container
+/// written by any implementation must verify, which is why the reader
+/// discovers what is present rather than assuming.
 #[derive(Debug, Default)]
 pub struct BlockDigests {
-    /// Concatenated 16-byte MD5 digests, one per chunk.
-    pub md5: Vec<u8>,
-    /// Concatenated 20-byte SHA-1 digests, one per chunk.
-    pub sha1: Vec<u8>,
+    /// The algorithm's segment suffix, e.g. `sha256`. Empty when no per-chunk
+    /// digest is being computed.
+    pub suffix: &'static str,
+    /// Concatenated raw digests, one per chunk, in chunk order.
+    pub digests: Vec<u8>,
 }
 
 /// One bevy under construction.
@@ -94,6 +107,9 @@ pub struct BevyBuilder {
     body: Vec<u8>,
     index: Vec<u8>,
     chunk_count: usize,
+    /// Which algorithm digests each chunk, if any. `None` skips the work
+    /// entirely rather than computing digests nothing will record.
+    block_algorithm: Option<crate::model::HashAlgorithm>,
     blocks: BlockDigests,
 }
 
@@ -114,6 +130,32 @@ impl BevyBuilder {
     /// Start an empty bevy.
     #[must_use]
     pub fn new(codec: Codec, chunk_size: usize, chunks_per_segment: usize) -> Self {
+        Self::with_block_algorithm(codec, chunk_size, chunks_per_segment, None)
+    }
+
+    /// Start an empty bevy that digests each chunk with `block_algorithm`.
+    ///
+    /// `None` computes no per-chunk digests at all, which is the point of the
+    /// distinction: an algorithm whose digests nothing will record is pure
+    /// cost, and this is the level at which that cost is avoided rather than
+    /// discarded later.
+    ///
+    /// An algorithm AFF4 Standard v1.0a §6.2's table does not name is treated
+    /// as `None`. The alternative is a segment suffix no reader recognizes,
+    /// which would store digests that cannot be found, and finding no digests
+    /// is more honest than storing unfindable ones.
+    #[must_use]
+    pub fn with_block_algorithm(
+        codec: Codec,
+        chunk_size: usize,
+        chunks_per_segment: usize,
+        block_algorithm: Option<crate::model::HashAlgorithm>,
+    ) -> Self {
+        let block_algorithm = block_algorithm.filter(|a| a.block_hash_suffix().is_some());
+        let suffix = block_algorithm
+            .as_ref()
+            .and_then(crate::model::HashAlgorithm::block_hash_suffix)
+            .unwrap_or_default();
         Self {
             codec,
             chunk_size,
@@ -121,7 +163,11 @@ impl BevyBuilder {
             body: Vec::with_capacity(chunk_size * 8),
             index: Vec::with_capacity(chunks_per_segment * INDEX_ENTRY_SIZE),
             chunk_count: 0,
-            blocks: BlockDigests::default(),
+            block_algorithm,
+            blocks: BlockDigests {
+                suffix,
+                digests: Vec::new(),
+            },
         }
     }
 
@@ -190,12 +236,10 @@ impl BevyBuilder {
         // that matched nothing — a mismatch caught only because the leaves are
         // actually checked. The writer follows the reader, since the reader is
         // what an examiner runs.
+        if let Some(algorithm) = &self.block_algorithm
+            && let Some(digest) = crate::hash::digest_bytes_of(algorithm, chunk)
         {
-            use md5::Digest as _;
-            self.blocks.md5.extend_from_slice(&md5::Md5::digest(chunk));
-            self.blocks
-                .sha1
-                .extend_from_slice(&sha1::Sha1::digest(chunk));
+            self.blocks.digests.extend_from_slice(&digest);
         }
 
         let compressed = compress_chunk(self.codec, full, locus)?;
@@ -232,11 +276,17 @@ impl BevyBuilder {
     pub fn finish(&mut self) -> FinishedBevy {
         let chunk_count = self.chunk_count;
         self.chunk_count = 0;
+        // The suffix is a property of the builder, not of one bevy, so it is
+        // restored rather than taken: the next bevy digests with the same
+        // algorithm.
+        let suffix = self.blocks.suffix;
+        let blocks = std::mem::take(&mut self.blocks);
+        self.blocks.suffix = suffix;
         FinishedBevy {
             body: std::mem::take(&mut self.body),
             index: std::mem::take(&mut self.index),
             chunk_count,
-            blocks: std::mem::take(&mut self.blocks),
+            blocks,
         }
     }
 }

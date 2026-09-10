@@ -104,6 +104,47 @@ pub struct ObjectCounts {
     /// Counted during the parse so `--brief` can say how many it is not
     /// showing, even though it retains only a capped sample of them.
     pub bitstream_candidates: usize,
+    /// How many file images hold their bytes in each AFF4-L v1.0-ALPHA §6 form.
+    ///
+    /// An examiner asks how many files a container holds far more often than
+    /// how many digest comparisons ran, and where those files live decides what
+    /// reading one costs. Counted here rather than derived from the checks, so
+    /// the figure is available before any byte is read.
+    pub storage: StorageCounts,
+}
+
+/// File images by the AFF4-L v1.0-ALPHA §6 form holding their bytes.
+///
+/// Every field counts `aff4:FileImage` objects only. Folders have no content
+/// and are excluded, as are the streams and maps that carry the content —
+/// counting a shared stream alongside the files inside it would double-count
+/// those bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageCounts {
+    /// AFF4-L v1.0-ALPHA §6.1: bytes are one ZIP member named by the file's
+    /// own ARN.
+    pub zip_segment: usize,
+    /// AFF4-L v1.0-ALPHA §6.3: bytes are a range of a stream shared with
+    /// other files, reached through a map.
+    pub shared_map: usize,
+    /// AFF4-L v1.0-ALPHA §6.4: the file has an `ImageStream` of its own.
+    pub own_stream: usize,
+    /// AFF4-L v1.0-ALPHA §6.2: bytes are a base64 literal in the metadata.
+    pub in_metadata: usize,
+    /// Files recording no storage form at all.
+    ///
+    /// Not a defect on its own. An acquisition that could not read a file still
+    /// records that it existed, with its name, times, and mode, and stores no
+    /// bytes — every such path is listed in the acquisition's SKIPPED report.
+    pub no_content: usize,
+}
+
+impl StorageCounts {
+    /// Every file image counted here, in any form.
+    #[must_use]
+    pub fn total(self) -> usize {
+        self.zip_segment + self.shared_map + self.own_stream + self.in_metadata + self.no_content
+    }
 }
 
 impl ObjectCounts {
@@ -125,6 +166,23 @@ impl ObjectCounts {
             ObjectRole::FileImage => self.files += 1,
             ObjectRole::FolderImage => self.folders += 1,
             _ => {}
+        }
+    }
+
+    /// Record which AFF4-L v1.0-ALPHA §6 form holds one file image's bytes.
+    ///
+    /// Separate from [`observe`](Self::observe) because deciding the form needs
+    /// the object's type list and its properties, which that method does not
+    /// see. Called only for `FileImage` objects; every other role is content
+    /// this does not count.
+    pub fn observe_storage(&mut self, form: Option<crate::storage_form::StorageForm>) {
+        use crate::storage_form::StorageForm;
+        match form {
+            Some(StorageForm::ZipSegment) => self.storage.zip_segment += 1,
+            Some(StorageForm::SharedMap) => self.storage.shared_map += 1,
+            Some(StorageForm::OwnImageStream) => self.storage.own_stream += 1,
+            Some(StorageForm::InMetadata) => self.storage.in_metadata += 1,
+            None => self.storage.no_content += 1,
         }
     }
 }
@@ -400,6 +458,128 @@ impl Aff4Object {
         }
         None
     }
+
+    /// Whether this object carries its bytes inside the metadata.
+    ///
+    /// True when an `aff4l:dataStream` property holds a *literal*, which is how
+    /// AFF4-L v1.0-ALPHA §6.2 stores a stream in `information.turtle`. The same
+    /// property holding an *IRI* is instead the indirect form of
+    /// AFF4-L v1.0-ALPHA §6.3, naming a map elsewhere in the container, and is
+    /// not resident.
+    ///
+    /// Answers only where the bytes are said to be. Whether they decode is
+    /// [`Self::resident_bytes`].
+    #[must_use]
+    pub fn has_resident_stream(&self) -> bool {
+        self.property("dataStream")
+            .is_some_and(|p| matches!(p.value, crate::rdf::Value::Literal { .. }))
+    }
+
+    /// Whether this object names its storage stream by reference.
+    ///
+    /// True when an `aff4l:dataStream` property holds an **IRI**. That is the
+    /// second form AFF4-L v1.0-ALPHA §6.3 shows, where a file image carries no
+    /// storage type of its own and points at a separate map subject.
+    #[must_use]
+    pub fn has_stream_reference(&self) -> bool {
+        self.property("dataStream")
+            .is_some_and(|p| matches!(p.value, crate::rdf::Value::Iri { .. }))
+    }
+
+    /// The decoded bytes of an in-metadata storage stream.
+    ///
+    /// [`None`] when this object stores its bytes some other way. An `Err` when
+    /// it declares a resident stream whose literal is not valid base64: the
+    /// container states where its bytes are and then fails to supply them,
+    /// which is a finding about the evidence and never a silently absent
+    /// stream.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::error::Error::Malformed`] if the literal does not decode.
+    pub fn resident_bytes(
+        &self,
+        locus: &crate::error::Locus,
+    ) -> crate::error::Result<Option<Vec<u8>>> {
+        let Some(property) = self.property("dataStream") else {
+            return Ok(None);
+        };
+        let crate::rdf::Value::Literal { lexical, .. } = &property.value else {
+            return Ok(None);
+        };
+        match crate::naming::base64_decode(lexical) {
+            Some(bytes) => Ok(Some(bytes)),
+            None => Err(crate::error::Error::malformed(
+                locus.clone().subject(self.arn.as_str()).predicate(
+                    crate::lexicon::namespace_for(
+                        crate::lexicon::Generation::Aff4L10,
+                        "dataStream",
+                    )
+                    .to_owned()
+                        + "dataStream",
+                ),
+                "aff4l:dataStream declares an in-metadata storage stream whose \
+                 literal is not valid base64, so the bytes AFF4-L v1.0-ALPHA \
+                 §6.2 says are stored here cannot be recovered",
+            )),
+        }
+    }
+
+    /// This object's substreams, as AFF4-L v1.0-ALPHA §4.3 links them.
+    ///
+    /// `aff4l:extendedAttribute` reaches an extended attribute and
+    /// `aff4l:alternateDataStream` an NTFS alternate data stream. Both are
+    /// returned, tagged with the property that named them.
+    #[must_use]
+    pub fn substream_refs(&self) -> Vec<SubstreamRef> {
+        let mut out = Vec::new();
+        for property in &self.properties {
+            let kind = match &*property.name {
+                "extendedAttribute" => SubstreamKind::ExtendedAttribute,
+                "alternateDataStream" => SubstreamKind::AlternateDataStream,
+                _ => continue,
+            };
+            if let Some(iri) = property.value.as_iri() {
+                out.push(SubstreamRef {
+                    arn: iri.to_owned(),
+                    kind,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// A reference from a file to one of its non-primary data streams.
+///
+/// AFF4-L v1.0-ALPHA §4.2 defines the classes these name, and §4.3 the
+/// properties that reach them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubstreamRef {
+    /// The substream object's ARN, as written.
+    pub arn: String,
+    /// Which property named it.
+    pub kind: SubstreamKind,
+}
+
+/// Which kind of non-primary stream a [`SubstreamRef`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubstreamKind {
+    /// `aff4l:extendedAttribute` — HFS+, APFS, and Linux extended attributes.
+    ExtendedAttribute,
+    /// `aff4l:alternateDataStream` — NTFS alternate data streams.
+    AlternateDataStream,
+}
+
+impl SubstreamKind {
+    /// The kind's name, for reports.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ExtendedAttribute => "extended attribute",
+            Self::AlternateDataStream => "alternate data stream",
+        }
+    }
 }
 
 /// What a [`ObjectRole::BlockHashes`] object's per-chunk digests are, and
@@ -647,6 +827,12 @@ pub enum ObjectRole {
     FileImage,
     /// A logical folder (AFF4-L, v1.1).
     FolderImage,
+    /// A file's non-primary data stream (AFF4-L v1.0-ALPHA §4.2).
+    ///
+    /// An extended attribute or an alternate data stream. It belongs to a
+    /// parent file rather than standing on its own, and it carries content, so
+    /// a listing that shows images shows these too.
+    FileSubStream,
     /// A chunked data stream.
     ImageStream,
     /// A virtual address space over other streams.
@@ -685,6 +871,8 @@ impl ObjectRole {
             Self::FileImage
         } else if has("FolderImage") {
             Self::FolderImage
+        } else if has("FileSubStream") || has("FileExtendedAttribute") {
+            Self::FileSubStream
         } else if has("DiscontiguousImage") {
             Self::DiscontiguousImage
         } else if has("ContiguousImage") {
@@ -732,6 +920,7 @@ impl ObjectRole {
             Self::Image => "image",
             Self::FileImage => "file image",
             Self::FolderImage => "folder",
+            Self::FileSubStream => "substream",
             Self::ImageStream => "image stream",
             Self::Map => "map",
             Self::BlockHashes => "block hashes",
@@ -764,6 +953,7 @@ impl ObjectRole {
             Self::Image => "image",
             Self::FileImage => "file_image",
             Self::FolderImage => "folder_image",
+            Self::FileSubStream => "file_sub_stream",
             Self::ImageStream => "image_stream",
             Self::Map => "map",
             Self::BlockHashes => "block_hashes",
@@ -923,6 +1113,29 @@ impl HashAlgorithm {
             | Self::Sha3_512
             | Self::Shake256 => Some(128),
             Self::Other(_) => None,
+        }
+    }
+
+    /// The suffix a block hash segment carries for this algorithm.
+    ///
+    /// AFF4 Standard v1.0a §6.2 names five in its table — `md5`, `sha1`,
+    /// `blake2b`, `sha256`, `sha512` — and this returns exactly those. An
+    /// algorithm the table does not name returns [`None`], and the writer
+    /// declines to record per-chunk digests in it rather than inventing a
+    /// segment name no reader would recognize.
+    ///
+    /// Lowercase, matching both the table and the corpus. Distinct from
+    /// [`Self::name`], which is the display and datatype spelling: `SHA1` names
+    /// the algorithm, `sha1` names the segment.
+    #[must_use]
+    pub fn block_hash_suffix(&self) -> Option<&'static str> {
+        match self {
+            Self::Md5 => Some("md5"),
+            Self::Sha1 => Some("sha1"),
+            Self::Sha256 => Some("sha256"),
+            Self::Sha512 => Some("sha512"),
+            Self::Blake2b => Some("blake2b"),
+            _ => None,
         }
     }
 

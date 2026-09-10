@@ -32,10 +32,93 @@ pub struct StreamOptions {
     pub codec: Codec,
     /// Whether to write per-chunk block hashes.
     ///
-    /// On by default: without them a container's composite digests establish
-    /// that the stream is intact in aggregate but not that any individual
-    /// chunk is, which is what `verify`'s "leaves to root" claim rests on.
+    /// Without them a container's composite digests establish that the stream
+    /// is intact in aggregate but not that any individual chunk is, which is
+    /// what `verify`'s "leaves to root" claim rests on. AFF4 Standard v1.0a
+    /// v1.0a §6.2 makes them optional, and `acquire` decides per run and file
+    /// whether the cost is worth paying.
     pub block_hashes: bool,
+    /// Which algorithm digests each chunk.
+    ///
+    /// `None` selects the default, SHA-256.
+    ///
+    /// One algorithm, not several. AFF4 Standard v1.0a §6.2 permits several,
+    /// and writing two — the hardcoded MD5 and SHA-1 pair this replaced — cost
+    /// a second pass over every byte to say something one modern digest says
+    /// better.
+    pub block_algorithm: Option<BlockHashAlgorithm>,
+}
+
+/// An algorithm AFF4 Standard v1.0a §6.2's table names for a block hash segment.
+///
+/// Deliberately narrower than [`HashAlgorithm`]: AFF4 Standard v1.0a §6.2 names
+/// exactly these five,
+/// and a per-chunk digest in anything else would be written under a segment
+/// suffix no reader looks for. A `--hash` selection outside this set falls back
+/// to the default rather than storing digests that cannot be found.
+///
+/// Also `Copy`, which `HashAlgorithm` is not — it carries an `Other(String)`
+/// for datatypes this build does not recognize, and no such thing can name a
+/// block hash segment anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockHashAlgorithm {
+    /// MD5, 128-bit. Written by pyaff4 and present throughout the corpus.
+    Md5,
+    /// SHA-1, 160-bit. Likewise.
+    Sha1,
+    /// SHA-256. The default for new output.
+    Sha256,
+    /// SHA-512.
+    Sha512,
+    /// Blake2b, 512-bit.
+    Blake2b,
+}
+
+impl BlockHashAlgorithm {
+    /// The AFF4 Standard v1.0a §6.2 algorithm matching `algorithm`, if the
+    /// table names one.
+    #[must_use]
+    pub fn of(algorithm: &HashAlgorithm) -> Option<Self> {
+        match algorithm {
+            HashAlgorithm::Md5 => Some(Self::Md5),
+            HashAlgorithm::Sha1 => Some(Self::Sha1),
+            HashAlgorithm::Sha256 => Some(Self::Sha256),
+            HashAlgorithm::Sha512 => Some(Self::Sha512),
+            HashAlgorithm::Blake2b => Some(Self::Blake2b),
+            _ => None,
+        }
+    }
+
+    /// The general algorithm this names.
+    #[must_use]
+    pub fn algorithm(self) -> HashAlgorithm {
+        match self {
+            Self::Md5 => HashAlgorithm::Md5,
+            Self::Sha1 => HashAlgorithm::Sha1,
+            Self::Sha256 => HashAlgorithm::Sha256,
+            Self::Sha512 => HashAlgorithm::Sha512,
+            Self::Blake2b => HashAlgorithm::Blake2b,
+        }
+    }
+}
+
+impl StreamOptions {
+    /// The algorithm per-chunk digests are computed in, or `None` when block
+    /// hashing is off.
+    ///
+    /// Resolves the default in one place, so the writers cannot disagree about
+    /// what "unset" means.
+    #[must_use]
+    pub fn resolved_block_algorithm(&self) -> Option<HashAlgorithm> {
+        if !self.block_hashes {
+            return None;
+        }
+        Some(
+            self.block_algorithm
+                .unwrap_or(BlockHashAlgorithm::Sha256)
+                .algorithm(),
+        )
+    }
 }
 
 impl Default for StreamOptions {
@@ -47,6 +130,7 @@ impl Default for StreamOptions {
             chunks_per_segment: crate::write::bevy::DEFAULT_CHUNKS_PER_SEGMENT,
             codec: Codec::Lz4,
             block_hashes: true,
+            block_algorithm: None,
         }
     }
 }
@@ -177,10 +261,11 @@ pub fn write_image_stream_observed(
         })?;
 
     let mut hasher = MultiHasher::for_algorithms(algorithms);
-    let mut builder = BevyBuilder::new(
+    let mut builder = BevyBuilder::with_block_algorithm(
         options.codec,
         options.chunk_size,
         options.chunks_per_segment,
+        options.resolved_block_algorithm(),
     );
 
     let mut buffer = vec![0u8; options.chunk_size];
@@ -317,10 +402,11 @@ pub fn write_image_stream_bounded(
             )
         })?;
 
-    let mut builder = BevyBuilder::new(
+    let mut builder = BevyBuilder::with_block_algorithm(
         options.codec,
         options.chunk_size,
         options.chunks_per_segment,
+        options.resolved_block_algorithm(),
     );
     let mut buffer = vec![0u8; options.chunk_size];
     let mut size: u64 = 0;
@@ -416,7 +502,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 ///
 /// Returns the `blockHashesHash` recorded for each block-hash segment, so the
 /// caller can report every digest it wrote.
-fn write_stream_metadata(
+pub(crate) fn write_stream_metadata(
     writer: &mut ContainerWriter,
     stream_arn: &str,
     volume_arn: &str,
@@ -474,9 +560,11 @@ fn write_stream_metadata(
     if !options.block_hashes {
         return recorded;
     }
-    for (algorithm, segments) in [("md5", &block_segments.md5), ("sha1", &block_segments.sha1)] {
+    {
+        let algorithm = block_segments.suffix;
+        let segments = &block_segments.segments;
         if segments.is_empty() {
-            continue;
+            return recorded;
         }
         let mut hasher = <sha2::Sha512 as sha2::Digest>::new();
         for segment in segments {
@@ -503,14 +591,18 @@ fn write_stream_metadata(
 
 /// The block-hash segments written, kept so their SHA-512 can be recorded.
 #[derive(Default)]
-struct BlockSegments {
-    md5: Vec<Vec<u8>>,
-    sha1: Vec<Vec<u8>>,
+pub(crate) struct BlockSegments {
+    /// The algorithm's segment suffix, e.g. `sha256`. Empty until the first
+    /// bevy carrying digests is flushed.
+    pub(crate) suffix: &'static str,
+    /// One entry per bevy, each holding that bevy's concatenated per-chunk
+    /// digests.
+    pub(crate) segments: Vec<Vec<u8>>,
 }
 
 /// Queue one finished bevy's members: the body, its index, and — when block
 /// hashing is on — its two per-chunk digest segments.
-fn flush_bevy(
+pub(crate) fn flush_bevy(
     writer: &mut ContainerWriter,
     base: &str,
     number: u64,
@@ -524,17 +616,18 @@ fn flush_bevy(
     writer.add_stored_segment(&bevy_name(base, number), &bevy.body)?;
     writer.add_stored_segment(&bevy_index_name(base, number), &bevy.index)?;
 
-    if block_hashes {
-        writer.add_stored_segment(&bevy_block_hash_name(base, number, "md5"), &bevy.blocks.md5)?;
+    // An empty suffix means no algorithm was selected, so there is nothing to
+    // write even when block hashing was asked for.
+    if block_hashes && !bevy.blocks.suffix.is_empty() {
         writer.add_stored_segment(
-            &bevy_block_hash_name(base, number, "sha1"),
-            &bevy.blocks.sha1,
+            &bevy_block_hash_name(base, number, bevy.blocks.suffix),
+            &bevy.blocks.digests,
         )?;
         // Retained deliberately: `blockHashesHash` is the SHA-512 of every
         // block-hash segment concatenated, so these must outlive the bevy. They
-        // are digests — 16 and 20 bytes per chunk — not bulk data.
-        segments.md5.push(bevy.blocks.md5);
-        segments.sha1.push(bevy.blocks.sha1);
+        // are digests — tens of bytes per chunk — not bulk data.
+        segments.suffix = bevy.blocks.suffix;
+        segments.segments.push(bevy.blocks.digests);
     }
     Ok(())
 }
@@ -606,6 +699,7 @@ mod tests {
             chunks_per_segment: 4,
             codec: Codec::Snappy,
             block_hashes: true,
+            block_algorithm: None,
         };
         let written = write_image_stream(
             &mut writer,
@@ -658,6 +752,7 @@ mod tests {
             chunks_per_segment: 2,
             codec: crate::codec::Codec::Stored,
             block_hashes: true,
+            block_algorithm: None,
         };
 
         // Whole, in one call.
@@ -739,6 +834,7 @@ mod tests {
             chunks_per_segment: 2,
             codec: crate::codec::Codec::Stored,
             block_hashes: false,
+            block_algorithm: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let registry = SourceRegistry::new();

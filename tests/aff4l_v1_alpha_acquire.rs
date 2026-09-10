@@ -335,10 +335,19 @@ fn a_stream_backed_file_round_trips_under_its_literal_name() {
     let root = dir.path().join("evidence");
     std::fs::create_dir_all(&root).expect("the fixture tree");
 
-    // Above the 1 MiB threshold, so this file is stored as an ImageStream.
-    // Compressible content keeps the fixture cheap; the storage form is what
-    // is under test, not the codec.
-    let large: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8).collect();
+    // Above `COMMONMAP_THRESHOLD`, so this file gets an `ImageStream` of its
+    // own rather than a share of the AFF4-L v1.0-ALPHA §6.3 stream. Sized from
+    // the constant rather than from a literal, so a measured change to the
+    // threshold does not silently turn this into a test of a different storage
+    // form — which is exactly what happened when the map band landed and this
+    // was sized from `ZIPSEGMENT_THRESHOLD`.
+    //
+    // Compressible content keeps the fixture cheap; the storage form is what is
+    // under test, not the codec.
+    let size = usize::try_from(aff4tools::write::logical::COMMONMAP_THRESHOLD)
+        .expect("the threshold fits in memory")
+        + 4096;
+    let large: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
     std::fs::write(root.join("large.bin"), &large).expect("a large file");
     std::fs::write(root.join("small.txt"), b"small\n").expect("a small file");
 
@@ -396,19 +405,47 @@ fn v1_alpha_leaves_a_clean_name_alone() {
     let root = dir.path().join("evidence");
     std::fs::create_dir_all(&root).expect("the fixture tree");
     std::fs::write(root.join("café.txt"), b"accented\n").expect("a file");
-    std::fs::write(root.join("100%.txt"), b"percent\n").expect("a file");
 
     let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
     let body = turtle(&container);
 
     assert!(body.contains("\"café.txt\""), "recorded as read:\n{body}");
     assert!(
-        body.contains("\"100%.txt\""),
-        "a literal percent is not an escape:\n{body}"
+        !body.contains("fileNameRaw"),
+        "AFF4-L v1.0-ALPHA §5 rule 1 writes no raw form:\n{body}"
+    );
+}
+
+/// A literal percent triggers rule 2, so the name gets both properties.
+///
+/// **This departs from the draft deliberately.** AFF4-L v1.0-ALPHA §5 lists
+/// `0x25` in rule 1's escape set without making it trigger rule 2, and the two
+/// positions contradict each other: a name judged clean is stored literally,
+/// while the escape set says its display form should have been encoded.
+///
+/// The project follows the reading that cannot lose a byte. With a raw form the
+/// original name survives exactly and `%41.txt` stays distinguishable from a
+/// display form encoding `A`; without one they are the same string.
+///
+/// Not hypothetical: acquiring `/Library` on stock macOS produced 154 findings
+/// from this one gap, each a real self-contradiction in this tool's own output.
+#[test]
+fn v1_alpha_records_a_percent_name_twice() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("evidence");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+    std::fs::write(root.join("100%.txt"), b"percent\n").expect("a file");
+
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+    let body = turtle(&container);
+
+    assert!(
+        body.contains("\"100%25.txt\""),
+        "the display form encodes the percent:\n{body}"
     );
     assert!(
-        !body.contains("fileNameRaw"),
-        "§5 rule 1 writes no raw form:\n{body}"
+        body.contains("fileNameRaw"),
+        "a raw form must carry the original bytes:\n{body}"
     );
 }
 
@@ -765,5 +802,149 @@ fn the_file_mode_is_written_for_v1_alpha_and_withheld_for_legacy() {
     assert!(
         !legacy_body.contains("fileMode"),
         "the AFF4-L 2019 paper does not define it:\n{legacy_body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9c: storage selection and substreams.
+// ---------------------------------------------------------------------------
+
+/// Every storage band round-trips: the bytes read back equal the bytes on the
+/// source, whichever form stored them.
+///
+/// The bands come from `docs/working/storage-stream-study.md`. Sizes are chosen
+/// either side of `ZIPSEGMENT_THRESHOLD`, which is the boundary this writer
+/// actually crosses.
+#[test]
+fn every_storage_band_round_trips() {
+    use aff4tools::write::logical::ZIPSEGMENT_THRESHOLD;
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("bands");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+
+    // Deterministic content, so a mismatch names which byte moved.
+    let make = |n: u64| -> Vec<u8> { (0..n).map(|i| (i % 251) as u8).collect() };
+    let cases: [(&str, u64); 3] = [
+        ("tiny.bin", 64),
+        ("under.bin", 4096),
+        ("over.bin", ZIPSEGMENT_THRESHOLD + 4096),
+    ];
+    for (name, size) in cases {
+        std::fs::write(root.join(name), make(size)).expect("a source file");
+    }
+
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+
+    // Verify recomputes every recorded digest over the stored bytes, so a
+    // clean result means each band's content survived the write.
+    aff4tools()
+        .arg("verify")
+        .arg(&container)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("matched"));
+
+    // A path that does not exist yet: export refuses to write into an existing
+    // directory, which is the read-only guarantee doing its job.
+    let exported = tempfile::tempdir().expect("a temp dir");
+    let target = exported.path().join("out");
+    aff4tools()
+        .args(["export", "--logical"])
+        .arg(&target)
+        .arg(&container)
+        .assert()
+        .success();
+
+    for (name, size) in cases {
+        let found =
+            find_exported(&target, name).unwrap_or_else(|| panic!("{name} must be exported"));
+        let bytes = std::fs::read(&found).expect("read the exported file");
+        assert_eq!(bytes.len() as u64, size, "{name} length");
+        assert_eq!(bytes, make(size), "{name} content");
+    }
+}
+
+/// One file's exported path, found by name anywhere under `root`.
+fn find_exported(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).ok()? {
+            let path = entry.ok()?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == name) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// An extended attribute is acquired, and lands as its own subject with its
+/// bytes intact (AFF4-L v1.0-ALPHA §4.2, §4.3).
+#[test]
+#[cfg(unix)]
+fn an_extended_attribute_survives_the_round_trip() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("evidence");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+    let file = root.join("carrier.txt");
+    std::fs::write(&file, b"content\n").expect("a source file");
+
+    if xattr::set(&file, "user.note", b"attribute value").is_err() {
+        // The temp filesystem will not take attributes; testing it would test
+        // the filesystem rather than this code.
+        return;
+    }
+
+    let (_out, container) = acquire(&root, &["--aff4l-v1.0"]);
+    let turtle = turtle(&container);
+
+    assert!(
+        turtle.contains("FileExtendedAttribute"),
+        "the attribute must be recorded as its own subject:\n{turtle}"
+    );
+    assert!(
+        turtle.contains("user.note"),
+        "the attribute's name must be recorded:\n{turtle}"
+    );
+    // Base64 of "attribute value".
+    assert!(
+        turtle.contains("YXR0cmlidXRlIHZhbHVl"),
+        "the attribute's bytes must be recorded:\n{turtle}"
+    );
+    assert!(
+        turtle.contains("aff4l:extendedAttribute"),
+        "the parent must reach it by the AFF4-L v1.0-ALPHA §4.3 property:\n{turtle}"
+    );
+}
+
+/// The legacy profile writes no substream terms at all. The AFF4-L 2019 paper
+/// defines neither the class nor the property, and this project's own output
+/// conforms exactly whatever it accepts on read.
+#[test]
+#[cfg(unix)]
+fn the_legacy_profile_writes_no_substreams() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("evidence");
+    std::fs::create_dir_all(&root).expect("the fixture tree");
+    let file = root.join("carrier.txt");
+    std::fs::write(&file, b"content\n").expect("a source file");
+
+    if xattr::set(&file, "user.note", b"attribute value").is_err() {
+        return;
+    }
+
+    let (_out, container) = acquire(&root, &["--aff4l-legacy"]);
+    let turtle = turtle(&container);
+
+    assert!(
+        !turtle.contains("ExtendedAttribute"),
+        "a legacy container must carry no substream class:\n{turtle}"
+    );
+    assert!(
+        !turtle.contains("extendedAttribute"),
+        "a legacy container must carry no substream property:\n{turtle}"
     );
 }

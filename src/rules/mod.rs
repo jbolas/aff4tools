@@ -421,6 +421,7 @@ mod tests {
             K::MapGap,
             K::DuplicateSegmentName,
             K::MissingZipSegmentType,
+            K::MissingMapSegmentDigest,
             K::ExternalReference,
             K::ConflictingStreamValue,
             K::DanglingReference,
@@ -497,7 +498,7 @@ mod tests {
             .collect();
         assert_eq!(
             alpha.len(),
-            48,
+            51,
             "every normative statement in the standard needs a declaration; {} are declared",
             alpha.len()
         );
@@ -536,7 +537,11 @@ mod tests {
     /// and AFF4-L v1.0-ALPHA §2); Phase 4 moved that standard's five §5 name-normalization
     /// rules; Phase 6 moved its two AFF4-L v1.0-ALPHA §10.1 metadata-integrity
     /// rules. Phase 8 added no checker: AFF4-L v1.0-ALPHA §4.2 and §4.3 state
-    /// no requirement to check, only a vocabulary to draw on.
+    /// no requirement to check, only a vocabulary to draw on. Phase 9a added
+    /// the two AFF4-L v1.0-ALPHA §6 dispatch rules, which are what a container
+    /// owes a reader that selects a storage form by declared type. Phase 9c
+    /// added the AFF4-L v1.0-ALPHA §6.2 size cap, the standard's only
+    /// prohibition.
     #[test]
     fn the_checked_rules_of_the_alpha_standard_are_these() {
         let detected: Vec<String> = all_rules()
@@ -560,6 +565,9 @@ mod tests {
                 "AFF4L_V1_ALPHA/5/3",
                 "AFF4L_V1_ALPHA/5/4",
                 "AFF4L_V1_ALPHA/5/5",
+                "AFF4L_V1_ALPHA/6.2/1",
+                "AFF4L_V1_ALPHA/6/3",
+                "AFF4L_V1_ALPHA/6/4",
                 "AFF4L_V1_ALPHA/10.1/1",
                 "AFF4L_V1_ALPHA/10.1/2",
             ]

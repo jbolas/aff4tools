@@ -102,6 +102,21 @@ thiserror = "2"
 # Settle the licensing before phase H2 makes an HDT backend real.
 hdt = { version = "0.7", features = ["nt"], optional = true }
 
+# Extended attribute enumeration for AFF4-L v1.0-ALPHA §4.3's
+# `extendedAttribute`, read by `src/write/xattr.rs` during a logical
+# acquisition.
+#
+# **A crate rather than the syscalls directly, and that is the point.**
+# `src/lib.rs` denies `unsafe_code` with exactly one audited exception, which
+# `tests/read_only_guard.rs` enforces by counting the annotations as text.
+# Binding `listxattr` and `getxattr` here would need a second exception and
+# weaken that audit for two read-only calls. This crate does the same job behind
+# a safe API.
+#
+# Its only dependency is `libc`, already in the tree. Licensed MIT OR
+# Apache-2.0.
+xattr = "1.6"
+
 # ZIP archive access. AFF4 containers are ZIP files.
 #
 # NOTE ON READ-ONLY: `zip::ZipWriter` is NOT feature-gated and compiles

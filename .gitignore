@@ -8,4 +8,6 @@ docs/superpowers/
 utilities/language-review/
 utilities/capture-conformance-baseline.sh
 utilities/hash-speed.sh
+utilities/scan_xattrs.py
+utilities/storage-study.sh
 CLAUDE.md
