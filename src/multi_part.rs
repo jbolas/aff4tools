@@ -371,10 +371,214 @@ pub fn discover(dir: &Path) -> Result<MultiPartSet> {
     })
 }
 
+/// How a set of sibling files departs from the AFF4-L v1.0-ALPHA §8 naming
+/// scheme, if it does.
+///
+/// [`None`] when the names conform, or when there is only one of them: a lone
+/// container is a conformant set of one, and the clause has nothing to say
+/// about it.
+#[derive(Debug, Clone)]
+pub struct NamingDeparture {
+    /// The sibling names examined, in read order.
+    pub names: Vec<String>,
+    /// What the scheme would have called them.
+    pub expected: Vec<String>,
+}
+
+/// Judge the names of one container's siblings against AFF4-L v1.0-ALPHA §8.
+///
+/// The clause names a set by one shared file name, the first part carrying no
+/// ordinal and each later part an ordinal counting from one — `foo.aff4`,
+/// `foo.aff4.1`, `foo.aff4.2`. It calls the scheme "purely a hint", which is
+/// why a departure is recorded rather than refused: a set named otherwise is
+/// still read through the volume's own references, and only the shortcut of
+/// telling membership from the names alone is lost.
+///
+/// # What counts as a sibling
+///
+/// Files in `container`'s own directory whose name is `container`'s plus a
+/// digits-only extension, or whose stem matches `container`'s under the older
+/// trailing-digit conventions [`part_number`] reads. That deliberately catches
+/// the two schemes seen in the field — pyaff4's `Base-Linear_1.aff4` and this
+/// project's own pre-Phase-5.2 `evidence_001.aff4` — since those are the sets
+/// the clause exists to distinguish itself from.
+///
+/// # Errors
+///
+/// None. A directory that cannot be read yields [`None`]: the check is about
+/// what the names say, and no name is not a departure.
+#[must_use]
+pub fn naming_departure(container: &std::path::Path) -> Option<NamingDeparture> {
+    let dir = container.parent()?;
+    let name = container.file_name()?.to_str()?;
+
+    let base = set_base(name)?;
+
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|candidate| shares_set_with(candidate, &base))
+        .collect();
+    names.sort_by(|a, b| natural_cmp(a, b));
+
+    // One file is a set of one, whatever it is called.
+    if names.len() < 2 {
+        return None;
+    }
+
+    let expected: Vec<String> = (0..names.len())
+        .map(|index| {
+            if index == 0 {
+                base.clone()
+            } else {
+                format!("{base}.{index}")
+            }
+        })
+        .collect();
+
+    if names == expected {
+        return None;
+    }
+    Some(NamingDeparture { names, expected })
+}
+
+/// The shared name of the set `name` belongs to, under the AFF4-L
+/// v1.0-ALPHA §8 scheme.
+///
+/// Three shapes reach here and all three must reduce to the same base, since
+/// the departure being judged is that a set's files disagree about their own
+/// name:
+///
+/// | Name | Base |
+/// |---|---|
+/// | `foo.aff4l` | `foo.aff4l` |
+/// | `foo.aff4l.1` | `foo.aff4l` |
+/// | `foo_1.aff4l` | `foo.aff4l` |
+///
+/// The third is the older trailing-digit convention. Reducing it to the same
+/// base as the first is what lets `foo_1.aff4l` and `foo_2.aff4l` be seen as
+/// one set rather than two unrelated containers — without which the check
+/// could never fire on the very naming it exists to report.
+///
+/// [`None`] when the name carries no container extension at all, which is not
+/// a part of any set.
+fn set_base(name: &str) -> Option<String> {
+    let (stem, ext) = name.rsplit_once('.')?;
+
+    // An AFF4-L v1.0-ALPHA §8 ordinal is the whole extension, and the stem is
+    // the shared name.
+    if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_digit()) && is_aff4_part(name) {
+        return Some(stem.to_owned());
+    }
+
+    if !AFF4_EXTENSIONS
+        .iter()
+        .any(|known| ext.eq_ignore_ascii_case(known))
+    {
+        return None;
+    }
+
+    // The trailing-digit conventions: strip the digit run and the separator
+    // that introduces it, so `foo_1.aff4l` and `foo.aff4l` share a base.
+    let digits = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+    if digits.len() < stem.len() {
+        let trimmed = digits.trim_end_matches(['_', '-', '.', ' ']);
+        if trimmed.len() < digits.len() && !trimmed.is_empty() {
+            return Some(format!("{trimmed}.{ext}"));
+        }
+    }
+    Some(name.to_owned())
+}
+
+/// Whether `candidate` names a part of the set whose shared name is `base`.
+///
+/// Two shapes qualify. `base` itself, and `base` followed by a digits-only
+/// extension, are the clause's own scheme. A name whose container extension
+/// matches `base`'s and whose stem is `base`'s stem plus a trailing digit run
+/// is one of the older conventions — that is what makes a set named
+/// `evidence_001.aff4` visible to the check rather than being read as three
+/// unrelated containers.
+fn shares_set_with(candidate: &str, base: &str) -> bool {
+    if candidate == base {
+        return true;
+    }
+    if let Some(rest) = candidate.strip_prefix(base)
+        && let Some(ordinal) = rest.strip_prefix('.')
+        && !ordinal.is_empty()
+        && ordinal.chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+
+    // The trailing-digit conventions: same extension, and a stem that is the
+    // base's stem followed by a separator and digits.
+    let Some((candidate_stem, candidate_ext)) = candidate.rsplit_once('.') else {
+        return false;
+    };
+    let Some((base_stem, base_ext)) = base.rsplit_once('.') else {
+        return false;
+    };
+    if !candidate_ext.eq_ignore_ascii_case(base_ext) {
+        return false;
+    }
+    let Some(rest) = candidate_stem.strip_prefix(base_stem) else {
+        return false;
+    };
+    let digits = rest.trim_start_matches(['_', '-', '.', ' ']);
+    rest.len() > digits.len() && !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// The three naming conventions all reduce to one shared base.
+    ///
+    /// This is what lets a set be recognized at all: without it, two files of
+    /// one misnamed set look like two unrelated containers and the check that
+    /// exists to report exactly that departure never fires.
+    #[test]
+    fn every_convention_reduces_to_the_same_base() {
+        assert_eq!(set_base("foo.aff4l").as_deref(), Some("foo.aff4l"));
+        assert_eq!(set_base("foo.aff4l.1").as_deref(), Some("foo.aff4l"));
+        assert_eq!(set_base("foo_1.aff4l").as_deref(), Some("foo.aff4l"));
+        assert_eq!(set_base("foo_001.aff4l").as_deref(), Some("foo.aff4l"));
+        assert_eq!(set_base("foo-2.aff4").as_deref(), Some("foo.aff4"));
+    }
+
+    /// A name that is not a container is part of no set.
+    #[test]
+    fn a_non_container_name_has_no_base() {
+        assert_eq!(set_base("notes.txt"), None);
+        assert_eq!(set_base("README"), None);
+    }
+
+    /// A case name ending in digits is not thereby a part number.
+    ///
+    /// `case2024.aff4` has no separator before its digits, so the whole stem is
+    /// the name. Reducing it to `case.aff4` would make it a sibling of every
+    /// other `case*.aff4` in the folder.
+    #[test]
+    fn digits_without_a_separator_do_not_make_a_base() {
+        assert_eq!(set_base("case2024.aff4").as_deref(), Some("case2024.aff4"));
+    }
+
+    /// Only files of the same set are gathered.
+    #[test]
+    fn siblings_are_recognized_across_conventions() {
+        assert!(shares_set_with("foo.aff4l", "foo.aff4l"));
+        assert!(shares_set_with("foo.aff4l.1", "foo.aff4l"));
+        assert!(shares_set_with("foo_1.aff4l", "foo.aff4l"));
+
+        // A different name, a different extension, and a stem that merely
+        // starts the same are all separate sets.
+        assert!(!shares_set_with("bar.aff4l", "foo.aff4l"));
+        assert!(!shares_set_with("foo.aff4", "foo.aff4l"));
+        assert!(!shares_set_with("foobar.aff4l", "foo.aff4l"));
+    }
 
     #[test]
     fn unpadded_numbers_order_numerically() {

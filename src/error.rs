@@ -601,6 +601,37 @@ pub enum DeviationKind {
     /// stored beside it. Without it, a change to the metadata layer — where a
     /// logical container keeps most of what it records — leaves no trace.
     MissingMetadataHash,
+    /// A ZIP segment storage stream is compressed by a method the clause does
+    /// not permit.
+    ///
+    /// AFF4-L v1.0-ALPHA §6.1 allows Stored and Deflate and no other method. A
+    /// reader built to the clause supports those two, so a stream held under
+    /// any other is data the container describes and a conforming reader
+    /// cannot decompress.
+    UnsupportedSegmentCompression,
+    /// A ZIP segment storage stream holds a gibibyte or more.
+    ///
+    /// AFF4-L v1.0-ALPHA §6.1 says a writer should not, and gives the reason:
+    /// a compressed ZIP member is not efficiently seekable, so reading a byte
+    /// near the end of a large one means inflating everything before it. The
+    /// bytes are all present, which is why this is recorded rather than
+    /// refused.
+    OversizedZipSegment,
+    /// A ZIP segment storage stream records no digest of its contents.
+    ///
+    /// AFF4-L v1.0-ALPHA §6.1 requires a linear digest in the stream's
+    /// `aff4:hash`. Without one the member's bytes can be read but not checked
+    /// against what the acquisition recorded, so nothing in the container
+    /// attests that they are unaltered.
+    MissingZipSegmentHash,
+    /// A part of a multi-part set is named outside the clause's scheme.
+    ///
+    /// AFF4-L v1.0-ALPHA §8 names the parts of one set by a shared file name,
+    /// the first carrying no ordinal and each later one an ordinal counting
+    /// from one. The clause calls the scheme a hint, so a set named otherwise
+    /// is still read — but membership can then no longer be told from the
+    /// names alone, which is the whole point of the convention.
+    MultiPartNamingScheme,
     /// The metadata integrity hash uses an algorithm weaker than the clause
     /// allows.
     ///
@@ -783,6 +814,12 @@ impl std::fmt::Display for DeviationKind {
             Self::MissingMetadataHash => "no metadata integrity hash recorded",
             Self::WeakMetadataHash => "metadata integrity hash is weaker than required",
             Self::WrongTermNamespace => "lexicon term written under the wrong namespace",
+            Self::UnsupportedSegmentCompression => {
+                "ZIP segment compressed by a method the standard excludes"
+            }
+            Self::OversizedZipSegment => "ZIP segment storage stream of a gibibyte or more",
+            Self::MissingZipSegmentHash => "ZIP segment storage stream records no digest",
+            Self::MultiPartNamingScheme => "multi-part set named outside the ordinal scheme",
         };
         f.write_str(s)
     }

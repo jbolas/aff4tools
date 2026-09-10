@@ -750,6 +750,75 @@ def write_unreadable_file_record(path: Path) -> None:
     _write(path, turtle, {})
 
 
+def write_bzip2_segment(path: Path) -> None:
+    """A ZIP segment storage stream compressed by a method the clause excludes.
+
+    AFF4-L v1.0-ALPHA section 6.1 permits Stored (0) and Deflate (8) and no
+    other method. BZIP2 (12) is a valid ZIP method that a reader built to the
+    clause is not required to support, so the bytes are described and a
+    conforming reader cannot get at them.
+
+    Written member by member rather than through _write, because only this one
+    member departs: the metadata segments stay deflated as every other fixture
+    has them.
+    """
+    content = b"stored under a compression method the standard excludes\n" * 8
+    turtle = TURTLE_PREFIXES + _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;
+    aff4:hash               "{hashlib.sha512(content).hexdigest()}"^^aff4:SHA512 ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "bzip2.txt" ;
+    aff4:originalPathName   "/case/bzip2.txt" ;
+    aff4:stored             <{VOLUME}> .
+"""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("container.description", VOLUME)
+        z.writestr("version.txt", "major=2\nminor=1\ntool=aff4tools-test 0.1\n")
+        z.writestr(FILE_IMAGE, content, compress_type=zipfile.ZIP_BZIP2)
+        z.writestr("information.turtle", turtle)
+        z.writestr("information.turtle.hashes", _metadata_hashes(turtle.encode()))
+        z.comment = VOLUME.encode()
+
+
+def write_unhashed_segment(path: Path) -> None:
+    """A ZIP segment storage stream recording no digest of its contents.
+
+    AFF4-L v1.0-ALPHA section 6.1 requires a linear digest in aff4:hash. The
+    member is present and readable, so this is not malformed: the bytes can be
+    read and nothing in the container attests to what they were.
+    """
+    content = b"segment content with no recorded digest\n"
+    turtle = _volume_subject(path) + f"""
+<{FILE_IMAGE}>
+    a                       aff4:FileImage , aff4:Image , aff4:ZipSegment ;
+    aff4:size               "{len(content)}"^^xsd:long ;
+    aff4:fileName           "unhashed.txt" ;
+    aff4:originalPathName   "/case/unhashed.txt" ;
+    aff4:stored             <{VOLUME}> .
+"""
+    _write(path, turtle, {FILE_IMAGE: content})
+
+
+def write_misnamed_parts(outdir: Path) -> int:
+    """A two-file set named outside the AFF4-L v1.0-ALPHA section 8 scheme.
+
+    The clause names a set foo.aff4l, foo.aff4l.1. This one uses pyaff4's
+    trailing-digit convention instead, which the clause's scheme is meant to
+    replace. Both files are complete containers, so the departure is in how
+    their names relate and nothing else.
+
+    Their own subdirectory, because the check reads every file beside the
+    container: leaving these among the other fixtures would make each of those
+    look like part of a misnamed set.
+    """
+    setdir = outdir / "section8-set"
+    setdir.mkdir(parents=True, exist_ok=True)
+    write_minimal(setdir / "evidence_1.aff4l")
+    write_minimal(setdir / "evidence_2.aff4l")
+    return 2
+
+
 def write_storage_fixtures(outdir: Path) -> int:
     """Every AFF4-L v1.0-ALPHA section 6 storage form, and the negatives."""
     write_in_metadata(outdir / "storage-in-metadata.aff4l")
@@ -765,7 +834,9 @@ def write_storage_fixtures(outdir: Path) -> int:
     write_bad_missing_member(outdir / "bad-missing-member.aff4l")
     write_bad_undecodable_base64(outdir / "bad-undecodable-base64.aff4l")
     write_bad_two_storage_types(outdir / "bad-two-storage-types.aff4l")
-    return 13
+    write_bzip2_segment(outdir / "storage-bzip2-segment.aff4l")
+    write_unhashed_segment(outdir / "storage-unhashed-segment.aff4l")
+    return 15
 
 
 def main() -> None:
@@ -783,6 +854,7 @@ def main() -> None:
     extra = write_section5_fixtures(args.outdir)
     extra += write_namespace_fixtures(args.outdir)
     extra += write_storage_fixtures(args.outdir)
+    extra += write_misnamed_parts(args.outdir)
     print(f"wrote {6 + extra} v2.1 containers to {args.outdir}")
 
 

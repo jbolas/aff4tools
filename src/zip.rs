@@ -53,7 +53,7 @@ pub const DESCRIPTION_SEGMENT: &str = "container.description";
 /// read possible. Every member of every AFF4 container examined so far is
 /// STORED — bevies hold already-compressed chunks, so deflating them again
 /// would gain nothing — but the format permits otherwise and the code checks.
-const METHOD_STORED: u16 = 0;
+pub(crate) const METHOD_STORED: u16 = 0;
 
 /// Bytes in a ZIP local file header before its variable-length name.
 const LOCAL_HEADER_LEN: usize = 30;
@@ -508,6 +508,18 @@ pub trait SegmentReader: Send {
     fn read_segment(&mut self, name: &str) -> Result<Vec<u8>>;
 }
 
+/// How one ZIP member is stored, as the central directory records it.
+///
+/// The public view of [`MemberSize`], carrying the two fields a conformance
+/// check needs and none of the offsets that only the reader uses.
+#[derive(Debug, Clone, Copy)]
+pub struct MemberStorage {
+    /// The ZIP compression method. 0 is Stored, 8 is Deflate.
+    pub method: u16,
+    /// Bytes after inflation — the size of the stream the member holds.
+    pub uncompressed: u64,
+}
+
 /// A ZIP-backed AFF4 volume, open for reading.
 pub struct ZipVolume {
     path: PathBuf,
@@ -716,6 +728,20 @@ impl ZipVolume {
     #[must_use]
     pub fn deviations(&self) -> &[Deviation] {
         &self.deviations
+    }
+
+    /// How one member is stored: its compression method and inflated size.
+    ///
+    /// Both come from the central directory, so this opens nothing and reads
+    /// nothing. [`None`] when the directory could not be parsed or the name is
+    /// not a member — a caller checking a conformance rule then has no
+    /// evidence either way and reports nothing, rather than guessing.
+    #[must_use]
+    pub fn member_storage(&self, name: &str) -> Option<MemberStorage> {
+        self.stored_sizes.get(name).map(|size| MemberStorage {
+            method: size.method,
+            uncompressed: size.uncompressed,
+        })
     }
 
     /// A [`Locus`] pointing at this container, optionally at one segment.

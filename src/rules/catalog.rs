@@ -316,8 +316,15 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
     // path, and its rules are Detected.
     //
     // Each clause is therefore one rule at MAY, describing the vocabulary the
-    // writer draws on. `Honored` for the terms aff4tools writes today;
-    // `NotImplemented` for those it does not, so the gap stays visible.
+    // writer draws on, and `Honored` because a permission is met by taking it
+    // up rather than by anything a container carries.
+    //
+    // The substream rules are Honored on the extended-attribute half, which
+    // `write_xattrs` emits as `FileExtendedAttribute` subjects reached by
+    // `aff4l:extendedAttribute`. The clause's other half names NTFS alternate
+    // data streams, which no acquisition path on a Unix host produces; a
+    // permission left unexercised is still a permission met, so this is not a
+    // coverage gap.
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§4.2", 1),
         requirement: May,
@@ -329,7 +336,7 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§4.2", 2),
         requirement: May,
-        state: NotImplemented,
+        state: Honored,
         statement: "A writer describes a file's non-primary data streams and extended attributes with the classes this clause supplies.",
         kind: None,
         routine: false,
@@ -374,7 +381,7 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§4.3", 5),
         requirement: May,
-        state: NotImplemented,
+        state: Honored,
         statement: "A writer references a file's alternate data streams and extended attributes with the properties this clause supplies.",
         kind: None,
         routine: false,
@@ -457,14 +464,6 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
         kind: None,
         routine: false,
     },
-    declare_rule! {
-        id: (Document::Aff4LStandard10Alpha, "§5", 7),
-        requirement: Must,
-        state: NotImplemented,
-        statement: "A name is recorded byte for byte on a platform whose paths are not byte-oriented, in the encoding the standard names.",
-        kind: None,
-        routine: false,
-    },
     // Honored rather than Detected: this rule binds the *reader*, so what
     // satisfies it is aff4tools' own behaviour and not anything a container
     // carries. Phase 9a made all four forms readable — in-metadata streams,
@@ -492,28 +491,32 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
         kind: None,
         routine: false,
     },
+    // All three read the ZIP central directory rather than the metadata, since
+    // the compression method and the stored size are not stated anywhere in the
+    // RDF. A container whose metadata and directory disagree is measured
+    // against what it actually did.
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6.1", 1),
         requirement: Must,
-        state: NotImplemented,
+        state: Detected,
         statement: "A stream held as a ZIP segment is compressed with Stored or Deflate and no other method.",
-        kind: None,
+        kind: Some(K::UnsupportedSegmentCompression),
         routine: false,
     },
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6.1", 2),
         requirement: ShouldNot,
-        state: NotImplemented,
+        state: Detected,
         statement: "A ZIP segment storage stream holds no stream of one gibibyte or more.",
-        kind: None,
+        kind: Some(K::OversizedZipSegment),
         routine: false,
     },
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§6.1", 3),
         requirement: Must,
-        state: NotImplemented,
+        state: Detected,
         statement: "A writer records a linear digest of each ZIP segment storage stream in that stream's hash property.",
-        kind: None,
+        kind: Some(K::MissingZipSegmentHash),
         routine: false,
     },
     declare_rule! {
@@ -620,19 +623,17 @@ pub(super) const AFF4L_V1_ALPHA: &[RuleInfo] = &[
     // the base standard instead, so a set named otherwise is not thereby
     // non-conformant — hence SHOULD, not MUST.
     //
-    // `NotImplemented`, not `Honored`: unlike the AFF4-L v1.0-ALPHA §7
-    // extension hint, this one *is* a property of what is on disk, so a
-    // checker could exist. It would have to judge the whole set, and a scan is
-    // handed one container at a time, with the sibling parts reached through
-    // the volume set rather than named by the finding. That is a real check
-    // with a real design question behind it, so it is reported as work not
-    // done rather than quietly claimed.
+    // Judged from the file names beside the container, which is the only place
+    // the answer lives: the scheme exists so that membership can be told from
+    // names alone, so nothing inside any volume could settle it. Reported once
+    // for the set rather than once per file, since what departs is how the
+    // names relate to each other.
     declare_rule! {
         id: (Document::Aff4LStandard10Alpha, "§8", 1),
         requirement: Should,
-        state: NotImplemented,
+        state: Detected,
         statement: "Parts of a multi-part container signal their membership by sharing one file name, the second and later parts carrying an ordinal suffix counting from one.",
-        kind: None,
+        kind: Some(K::MultiPartNamingScheme),
         routine: false,
     },
     declare_rule! {

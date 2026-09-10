@@ -728,6 +728,7 @@ impl Container {
         );
 
         self.report_metadata_hash(&locus, &mut deviations);
+        self.report_part_naming(&mut deviations);
 
         Ok(ConformanceScan {
             path: self.volumes.primary().path().to_path_buf(),
@@ -811,6 +812,40 @@ v1.0-ALPHA §10.1 requires SHA-256 or stronger",
                 ),
             ));
         }
+    }
+
+    /// Report a multi-part set named outside the AFF4-L v1.0-ALPHA §8 scheme.
+    ///
+    /// Judged from the file names in the container's own directory, which is
+    /// the only place the answer lives: the scheme is about telling a set's
+    /// membership from names alone, so nothing inside any volume could settle
+    /// it.
+    ///
+    /// Only for v2.1 containers. The clause is that standard's, and a set
+    /// written to an earlier generation is named by whatever convention its own
+    /// writer used — pyaff4's `Base-Linear_1.aff4` among them, which conforms to
+    /// its own document and would be misreported here.
+    ///
+    /// Reported once for the set rather than once per file, since the departure
+    /// is a property of how the names relate to each other.
+    fn report_part_naming(&self, deviations: &mut Vec<Deviation>) {
+        if self.generation != Generation::Aff4L10 {
+            return;
+        }
+        let path = self.volumes.primary().path();
+        let Some(departure) = crate::multi_part::naming_departure(path) else {
+            return;
+        };
+        deviations.push(Deviation::new(
+            Locus::new(path),
+            DeviationKind::MultiPartNamingScheme,
+            format!(
+                "this container sits in a set named {}, but AFF4-L v1.0-ALPHA §8 names \
+one as {}; membership in the set cannot be told from the names alone",
+                departure.names.join(", "),
+                departure.expected.join(", "),
+            ),
+        ));
     }
 
     /// Build a complete summary of the container.
@@ -1723,6 +1758,48 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
+    /// The AFF4-L v1.0-ALPHA §6.1 size threshold is the binary gibibyte, and it
+    /// is inclusive.
+    ///
+    /// Tested against the constant rather than a fixture: a container
+    /// exercising it would have to declare an actual gibibyte, and the whole
+    /// content of the rule is which number the comparison uses and which side
+    /// of it a stream of exactly that size falls on. The clause writes "1GiB",
+    /// so a decimal gigabyte here would report conforming containers and pass
+    /// departing ones between the two values.
+    #[test]
+    fn the_zip_segment_cap_is_an_inclusive_gibibyte() {
+        // The comparison the checker makes, over the sizes either side of it.
+        let reported = |size: u64| size >= ZIP_SEGMENT_CAP;
+
+        assert_eq!(ZIP_SEGMENT_CAP, 1_073_741_824, "the binary gibibyte");
+        assert!(reported(1_073_741_824), "exactly a gibibyte");
+        assert!(reported(2_000_000_000), "beyond it");
+        assert!(!reported(1_073_741_823), "one byte short");
+        assert!(
+            !reported(1_000_000_000),
+            "a decimal gigabyte is under the cap"
+        );
+        assert!(!reported(0), "an empty stream");
+    }
+
+    /// The two methods AFF4-L v1.0-ALPHA §6.1 permits, and the ones it does not.
+    ///
+    /// The values are ZIP's own, so naming them here is what keeps the check
+    /// from drifting: 8 is Deflate and 9 is Deflate64, which the clause does not
+    /// name and a reader built to it need not support.
+    #[test]
+    fn only_stored_and_deflate_are_permitted_methods() {
+        let permitted =
+            |method: u16| method == crate::zip::METHOD_STORED || method == METHOD_DEFLATE;
+        assert!(permitted(0), "Stored");
+        assert!(permitted(8), "Deflate");
+        assert!(!permitted(9), "Deflate64");
+        assert!(!permitted(12), "BZIP2");
+        assert!(!permitted(14), "LZMA");
+        assert!(!permitted(93), "Zstandard");
+    }
+
     /// Build a synthetic container. The one sanctioned use of a ZIP writer:
     /// it creates a throwaway archive and never touches evidence.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -2528,6 +2605,15 @@ struct VolumeContext<'a> {
     mapping: crate::arn::NameMapping,
     /// Where to anchor a deviation.
     locus: &'a Locus,
+    /// The open volume, for the checks that ask how a member is stored rather
+    /// than whether it exists.
+    ///
+    /// AFF4-L v1.0-ALPHA §6.1 constrains the compression method and size of a
+    /// ZIP segment storage stream, and neither is visible in the metadata: both
+    /// are recorded in the ZIP central directory. Holding the volume keeps
+    /// those checks reading the container rather than trusting what it says
+    /// about itself.
+    volume: &'a crate::zip::ZipVolume,
 }
 
 /// Summarize a volume's members by the role each name implies.
@@ -2556,6 +2642,7 @@ impl<'a> VolumeContext<'a> {
             segment_present: volume.segment_names().iter().map(String::as_str).collect(),
             mapping,
             locus,
+            volume,
         }
     }
 }
@@ -2589,6 +2676,7 @@ fn report_missing_zip_segment_type(
         segment_present,
         mapping,
         locus,
+        ..
     } = volume;
     if !declares_local_type(object, "FileImage") {
         return;
@@ -2865,6 +2953,94 @@ fn report_v21_storage_form(
             ),
         ));
     }
+
+    if form == crate::storage_form::StorageForm::ZipSegment {
+        report_zip_segment_stream(object, volume, deviations);
+    }
+}
+
+/// The largest stream AFF4-L v1.0-ALPHA §6.1 says a ZIP segment should hold.
+///
+/// The clause writes "1GiB", so this is the binary gibibyte and not 10^9.
+const ZIP_SEGMENT_CAP: u64 = 1 << 30;
+
+/// The ZIP compression method meaning Deflate, the one AFF4-L v1.0-ALPHA §6.1
+/// permits besides Stored.
+const METHOD_DEFLATE: u16 = 8;
+
+/// Report the AFF4-L v1.0-ALPHA §6.1 departures of one ZIP segment storage
+/// stream.
+///
+/// Three requirements, and each is checked against a different source. The
+/// compression method and the stream's size come from the ZIP central
+/// directory, which is what the container *did* rather than what its metadata
+/// says it did; the digest requirement is met or not by the metadata alone.
+///
+/// Called only for an object whose declared form is already known to be
+/// [`StorageForm::ZipSegment`](crate::storage_form::StorageForm::ZipSegment),
+/// so nothing here re-decides which form holds the bytes.
+///
+/// **Silent when the member cannot be found.** All three requirements are about
+/// a stream that is stored, and this one is not: its absence is
+/// `StorageFormNotFound`, which the caller already reports. Adding that the
+/// missing bytes carry no digest and sit under no compression method would
+/// state one fault three times — the same reason the caller declines to call
+/// such an object untyped as well.
+fn report_zip_segment_stream(
+    object: &Aff4Object,
+    volume: &VolumeContext,
+    deviations: &mut Vec<Deviation>,
+) {
+    let locus = || volume.locus.clone().subject(object.arn.as_str());
+
+    // Both spellings, matching the caller: a container that escaped the member
+    // name still stored the bytes, and its compression and size are as much
+    // this clause's business as a conforming one's.
+    let stored = object
+        .arn
+        .member_name(volume.volume_arn, volume.mapping)
+        .and_then(|member| volume.volume.member_storage(&member))
+        .or_else(|| {
+            object
+                .arn
+                .member_name(volume.volume_arn, crate::arn::NameMapping::Escaped)
+                .and_then(|escaped| volume.volume.member_storage(&escaped))
+        });
+    let Some(stored) = stored else {
+        return;
+    };
+
+    // The clause requires a linear digest of the stream.
+    if object.hashes.is_empty() {
+        deviations.push(Deviation::new(
+            locus(),
+            DeviationKind::MissingZipSegmentHash,
+            "this ZIP segment storage stream records no aff4:hash, so its bytes can be read but nothing in the container attests to what they were at acquisition; AFF4-L v1.0-ALPHA §6.1 requires a linear digest of the stream"
+                .to_owned(),
+        ));
+    }
+
+    if stored.method != crate::zip::METHOD_STORED && stored.method != METHOD_DEFLATE {
+        deviations.push(Deviation::new(
+            locus(),
+            DeviationKind::UnsupportedSegmentCompression,
+            format!(
+                "this ZIP segment storage stream is compressed by method {}, but AFF4-L v1.0-ALPHA §6.1 permits only Stored (0) and Deflate (8); a reader built to the clause cannot decompress it",
+                stored.method
+            ),
+        ));
+    }
+
+    if stored.uncompressed >= ZIP_SEGMENT_CAP {
+        deviations.push(Deviation::new(
+            locus(),
+            DeviationKind::OversizedZipSegment,
+            format!(
+                "this ZIP segment storage stream holds {}, at or above the one-gibibyte size AFF4-L v1.0-ALPHA §6.1 says the form should not be used beyond; a compressed member is not efficiently seekable, so reading near its end means inflating everything before it",
+                crate::human_bytes(stored.uncompressed)
+            ),
+        ));
+    }
 }
 
 /// Report terms written under a namespace their defining standard does not
@@ -2929,6 +3105,7 @@ fn report_v21_identity(
         segment_present,
         mapping,
         locus,
+        ..
     } = volume;
     if *mapping != crate::arn::NameMapping::Literal {
         return;

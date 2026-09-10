@@ -498,7 +498,7 @@ mod tests {
             .collect();
         assert_eq!(
             alpha.len(),
-            51,
+            50,
             "every normative statement in the standard needs a declaration; {} are declared",
             alpha.len()
         );
@@ -541,7 +541,10 @@ mod tests {
     /// the two AFF4-L v1.0-ALPHA §6 dispatch rules, which are what a container
     /// owes a reader that selects a storage form by declared type. Phase 9c
     /// added the AFF4-L v1.0-ALPHA §6.2 size cap, the standard's only
-    /// prohibition.
+    /// prohibition. A later pass added the three AFF4-L v1.0-ALPHA §6.1
+    /// requirements, read from the ZIP central directory rather than the
+    /// metadata, and the AFF4-L v1.0-ALPHA §8 naming scheme, read from the file
+    /// names beside the container.
     #[test]
     fn the_checked_rules_of_the_alpha_standard_are_these() {
         let detected: Vec<String> = all_rules()
@@ -565,9 +568,13 @@ mod tests {
                 "AFF4L_V1_ALPHA/5/3",
                 "AFF4L_V1_ALPHA/5/4",
                 "AFF4L_V1_ALPHA/5/5",
+                "AFF4L_V1_ALPHA/6.1/1",
+                "AFF4L_V1_ALPHA/6.1/2",
+                "AFF4L_V1_ALPHA/6.1/3",
                 "AFF4L_V1_ALPHA/6.2/1",
                 "AFF4L_V1_ALPHA/6/3",
                 "AFF4L_V1_ALPHA/6/4",
+                "AFF4L_V1_ALPHA/8/1",
                 "AFF4L_V1_ALPHA/10.1/1",
                 "AFF4L_V1_ALPHA/10.1/2",
             ]

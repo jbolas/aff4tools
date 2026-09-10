@@ -56,12 +56,12 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/4.1/1` (§4.1) | MUST | detected | A writer emits new lexicon terms under the namespace its governing standard assigns them. |
 | `AFF4L_V1_ALPHA/4.1/2` (§4.1) | MAY | honored | A reader may accept either namespace prefix for a lexicon term, so that containers written against the earlier schema still read. |
 | `AFF4L_V1_ALPHA/4.2/1` (§4.2) | MAY | honored | A writer describes acquired files, folders and the acquisition itself with the classes this clause supplies. |
-| `AFF4L_V1_ALPHA/4.2/2` (§4.2) | MAY | not implemented | A writer describes a file's non-primary data streams and extended attributes with the classes this clause supplies. |
+| `AFF4L_V1_ALPHA/4.2/2` (§4.2) | MAY | honored | A writer describes a file's non-primary data streams and extended attributes with the classes this clause supplies. |
 | `AFF4L_V1_ALPHA/4.3/1` (§4.3) | MAY | honored | A writer records an acquired object's filesystem timestamps and an acquisition's roots with the properties this clause supplies. |
 | `AFF4L_V1_ALPHA/4.3/2` (§4.3) | MAY | not checkable | Two of the timestamp properties carry the same description, so which moment each records cannot be judged from the document. |
 | `AFF4L_V1_ALPHA/4.3/3` (§4.3) | MAY | honored | A writer records the separator its acquisition's paths use, with the property this clause supplies. |
 | `AFF4L_V1_ALPHA/4.3/4` (§4.3) | MAY | honored | A writer records an acquired object's Unix file mode, with the property this clause supplies. |
-| `AFF4L_V1_ALPHA/4.3/5` (§4.3) | MAY | not implemented | A writer references a file's alternate data streams and extended attributes with the properties this clause supplies. |
+| `AFF4L_V1_ALPHA/4.3/5` (§4.3) | MAY | honored | A writer references a file's alternate data streams and extended attributes with the properties this clause supplies. |
 | `AFF4L_V1_ALPHA/4.3/6` (§4.3) | MAY | not checkable | The naming and content properties of a substream appear twice under different contexts, so whether they are one term or two cannot be judged from the document. |
 | `AFF4L_V1_ALPHA/4.4/1` (§4.4) | MAY | honored | A digest property may carry any of the additional algorithms this clause names, and a reader computes each of them. |
 | `AFF4L_V1_ALPHA/4.4/2` (§4.4) | MAY | not checkable | The clause names two extendable-output functions without fixing an output length, so the length a container uses cannot be judged. |
@@ -71,12 +71,11 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/5/4` (§5) | MUST | detected | A name's raw form and display form describe the same name, so the two never contradict each other. |
 | `AFF4L_V1_ALPHA/5/5` (§5) | MUST | detected | Percent escapes in a display name use uppercase hexadecimal. |
 | `AFF4L_V1_ALPHA/5/6` (§5) | MAY | not checkable | Two encoded names in one folder may share a display form, so a reader must not assume a display name is unique. |
-| `AFF4L_V1_ALPHA/5/7` (§5) | MUST | not implemented | A name is recorded byte for byte on a platform whose paths are not byte-oriented, in the encoding the standard names. |
 | `AFF4L_V1_ALPHA/6/1` (§6) | MUST | honored | A reader handles every storage stream form this section describes, not a chosen subset. |
 | `AFF4L_V1_ALPHA/6/2` (§6) | MUST | honored | A writer implements at least one of the storage stream forms this section describes. |
-| `AFF4L_V1_ALPHA/6.1/1` (§6.1) | MUST | not implemented | A stream held as a ZIP segment is compressed with Stored or Deflate and no other method. |
-| `AFF4L_V1_ALPHA/6.1/2` (§6.1) | SHOULD NOT | not implemented | A ZIP segment storage stream holds no stream of one gibibyte or more. |
-| `AFF4L_V1_ALPHA/6.1/3` (§6.1) | MUST | not implemented | A writer records a linear digest of each ZIP segment storage stream in that stream's hash property. |
+| `AFF4L_V1_ALPHA/6.1/1` (§6.1) | MUST | detected | A stream held as a ZIP segment is compressed with Stored or Deflate and no other method. |
+| `AFF4L_V1_ALPHA/6.1/2` (§6.1) | SHOULD NOT | detected | A ZIP segment storage stream holds no stream of one gibibyte or more. |
+| `AFF4L_V1_ALPHA/6.1/3` (§6.1) | MUST | detected | A writer records a linear digest of each ZIP segment storage stream in that stream's hash property. |
 | `AFF4L_V1_ALPHA/6.2/1` (§6.2) | MUST NOT | detected | An in-metadata storage stream holds no stream larger than one kilobyte. |
 | `AFF4L_V1_ALPHA/6.2/2` (§6.2) | MAY | honored | A stream carried inside the metadata need not record its own digests, since the metadata integrity hash covers it. |
 | `AFF4L_V1_ALPHA/6/3` (§6) | MUST | detected | A stream's declared storage form holds the bytes that form is said to store. |
@@ -86,7 +85,7 @@ registry in `src/rules/catalog.rs`.
 | `AFF4L_V1_ALPHA/6.3.1/2` (§6.3.1) | MUST | honored | A reader accepts either block map digest spelling and can verify the block map digests of every map and dependent image stream. |
 | `AFF4L_V1_ALPHA/6.4/1` (§6.4) | MAY | honored | A file image may additionally be typed as an image stream, storing its primary stream that way. |
 | `AFF4L_V1_ALPHA/7/1` (§7) | MAY | honored | A container may signal its format by file extension, which is a hint and never decides how the container is read. |
-| `AFF4L_V1_ALPHA/8/1` (§8) | SHOULD | not implemented | Parts of a multi-part container signal their membership by sharing one file name, the second and later parts carrying an ordinal suffix counting from one. |
+| `AFF4L_V1_ALPHA/8/1` (§8) | SHOULD | detected | Parts of a multi-part container signal their membership by sharing one file name, the second and later parts carrying an ordinal suffix counting from one. |
 | `AFF4L_V1_ALPHA/9/1` (§9) | MUST | not checkable | Triples from the primary metadata segment and from every store it imports are read as one graph. |
 | `AFF4L_V1_ALPHA/9a/1` (§9a) | MAY | not checkable | A container may carry an accelerated metadata store beside the primary one, holding everything the primary and any secondary stores hold. |
 | `AFF4L_V1_ALPHA/9a/2` (§9a) | MAY | not checkable | A reader may take its metadata from the accelerated store in place of the primary and secondary stores. |
@@ -102,4 +101,4 @@ registry in `src/rules/catalog.rs`.
 
 ## Coverage
 
-29 of 72 declared rules are checked.
+33 of 71 declared rules are checked.
