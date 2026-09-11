@@ -8,9 +8,9 @@ conventions that keep it honest.
 ## Running
 
 ```sh
-cargo test                          # 635 tests, nothing to download
+cargo test                          # nothing to download
 ./utilities/fetch-corpus.sh         # get the reference containers, once
-cargo test --features corpus        # 792 tests, against real evidence
+cargo test --features corpus        # against real evidence
 ```
 
 That is the whole setup. The fetch script downloads the reference containers
@@ -34,9 +34,25 @@ AFF4_PYAFF4_ROOT=/path/to/pyaff4 AFF4_PYAFF4_PYTHON=python3 \
 ```
 
 **Corpus tests are gated, not skipped.** A green `cargo test` without fixtures
-means 635 tests passed — not that any real container was verified. A runtime
-skip would let CI report success having checked nothing, so the gate is a
-compile-time feature instead.
+means the default suite passed — not that any real container was verified. A
+runtime skip would let CI report success having checked nothing, so the gate
+is a compile-time feature instead.
+
+### The `nonconforming` suite
+
+`tests/nonconforming.rs` builds only under its feature:
+
+```sh
+cargo test --features nonconforming
+```
+
+It covers capabilities that exist to build proposed Canonical Reference Images.
+The feature gates the **command-line interface**: no shipped binary offers
+these flags, so nothing a user can type makes one write such a container. The
+corresponding `LogicalOptions` fields stay public in every build, so a program
+linking the library can still ask for them deliberately. A green `cargo test`
+says nothing about any of it, in exactly the way it says nothing about the
+corpus.
 
 ## ⚠ Codec coverage — read this before trusting a decompressed chunk
 

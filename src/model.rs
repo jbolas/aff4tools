@@ -179,7 +179,11 @@ impl ObjectCounts {
         use crate::storage_form::StorageForm;
         match form {
             Some(StorageForm::ZipSegment) => self.storage.zip_segment += 1,
-            Some(StorageForm::SharedMap) => self.storage.shared_map += 1,
+            // Both AFF4-L v1.0-ALPHA §6.3 map forms count together. `storage_form_of` cannot
+            // tell them apart from one subject's types and properties, so a
+            // separate tally here would always read zero and imply the
+            // container held no such file.
+            Some(StorageForm::SharedMap | StorageForm::OwnMap) => self.storage.shared_map += 1,
             Some(StorageForm::OwnImageStream) => self.storage.own_stream += 1,
             Some(StorageForm::InMetadata) => self.storage.in_metadata += 1,
             None => self.storage.no_content += 1,
@@ -511,9 +515,13 @@ impl Aff4Object {
             Some(bytes) => Ok(Some(bytes)),
             None => Err(crate::error::Error::malformed(
                 locus.clone().subject(self.arn.as_str()).predicate(
+                    // `false`: a reader already honors either namespace
+                    // through `is_known_namespace`, so this only needs to
+                    // name the one a writer would have used.
                     crate::lexicon::namespace_for(
                         crate::lexicon::Generation::Aff4L10,
                         "dataStream",
+                        false,
                     )
                     .to_owned()
                         + "dataStream",

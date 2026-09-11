@@ -117,10 +117,6 @@ fn escape_literal(value: &str) -> String {
 /// The AFF4 schema namespace.
 const AFF4_NS: &str = "http://aff4.org/Schema#";
 
-/// The namespace AFF4-L Standard v1.0-ALPHA §4.1 assigns its new lexicon
-/// items. Bound and abbreviated only when a triple actually uses it.
-const AFF4L_NS: &str = crate::lexicon::AFF4L_NAMESPACE;
-
 /// The RDF namespace.
 const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
@@ -151,7 +147,7 @@ const INDENT: &str = "        ";
 /// logical acquisition of a large volume is exactly the case that
 /// makes triple count grow with file count, and AFF4-L 2019 §6 warns this
 /// becomes problematic in the millions.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TurtleWriter {
     triples: Vec<(String, String, TurtleTerm)>,
     /// The volume ARN, bound to the base prefix `:` when set.
@@ -166,6 +162,25 @@ pub struct TurtleWriter {
     /// Built as triples arrive rather than by scanning at serialize time, which
     /// is what keeps rendering linear.
     by_subject: Vec<Vec<usize>>,
+    /// Which `aff4l` namespace this document binds.
+    ///
+    /// AFF4-L v1.0-ALPHA §4.1's two readings; see
+    /// [`crate::lexicon::AFF4L_NAMESPACE_HTTPS`]. Always the `http://` form
+    /// unless `--features nonconforming` set otherwise.
+    aff4l_namespace: &'static str,
+}
+
+impl Default for TurtleWriter {
+    fn default() -> Self {
+        Self {
+            triples: Vec::new(),
+            volume: None,
+            order: Vec::new(),
+            subject_index: std::collections::HashMap::new(),
+            by_subject: Vec::new(),
+            aff4l_namespace: crate::lexicon::AFF4L_NAMESPACE,
+        }
+    }
 }
 
 impl TurtleWriter {
@@ -182,6 +197,17 @@ impl TurtleWriter {
     /// exactly this reason.
     pub fn set_volume(&mut self, volume_arn: &str) {
         self.volume = Some(volume_arn.to_owned());
+    }
+
+    /// Bind the `aff4l` prefix to `namespace` instead of
+    /// [`crate::lexicon::AFF4L_NAMESPACE`].
+    ///
+    /// AFF4-L v1.0-ALPHA §4.1's prose and examples disagree on this namespace's
+    /// scheme; see [`crate::lexicon::AFF4L_NAMESPACE_HTTPS`]. The abbreviation
+    /// table and the `@prefix` declaration both read this field, so they always
+    /// agree on which namespace was actually written.
+    pub fn set_aff4l_namespace(&mut self, namespace: &'static str) {
+        self.aff4l_namespace = namespace;
     }
 
     /// Add one triple.
@@ -233,7 +259,7 @@ impl TurtleWriter {
             // 2022 one, so order does not affect matching here, but keeping the
             // more specific first states the intent for a future namespace
             // that does nest.
-            ("aff4l", AFF4L_NS),
+            ("aff4l", self.aff4l_namespace),
             ("aff4", AFF4_NS),
             ("rdf", RDF_NS),
             ("xsd", XSD_NS),
@@ -269,7 +295,8 @@ impl TurtleWriter {
     /// reaches the graph as an `rdf:type` object, not as a predicate.
     fn uses_aff4l_namespace(&self) -> bool {
         self.triples.iter().any(|(_, predicate, object)| {
-            predicate.starts_with(AFF4L_NS) || object.iri_starting_with(AFF4L_NS)
+            predicate.starts_with(self.aff4l_namespace)
+                || object.iri_starting_with(self.aff4l_namespace)
         })
     }
 
@@ -303,7 +330,8 @@ impl TurtleWriter {
         // it". AFF4-L v1.0-ALPHA §4.1 requires the namespace be correct where
         // it is used, not that it be declared unconditionally.
         if self.uses_aff4l_namespace() {
-            let _ = writeln!(out, "@prefix aff4l: <{AFF4L_NS}> .");
+            let namespace = self.aff4l_namespace;
+            let _ = writeln!(out, "@prefix aff4l: <{namespace}> .");
         }
 
         for (slot, subject) in self.order.iter().enumerate() {

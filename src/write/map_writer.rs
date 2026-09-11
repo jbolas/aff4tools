@@ -704,6 +704,180 @@ pub fn write_shared_map(
     Ok(())
 }
 
+/// Write a Map over an image stream this file alone uses.
+///
+/// AFF4-L v1.0-ALPHA §6.3's first example: one subject typed both
+/// `aff4:FileImage` and `aff4:Map`, naming the stream that holds its bytes.
+///
+/// # Why this exists beside [`write_shared_map`]
+///
+/// The two write the same triples and differ in one fact about the stream.
+/// AFF4-L v1.0-ALPHA §6.3 lets several files share one `ImageStream`; when they
+/// do, AFF4 Standard v1.0a §6.2's block map digest cannot be computed per file,
+/// because its first term is over every block hash in the stream and would
+/// therefore describe the whole band. When the stream holds one file, that term
+/// describes that file, and AFF4-L v1.0-ALPHA §6.3.1's MUST is satisfiable.
+///
+/// `block_hashes` is the stream's own per-chunk digests, from
+/// [`crate::write::stream_writer::write_image_stream_as`]. Empty means the
+/// stream recorded none, and no block map digest is written; AFF4-L
+/// v1.0-ALPHA §6.3.1 cannot be met without them, which is a caller error rather
+/// than something to paper over here.
+///
+/// # The file ARN is the Map, unless `indirect`
+///
+/// As in [`write_shared_map`], the direct form makes the file ARN the Map's
+/// own subject. AFF4-L v1.0-ALPHA §6.3's second form instead gives the Map a
+/// fresh subject and reaches it from the file through `aff4l:dataStream`;
+/// `indirect` selects that form. `record_large_file` records what happened
+/// when a logical file's stream was given its own ARN joined by
+/// `aff4:dataStream`: the subject read as a `DiskImage` naming a Map, and this
+/// project's reader looked for `map` and `idx` members a logical file does not
+/// have.
+///
+/// The indirect form also records `aff4:size` on the minted Map subject, which
+/// AFF4 Standard v1.0a §4 requires of every Map. The direct form needs no such
+/// triple, because the caller already recorded the size on the file subject and
+/// that subject is the Map; the indirect form's Map is a subject of its own, and
+/// a Map without a size declares no extent and cannot be resolved at all.
+///
+/// `namespace_https` selects which `aff4l` namespace the indirect form's
+/// `dataStream` predicate takes, between AFF4-L v1.0-ALPHA §4.1's two
+/// readings; see `LogicalOptions::namespace_https`. Ignored when `indirect`
+/// is false, since the direct form writes no such predicate.
+///
+/// # Errors
+///
+/// [`Error::Malformed`](crate::error::Error::Malformed) when `file_arn` names
+/// no member of the volume being written.
+#[allow(clippy::too_many_arguments)]
+pub fn write_own_map(
+    writer: &mut ContainerWriter,
+    file_arn: &str,
+    stream_arn: &str,
+    size: u64,
+    block_hashes: &[crate::write::stream_writer::BlockHashDigest],
+    indirect: bool,
+    namespace_https: bool,
+    locus: &crate::error::Locus,
+) -> Result<()> {
+    let volume = writer.volume_arn().clone();
+    let volume_arn = volume.as_str().to_owned();
+
+    let mapping = writer.name_mapping();
+    let base = crate::arn::Arn::parse(file_arn, locus)?
+        .member_name(&volume, mapping)
+        .ok_or_else(|| {
+            crate::error::Error::malformed(
+                locus.clone(),
+                format!("file {file_arn} names no member of volume {volume_arn}"),
+            )
+        })?;
+
+    // AFF4 Standard v1.0a §4: one entry covering the whole file, since this
+    // stream holds nothing else. A zero-length file gets an empty map, as in
+    // `write_shared_map`: an entry covering no bytes is a run that does not
+    // exist.
+    let mut map_bytes = Vec::with_capacity(MAP_ENTRY_LEN);
+    if size > 0 {
+        map_bytes.extend_from_slice(&0u64.to_le_bytes());
+        map_bytes.extend_from_slice(&size.to_le_bytes());
+        map_bytes.extend_from_slice(&0u64.to_le_bytes());
+        map_bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    let mut idx_bytes = Vec::with_capacity(stream_arn.len() + 1);
+    idx_bytes.extend_from_slice(stream_arn.as_bytes());
+    idx_bytes.push(b'\n');
+
+    let lexicon = crate::lexicon::STANDARD;
+    // Which subject is the Map. In the direct form the file is the Map, so one
+    // subject carries both types. In the indirect form the Map is its own
+    // subject and the file points at it.
+    let map_arn = if indirect {
+        // A fresh GUID ARN, exactly as `arn_for_entry` mints one for a file
+        // under `LogicalProfile::V1Alpha`. `new_uuid` renders lower case, which
+        // AFF4-L v1.0-ALPHA §2 requires, and returns `Error::Io` rather than
+        // falling back if the OS entropy source is unavailable: a predictable
+        // or colliding object name is unrecoverable confusion about which
+        // evidence is which.
+        let minted = format!(
+            "aff4://{}",
+            crate::write::container_writer::new_uuid(writer.path())?
+        );
+        let namespace = crate::lexicon::namespace_for(
+            crate::lexicon::Generation::Aff4L10,
+            "dataStream",
+            namespace_https,
+        );
+        writer.graph_mut().add(
+            file_arn,
+            &format!("{namespace}dataStream"),
+            TurtleTerm::iri(&minted),
+        );
+        minted
+    } else {
+        file_arn.to_owned()
+    };
+
+    // The **segment base name** stays derived from the file in the direct
+    // form, since the file subject and the Map subject are the same object
+    // there. In the indirect form the segments belong to the Map's own
+    // subject, so the base is derived from it instead.
+    let segment_base = if indirect {
+        crate::arn::Arn::parse(&map_arn, locus)?
+            .member_name(&volume, mapping)
+            .ok_or_else(|| {
+                crate::error::Error::malformed(
+                    locus.clone(),
+                    format!("map {map_arn} names no member of volume {volume_arn}"),
+                )
+            })?
+    } else {
+        base
+    };
+
+    let (map_digests, _recorded) =
+        write_map_segments(writer, &segment_base, &map_arn, &map_bytes, &idx_bytes, &[])?;
+
+    // The digest AFF4-L v1.0-ALPHA §6.3.1 requires, which the shared band
+    // cannot carry. In the direct form one subject is both the image and the
+    // map, so it is named for both roles; in the indirect form the image is
+    // still the file and the map is the fresh subject minted above.
+    let _ = write_block_map_digest(writer, &map_arn, file_arn, block_hashes, &map_digests);
+
+    let graph = writer.graph_mut();
+    graph.add_type(&map_arn, &lexicon.iri(lexicon.map));
+    // AFF4 Standard v1.0a §4 requires every Map to declare its own `aff4:size`,
+    // which is how a reader decides what the map covers. In the direct form the
+    // file subject *is* the Map and the caller already recorded the size there.
+    // In the indirect form the Map is a subject of its own, so without this the
+    // Map declares no size and cannot be resolved at all — the container would
+    // verify as malformed.
+    if indirect {
+        graph.add(
+            &map_arn,
+            &lexicon.iri(lexicon.size),
+            TurtleTerm::typed(size.to_string(), XSD_LONG),
+        );
+    }
+    graph.add(
+        &map_arn,
+        &lexicon.iri(lexicon.dependent_stream),
+        TurtleTerm::iri(stream_arn),
+    );
+    // The inverse edge AFF4 Standard v1.0a §2.2 puts on a stream. One file
+    // uses this stream, so exactly one `aff4:target` accumulates here, unlike
+    // the band's one per file.
+    graph.add(
+        stream_arn,
+        &lexicon.iri(lexicon.target),
+        TurtleTerm::iri(&map_arn),
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

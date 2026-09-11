@@ -23,6 +23,25 @@ readme = "README.md"
 default = ["hash-asm"]
 corpus = []
 
+# Capabilities that exist to build proposed Canonical Reference Images for
+# AFF4-L Standard v1.0-ALPHA, and are not offered to users. Some of them write
+# output this tool's own `conformance` would fault, which is why the feature is
+# named for what it provides rather than for its use case.
+#
+# What the feature gates is the **command-line interface**: off by default, no
+# shipped binary offers these flags, so no shipped binary writes such a
+# container in response to anything a user can type. That is what matters for a
+# tool whose output supports evidentiary claims, and is why this is a feature
+# rather than a hidden flag.
+#
+# It does not gate the library. The corresponding `LogicalOptions` fields stay
+# public and ungated in every build, so a program linking this crate can ask for
+# them deliberately. Gating them would fracture the library's API for downstream
+# crates, `aff4tools-ffi` among them, and `StorageForm::OwnMap` is in any case a
+# conforming AFF4-L v1.0-ALPHA §6.3 form — the only one able to carry the
+# §6.3.1 block map hash — so it must remain reachable.
+nonconforming = []
+
 # Compiles the hardware SHA-2 paths, by enabling `sha2`'s `asm` feature.
 #
 # A default, so an ordinary build reaches the CPU's hash instructions.

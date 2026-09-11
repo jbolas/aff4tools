@@ -400,8 +400,26 @@ pub fn choose_storage(
     kind: StreamKind,
     size: u64,
     profile: LogicalProfile,
+    forced: Option<crate::storage_form::StorageForm>,
 ) -> crate::storage_form::StorageForm {
     use crate::storage_form::StorageForm;
+
+    // The override precedes every rule below, including the legacy split: a
+    // reference image asks for a form directly, and no size or profile
+    // consideration applies once it has — except the one clause below that is
+    // a requirement, not a choice.
+    //
+    // AFF4-L v1.0-ALPHA §6.2 says an implementation MUST NOT store a stream
+    // larger than 1 KiB in the metadata, so a forced resident stream above the
+    // ceiling falls back to a segment exactly as a substream above it does.
+    // Every other form is unbounded, so nothing else is capped.
+    if let Some(form) = forced {
+        return if form == StorageForm::InMetadata && size > RESIDENT_DATA_THRESHOLD {
+            StorageForm::ZipSegment
+        } else {
+            form
+        };
+    }
 
     if !profile.is_v1_alpha() {
         return if size <= MAX_SEGMENT_RESIDENT_SIZE {
@@ -683,6 +701,57 @@ pub struct LogicalOptions {
     /// defaulted at construction so `LogicalOptions::default()` stays cheap and
     /// the CLI remains the single place the default is applied.
     pub algorithms: Vec<crate::model::HashAlgorithm>,
+    /// Force every primary stream into one storage form, ignoring size.
+    ///
+    /// `None` selects by size, which is what every user-reachable path does.
+    ///
+    /// Which form to use for a given file is this implementation's decision:
+    /// AFF4-L v1.0-ALPHA §6 requires a reader support all four forms and a
+    /// writer support at least one, and mandates no selection rule. The
+    /// thresholds in this module are measured choices, not requirements, so a
+    /// reference image demonstrating a form must be able to ask for it at any
+    /// size.
+    ///
+    /// No shipped binary's command line offers this: `--storage-form` is
+    /// compiled in only under `--features nonconforming`. The field itself is
+    /// public in every build, so a program linking this crate can set it
+    /// deliberately.
+    pub storage_form: Option<crate::storage_form::StorageForm>,
+    /// Write AFF4-L v1.0-ALPHA §6.3's second form: the `FileImage` carries
+    /// `aff4l:dataStream` naming a separate `aff4:Map`, rather than being the
+    /// Map itself.
+    ///
+    /// Both forms are AFF4-L v1.0-ALPHA §6.3's; this writer emits the first,
+    /// and this option exists so a reference image can show the second. The
+    /// second is where two questions become visible.
+    ///
+    /// AFF4 Standard v1.0a §6.2 assigns `blockMapHashSHA512` to the Image.
+    /// AFF4-L v1.0-ALPHA §6.3.1 puts it on the Map instead, which is the
+    /// same subject in the first form and two subjects here.
+    ///
+    /// AFF4 Standard v1.0a §6.2 also gives `aff4l:dataStream` a base64
+    /// literal object; here it takes an IRI, so a reader must branch on the
+    /// object's node type.
+    ///
+    /// No shipped binary's command line offers this: `--datastream-indirect`
+    /// is compiled in only under `--features nonconforming`. The field itself
+    /// is public in every build, so a program linking this crate can set it
+    /// deliberately.
+    pub datastream_indirect: bool,
+    /// Write AFF4-L v1.0-ALPHA §4.1's namespace as `https://` rather than
+    /// `http://`.
+    ///
+    /// The clause's prose and its examples disagree, and an RDF namespace is
+    /// compared as an exact string, so a writer choosing wrong emits terms no
+    /// conforming reader recognizes while nothing about the output looks
+    /// wrong. This tool follows the examples; this option writes the prose's
+    /// reading so the two can be compared side by side.
+    ///
+    /// No shipped binary's command line offers this: `--namespace-https` is
+    /// compiled in only under `--features nonconforming`. The field itself is
+    /// public in every build, so a program linking this crate can set it
+    /// deliberately.
+    pub namespace_https: bool,
 }
 
 /// Which AFF4-L format an acquisition writes.
@@ -791,9 +860,19 @@ const fn host_path_separator() -> &'static str {
 fn open_acquisition_task(
     writer: &mut crate::write::container_writer::ContainerWriter,
     task_arn: &str,
-    profile: LogicalProfile,
+    options: &LogicalOptions,
 ) {
     use crate::write::turtle::{TurtleTerm, XSD_STRING};
+
+    // The first graph write of every entry point, so this is also where the
+    // `aff4l` namespace this document binds is decided, between AFF4-L
+    // v1.0-ALPHA §4.1's two readings for that namespace; see
+    // `LogicalOptions::namespace_https`.
+    if options.namespace_https {
+        writer
+            .graph_mut()
+            .set_aff4l_namespace(crate::lexicon::AFF4L_NAMESPACE_HTTPS);
+    }
 
     let lexicon = crate::lexicon::STANDARD;
     writer
@@ -802,10 +881,10 @@ fn open_acquisition_task(
 
     // AFF4-L v1.0-ALPHA §4.3 defines this; the AFF4-L 2019 paper does not, so
     // legacy output must not gain it.
-    if profile.is_v1_alpha() {
+    if options.profile.is_v1_alpha() {
         writer.graph_mut().add(
             task_arn,
-            &v1_alpha_iri(terms::PATH_SEPARATOR),
+            &v1_alpha_iri(terms::PATH_SEPARATOR, options.namespace_https),
             TurtleTerm::typed(host_path_separator(), XSD_STRING),
         );
     }
@@ -822,8 +901,13 @@ fn open_acquisition_task(
 /// (AFF4-L v1.0-ALPHA §4.1), and `is_known_namespace` implements that. A
 /// writer may not choose, which is why this consults the table rather than
 /// formatting a fixed prefix the way `Lexicon::iri` does.
-fn v1_alpha_iri(local_name: &str) -> String {
-    let namespace = crate::lexicon::namespace_for(crate::lexicon::Generation::Aff4L10, local_name);
+///
+/// `https` selects between AFF4-L v1.0-ALPHA §4.1's two readings for the
+/// `aff4l` namespace itself; see [`LogicalOptions::namespace_https`]. False
+/// everywhere a user can reach.
+fn v1_alpha_iri(local_name: &str, https: bool) -> String {
+    let namespace =
+        crate::lexicon::namespace_for(crate::lexicon::Generation::Aff4L10, local_name, https);
     format!("{namespace}{local_name}")
 }
 
@@ -871,12 +955,13 @@ fn write_extended_attributes(
         let child = format!("{parent_arn}/xattr/{index}");
         let size = attribute.value.len() as u64;
 
-        writer
-            .graph_mut()
-            .add_type(&child, &v1_alpha_iri(terms::FILE_EXTENDED_ATTRIBUTE));
+        writer.graph_mut().add_type(
+            &child,
+            &v1_alpha_iri(terms::FILE_EXTENDED_ATTRIBUTE, options.namespace_https),
+        );
         writer.graph_mut().add(
             &child,
-            &v1_alpha_iri(terms::NAME),
+            &v1_alpha_iri(terms::NAME, options.namespace_https),
             TurtleTerm::typed(attribute.name.clone(), XSD_STRING),
         );
         writer.graph_mut().add(
@@ -890,12 +975,15 @@ fn write_extended_attributes(
             TurtleTerm::iri(parent_arn),
         );
 
-        if choose_storage(StreamKind::Substream, size, options.profile)
+        // The override forces primary streams only, per its own documentation;
+        // a substream's storage is decided by AFF4-L v1.0-ALPHA §6.2's ceiling
+        // whether or not `--storage-form` is set.
+        if choose_storage(StreamKind::Substream, size, options.profile, None)
             == crate::storage_form::StorageForm::InMetadata
         {
             writer.graph_mut().add(
                 &child,
-                &v1_alpha_iri(terms::DATA_STREAM),
+                &v1_alpha_iri(terms::DATA_STREAM, options.namespace_https),
                 TurtleTerm::typed(
                     crate::naming::base64_encode(&attribute.value),
                     XSD_BASE64_BINARY,
@@ -921,7 +1009,7 @@ fn write_extended_attributes(
         // before anything points at it.
         writer.graph_mut().add(
             parent_arn,
-            &v1_alpha_iri(terms::EXTENDED_ATTRIBUTE),
+            &v1_alpha_iri(terms::EXTENDED_ATTRIBUTE, options.namespace_https),
             TurtleTerm::iri(&child),
         );
         written += 1;
@@ -1023,7 +1111,7 @@ pub fn acquire_logical(
     // containers or survive a graph merge, and an acquisition task is exactly
     // the provenance an examiner may need to cite.
     let task_arn = format!("{volume_arn}/acquisition");
-    open_acquisition_task(writer, &task_arn, options.profile);
+    open_acquisition_task(writer, &task_arn, options);
 
     for root in roots {
         // Discovery first, writing second. The item list is the same protocol
@@ -1208,7 +1296,7 @@ pub fn acquire_logical_scanned(
     let mut storage = SharedStorage::for_options(options);
 
     let task_arn = format!("{volume_arn}/acquisition");
-    open_acquisition_task(writer, &task_arn, options.profile);
+    open_acquisition_task(writer, &task_arn, options);
 
     let scanner =
         crate::write::scan::spawn(roots.to_vec(), crate::write::scan::SCAN_QUEUE_CAPACITY);
@@ -1296,7 +1384,7 @@ pub fn acquire_logical_prescanned(
     let mut storage = SharedStorage::for_options(options);
 
     let task_arn = format!("{volume_arn}/acquisition");
-    open_acquisition_task(writer, &task_arn, options.profile);
+    open_acquisition_task(writer, &task_arn, options);
 
     let acquired_roots = acquire_from_items(
         writer,
@@ -1644,7 +1732,12 @@ fn record_file(
     // Which of AFF4-L v1.0-ALPHA §6's forms holds this file's bytes. For the
     // legacy profile this reproduces the AFF4-L 2019 §3.3 split exactly, so
     // that output is frozen by construction.
-    let form = choose_storage(StreamKind::Primary, size, options.profile);
+    let form = choose_storage(
+        StreamKind::Primary,
+        size,
+        options.profile,
+        options.storage_form,
+    );
 
     // A large file's bytes go through `write_image_stream_as`, which emits
     // `aff4:stored` for the stream it writes. That stream's ARN *is* the file's
@@ -1681,27 +1774,14 @@ fn record_file(
         return;
     }
 
-    // The large path streams: a file above the segment threshold must never be
-    // read whole into memory, which is the whole reason the threshold exists.
-    if form == crate::storage_form::StorageForm::OwnImageStream {
-        record_large_file(
-            writer,
-            path,
-            arn,
-            size,
-            options.stream,
-            options.algorithms(),
-            result,
-        );
-        return;
-    }
-
-    // AFF4-L v1.0-ALPHA §6.3: a share of one stream, with a map over the range
-    // this file occupies. Streams for the same reason the large path does.
-    if form == crate::storage_form::StorageForm::SharedMap {
-        record_shared_file(
-            writer, path, arn, size, volume_arn, options, storage, result,
-        );
+    // The three forms that stream, none of which may read the file whole into
+    // memory: the threshold that selects them exists precisely because a file
+    // that large must not be held entire, and the override can send one of any
+    // size to any of them. The remaining two are written from the buffer read
+    // below.
+    if record_streamed_file(
+        writer, path, arn, size, form, volume_arn, options, storage, result,
+    ) {
         return;
     }
 
@@ -1742,6 +1822,18 @@ fn record_file(
         );
     }
 
+    // AFF4-L v1.0-ALPHA §6.2's second example: a primary stream held in the
+    // metadata rather than a ZIP member. This writer's own choices never
+    // select it for a primary stream — see `choose_storage` — so the only way
+    // here is `--storage-form in-metadata`, and the ceiling in `choose_storage`
+    // has already turned away anything over 1 KiB.
+    if form == crate::storage_form::StorageForm::InMetadata {
+        record_resident_primary_stream(writer, arn, &bytes, options.namespace_https);
+        result.files += 1;
+        result.bytes += actual;
+        return;
+    }
+
     let segment = segment_name_for_arn(volume_arn, arn, options.profile);
     if is_reserved_name(&segment) {
         result.skipped.push((
@@ -1768,6 +1860,33 @@ fn record_file(
     }
     result.files += 1;
     result.bytes += actual;
+}
+
+/// Write a primary stream's bytes into the metadata itself.
+///
+/// AFF4-L v1.0-ALPHA §6.2's second example: a `FileImage` carrying
+/// `aff4l:dataStream` with a base64 literal, the same property and literal
+/// shape `write_extended_attributes` gives a resident substream. This
+/// writer's own choices never select this form for a primary stream — see
+/// `choose_storage` — so the only caller is the `--storage-form in-metadata`
+/// override, which never reaches here above the 1 KiB ceiling `choose_storage`
+/// enforces. `bytes` is therefore always small, so holding it whole here does
+/// not violate the streaming discipline the rest of this module keeps for
+/// larger content.
+fn record_resident_primary_stream(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    arn: &str,
+    bytes: &[u8],
+    namespace_https: bool,
+) {
+    writer.graph_mut().add(
+        arn,
+        &v1_alpha_iri(terms::DATA_STREAM, namespace_https),
+        crate::write::turtle::TurtleTerm::typed(
+            crate::naming::base64_encode(bytes),
+            crate::write::turtle::XSD_BASE64_BINARY,
+        ),
+    );
 }
 
 /// Record one file as a deduplicated `Map` over the shared chunk pool (AFF4-L 2019 §4).
@@ -1953,6 +2072,177 @@ fn record_large_file(
             &lexicon.iri(lexicon.size),
             TurtleTerm::typed(written.size.to_string(), XSD_LONG),
         );
+    }
+
+    result.files += 1;
+    result.bytes += written.size;
+}
+
+/// Record one file in whichever storage form streams its bytes.
+///
+/// Returns whether `form` was one of those three. The two it declines —
+/// AFF4-L v1.0-ALPHA §6.1's ZIP segment and §6.2's in-metadata literal — are
+/// written by [`record_file`] from a buffer, which is why the split is here
+/// rather than a match over all five: these are exactly the forms that must
+/// never hold a whole file in memory.
+#[allow(clippy::too_many_arguments)]
+fn record_streamed_file(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    path: &std::path::Path,
+    arn: &str,
+    size: u64,
+    form: crate::storage_form::StorageForm,
+    volume_arn: &str,
+    options: &LogicalOptions,
+    storage: &mut SharedStorage,
+    result: &mut LogicalAcquisition,
+) -> bool {
+    use crate::storage_form::StorageForm;
+
+    match form {
+        // Its own `ImageStream`, named by the file's own ARN and carrying no
+        // map (AFF4-L v1.0-ALPHA §6.4).
+        StorageForm::OwnImageStream => record_large_file(
+            writer,
+            path,
+            arn,
+            size,
+            options.stream,
+            options.algorithms(),
+            result,
+        ),
+        // AFF4-L v1.0-ALPHA §6.3: a share of one stream spanning the
+        // acquisition, with a map over the range this file occupies.
+        StorageForm::SharedMap => record_shared_file(
+            writer, path, arn, size, volume_arn, options, storage, result,
+        ),
+        // The other shape that same clause permits: a map over a stream this
+        // file has to itself, which is what makes the
+        // AFF4-L v1.0-ALPHA §6.3.1 block map digest computable.
+        StorageForm::OwnMap => record_own_map_file(writer, path, arn, size, options, result),
+        StorageForm::ZipSegment | StorageForm::InMetadata => return false,
+    }
+    true
+}
+
+/// Record one file as a Map over an `ImageStream` it alone uses.
+///
+/// The second shape AFF4-L v1.0-ALPHA §6.3 permits: the same triples
+/// [`record_shared_file`] writes, over a stream carrying one file rather than a
+/// band. That single difference is what makes AFF4-L v1.0-ALPHA §6.3.1's block
+/// map digest computable, since the stream's block hashes then describe this
+/// file's bytes and nothing else.
+///
+/// **Streamed, never buffered**, for the reason [`record_large_file`] is: the
+/// override can send a file of any size here, and holding one entire would put
+/// a ceiling on what the form can acquire.
+///
+/// # Two ARNs, not one
+///
+/// Unlike [`record_large_file`], the stream gets its own minted ARN and the
+/// file ARN stays the Map's subject. The two cannot be the same name here: the
+/// file subject is typed `aff4:Map` and names its storage through
+/// `aff4:dependentStream`, so a stream sharing that name would be its own
+/// dependency.
+///
+/// Per-chunk digests are forced on whatever `--block-hashes` says, because
+/// without them there is no AFF4-L v1.0-ALPHA §6.3.1 digest and the form has no
+/// reason to exist.
+fn record_own_map_file(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    path: &std::path::Path,
+    arn: &str,
+    size: u64,
+    options: &LogicalOptions,
+    result: &mut LogicalAcquisition,
+) {
+    use crate::write::stream_writer::write_image_stream_as;
+    use crate::write::turtle::{TurtleTerm, XSD_LONG};
+
+    let lexicon = crate::lexicon::STANDARD;
+    let locus = crate::error::Locus::new(path);
+
+    let stream = crate::write::stream_writer::StreamOptions {
+        block_hashes: true,
+        ..options.stream
+    };
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            result
+                .skipped
+                .push((path.to_path_buf(), explain_io_error(&e)));
+            return;
+        }
+    };
+
+    // Minted the way `arn_for_entry` mints a file's, rather than formatted by
+    // hand: `new_uuid` renders lower case, which AFF4-L v1.0-ALPHA §2 requires,
+    // and refuses rather than falling back if the OS entropy source is gone.
+    let stream_arn = match crate::write::container_writer::new_uuid(writer.path()) {
+        Ok(uuid) => format!("aff4://{uuid}"),
+        Err(e) => {
+            result.skipped.push((path.to_path_buf(), e.to_string()));
+            return;
+        }
+    };
+
+    // AFF4-L 2019 §3.7 requires linear digests over the bytes stored; which
+    // algorithms compute them is the examiner's choice, via `--hash`.
+    let written = match write_image_stream_as(
+        writer,
+        &stream_arn,
+        &mut file,
+        stream,
+        options.algorithms(),
+        &locus,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            result.skipped.push((path.to_path_buf(), e.to_string()));
+            return;
+        }
+    };
+
+    // The size recorded is what the read produced, not what the walk predicted.
+    if written.size != size {
+        result
+            .changed
+            .push((path.to_path_buf(), size, written.size));
+    }
+
+    // The stream carries its own digests over the same bytes; these repeat them
+    // on the file subject, which is what AFF4-L 2019 §3.7 asks the file image to
+    // carry. Both describe this one file, so the two agree by construction.
+    {
+        let graph = writer.graph_mut();
+        for digest in &written.digests {
+            graph.add(
+                arn,
+                &lexicon.iri(lexicon.hash),
+                TurtleTerm::typed(digest.hex(), lexicon.iri(digest.algorithm().name())),
+            );
+        }
+        graph.add(
+            arn,
+            &lexicon.iri(lexicon.size),
+            TurtleTerm::typed(written.size.to_string(), XSD_LONG),
+        );
+    }
+
+    if let Err(e) = crate::write::map_writer::write_own_map(
+        writer,
+        arn,
+        &stream_arn,
+        written.size,
+        &written.block_hash_digests,
+        options.datastream_indirect,
+        options.namespace_https,
+        &locus,
+    ) {
+        result.skipped.push((path.to_path_buf(), e.to_string()));
+        return;
     }
 
     result.files += 1;
@@ -2251,15 +2541,15 @@ mod tests {
     fn legacy_splits_at_one_mebibyte_and_uses_two_forms() {
         let p = LogicalProfile::Legacy;
         assert_eq!(
-            choose_storage(StreamKind::Primary, 1024, p),
+            choose_storage(StreamKind::Primary, 1024, p, None),
             StorageForm::ZipSegment
         );
         assert_eq!(
-            choose_storage(StreamKind::Primary, MAX_SEGMENT_RESIDENT_SIZE, p),
+            choose_storage(StreamKind::Primary, MAX_SEGMENT_RESIDENT_SIZE, p, None),
             StorageForm::ZipSegment
         );
         assert_eq!(
-            choose_storage(StreamKind::Primary, MAX_SEGMENT_RESIDENT_SIZE + 1, p),
+            choose_storage(StreamKind::Primary, MAX_SEGMENT_RESIDENT_SIZE + 1, p, None),
             StorageForm::OwnImageStream
         );
     }
@@ -2271,7 +2561,7 @@ mod tests {
         let p = LogicalProfile::Legacy;
         for kind in [StreamKind::Primary, StreamKind::Substream] {
             for size in [0, 1, 100, 5000, 1 << 20, 1 << 30, u64::MAX] {
-                let form = choose_storage(kind, size, p);
+                let form = choose_storage(kind, size, p, None);
                 assert!(
                     matches!(form, StorageForm::ZipSegment | StorageForm::OwnImageStream),
                     "legacy chose {form:?} for {kind:?} at {size}"
@@ -2288,7 +2578,7 @@ mod tests {
     #[test]
     fn v1_alpha_walks_the_primary_bands_in_order() {
         let p = LogicalProfile::V1Alpha;
-        let at = |size| choose_storage(StreamKind::Primary, size, p);
+        let at = |size| choose_storage(StreamKind::Primary, size, p, None);
 
         assert_eq!(at(0), StorageForm::ZipSegment);
         assert_eq!(at(ZIPSEGMENT_THRESHOLD), StorageForm::ZipSegment);
@@ -2304,7 +2594,7 @@ mod tests {
         let p = LogicalProfile::V1Alpha;
         for size in [0, 1, 11, 64, 512, RESIDENT_DATA_THRESHOLD, 4096] {
             assert_ne!(
-                choose_storage(StreamKind::Primary, size, p),
+                choose_storage(StreamKind::Primary, size, p, None),
                 StorageForm::InMetadata,
                 "a primary stream of {size} bytes went in the metadata"
             );
@@ -2318,7 +2608,7 @@ mod tests {
         let p = LogicalProfile::V1Alpha;
         for size in [0, 1, 11, 512, RESIDENT_DATA_THRESHOLD] {
             assert_eq!(
-                choose_storage(StreamKind::Substream, size, p),
+                choose_storage(StreamKind::Substream, size, p, None),
                 StorageForm::InMetadata,
                 "a substream of {size} bytes should be resident"
             );
@@ -2334,7 +2624,7 @@ mod tests {
         let p = LogicalProfile::V1Alpha;
         for size in [RESIDENT_DATA_THRESHOLD + 1, 4096, 6_399_981] {
             assert_eq!(
-                choose_storage(StreamKind::Substream, size, p),
+                choose_storage(StreamKind::Substream, size, p, None),
                 StorageForm::ZipSegment,
                 "a substream of {size} bytes exceeds the ceiling"
             );
@@ -2350,12 +2640,24 @@ mod tests {
         for profile in [LogicalProfile::Legacy, LogicalProfile::V1Alpha] {
             for kind in [StreamKind::Primary, StreamKind::Substream] {
                 for size in [0, 1024, 1 << 20, 1 << 25, 1 << 30] {
-                    let chosen = choose_storage(kind, size, profile);
+                    let chosen = choose_storage(kind, size, profile, None);
                     let (types, resident): (Vec<&str>, bool) = match chosen {
                         StorageForm::ZipSegment => (vec!["FileImage", "ZipSegment"], false),
                         StorageForm::InMetadata => (vec!["FileImage"], true),
                         StorageForm::SharedMap => (vec!["FileImage", "Map"], false),
                         StorageForm::OwnImageStream => (vec!["FileImage", "ImageStream"], false),
+                        // Unreachable with no override: `OwnMap` is only ever
+                        // returned for a forced form, and `forced` is `None`
+                        // throughout this loop. It is also the one form that
+                        // cannot round-trip to itself — the reader reports
+                        // `SharedMap` for either AFF4-L v1.0-ALPHA §6.3 shape,
+                        // because the two
+                        // carry identical types and properties — so asserting
+                        // the mirror on it would assert something the reader
+                        // deliberately does not do.
+                        StorageForm::OwnMap => {
+                            unreachable!("choose_storage returns OwnMap only when it is forced")
+                        }
                     };
                     assert_eq!(
                         crate::storage_form::storage_form_of(&types, resident, &locus).unwrap(),

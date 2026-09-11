@@ -310,6 +310,40 @@ enum Command {
         #[arg(long = "aff4l-v1.0", requires = "logical",
               conflicts_with_all = ["images", "device", "aff4l_legacy"])]
         aff4l_v1_0: bool,
+
+        /// Force one storage form for every file. `--logical` only.
+        ///
+        /// Builds reference images demonstrating a form at a size that would
+        /// not otherwise select it. AFF4-L v1.0-ALPHA §6 mandates no selection
+        /// rule, so no value here is less conformant than another.
+        ///
+        /// Cannot be combined with `--deduplicate`, which gives no file its own
+        /// storage and so leaves no form to choose.
+        #[cfg(feature = "nonconforming")]
+        #[arg(long = "storage-form", value_enum, value_name = "FORM",
+              requires = "logical",
+              conflicts_with_all = ["images", "device", "deduplicate"])]
+        storage_form: Option<ForcedStorageForm>,
+
+        /// Write AFF4-L v1.0-ALPHA §6.3's indirect form. `--logical` only.
+        ///
+        /// The `FileImage` names a separate `aff4:Map` through
+        /// `aff4l:dataStream` rather than being the Map itself. Requires
+        /// `--storage-form own-map`; no other form writes this reference.
+        #[cfg(feature = "nonconforming")]
+        #[arg(long = "datastream-indirect", requires = "logical",
+              requires = "storage_form",
+              conflicts_with_all = ["images", "device", "deduplicate"])]
+        datastream_indirect: bool,
+
+        /// Write AFF4-L v1.0-ALPHA §4.1's namespace as `https://`. `--logical` only.
+        ///
+        /// The clause's prose gives `https://` and its examples give `http://`.
+        /// This tool follows the examples; this writes the other reading.
+        #[cfg(feature = "nonconforming")]
+        #[arg(long = "namespace-https", requires = "logical",
+              conflicts_with_all = ["images", "device"])]
+        namespace_https: bool,
     },
 
     /// Write a disk image out as raw dd; or, export logical files to a directory.
@@ -398,6 +432,40 @@ impl From<Compression> for aff4tools::Codec {
             Compression::Snappy => Self::Snappy,
             Compression::Zlib => Self::Zlib,
             Compression::Stored => Self::Stored,
+        }
+    }
+}
+
+/// A storage form `--storage-form` can force.
+///
+/// Separate from `aff4tools::storage_form::StorageForm` because the CLI names
+/// the two Map forms apart: the library's `SharedMap` is a band several files
+/// share, and `OwnMap` is one file's own.
+#[cfg(feature = "nonconforming")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ForcedStorageForm {
+    /// One ZIP member per file (AFF4-L v1.0-ALPHA §6.1).
+    Segment,
+    /// Base64 inside the turtle (AFF4-L v1.0-ALPHA §6.2).
+    Resident,
+    /// One Map per file over one shared image stream (AFF4-L v1.0-ALPHA §6.3).
+    SharedMap,
+    /// One Map per file over that file's own image stream
+    /// (AFF4-L v1.0-ALPHA §6.3).
+    OwnMap,
+    /// The file's own image stream, with no Map (AFF4-L v1.0-ALPHA §6.4).
+    Imagestream,
+}
+
+#[cfg(feature = "nonconforming")]
+impl From<ForcedStorageForm> for aff4tools::storage_form::StorageForm {
+    fn from(f: ForcedStorageForm) -> Self {
+        match f {
+            ForcedStorageForm::Segment => Self::ZipSegment,
+            ForcedStorageForm::Resident => Self::InMetadata,
+            ForcedStorageForm::SharedMap => Self::SharedMap,
+            ForcedStorageForm::OwnMap => Self::OwnMap,
+            ForcedStorageForm::Imagestream => Self::OwnImageStream,
         }
     }
 }
@@ -597,7 +665,38 @@ fn run() -> ExitCode {
             aff4l_legacy,
             aff4l_v1_0,
             hash,
+            #[cfg(feature = "nonconforming")]
+            storage_form,
+            #[cfg(feature = "nonconforming")]
+            datastream_indirect,
+            #[cfg(feature = "nonconforming")]
+            namespace_https,
         } => {
+            // `--datastream-indirect` writes a reference only for the own-map
+            // form. Clap's `requires` catches a missing `--storage-form`;
+            // nothing it offers can constrain that flag's *value*, so the one
+            // combination it accepts is named here. Refused before anything is
+            // opened, in clap's own style and with clap's exit code, rather
+            // than accepted and silently ignored.
+            #[cfg(feature = "nonconforming")]
+            if datastream_indirect && storage_form != Some(ForcedStorageForm::OwnMap) {
+                use clap::CommandFactory;
+                let root = Cli::command();
+                // Reported against `acquire` so the usage line names that
+                // subcommand's arguments, as clap's own conflicts do; the root
+                // command stands in only if the subcommand cannot be found.
+                let mut reporter = root
+                    .find_subcommand("acquire")
+                    .cloned()
+                    .unwrap_or_else(Cli::command);
+                reporter
+                    .error(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        "the argument '--datastream-indirect' requires '--storage-form own-map'",
+                    )
+                    .exit();
+            }
+
             // Parsed before anything is opened, so a refused selection leaves
             // no partial container behind.
             let algorithms = if hash.is_empty() {
@@ -637,6 +736,12 @@ fn run() -> ExitCode {
                         aff4tools::write::logical::LogicalProfile::Legacy
                     },
                     algorithms,
+                    #[cfg(feature = "nonconforming")]
+                    storage_form,
+                    #[cfg(feature = "nonconforming")]
+                    datastream_indirect,
+                    #[cfg(feature = "nonconforming")]
+                    namespace_https,
                 },
             )
         }
@@ -3167,6 +3272,18 @@ struct AcquireOptions {
     /// is why `--hash` refuses a selection with nothing at SHA-256 strength or
     /// above.
     algorithms: Vec<aff4tools::HashAlgorithm>,
+    /// Force every primary stream into one storage form, ignoring size.
+    /// `None` under a build without the `nonconforming` feature.
+    #[cfg(feature = "nonconforming")]
+    storage_form: Option<ForcedStorageForm>,
+    /// Write AFF4-L v1.0-ALPHA §6.3's indirect `dataStream` form. `false`
+    /// under a build without the `nonconforming` feature.
+    #[cfg(feature = "nonconforming")]
+    datastream_indirect: bool,
+    /// Write AFF4-L v1.0-ALPHA §4.1's namespace as `https://`. `false`
+    /// under a build without the `nonconforming` feature.
+    #[cfg(feature = "nonconforming")]
+    namespace_https: bool,
 }
 
 /// Whether a path names the first part of a raw multi-part set, e.g. `img.001`.
@@ -4010,6 +4127,12 @@ fn run_acquire_logical(
         scan_first,
         logical_profile,
         algorithms,
+        #[cfg(feature = "nonconforming")]
+        storage_form,
+        #[cfg(feature = "nonconforming")]
+        datastream_indirect,
+        #[cfg(feature = "nonconforming")]
+        namespace_https,
     } = settings;
     let options = LogicalOptions {
         stream: StreamOptions {
@@ -4025,6 +4148,18 @@ fn run_acquire_logical(
         deduplicate,
         profile: logical_profile,
         algorithms,
+        #[cfg(feature = "nonconforming")]
+        storage_form: storage_form.map(Into::into),
+        #[cfg(not(feature = "nonconforming"))]
+        storage_form: None,
+        #[cfg(feature = "nonconforming")]
+        datastream_indirect,
+        #[cfg(not(feature = "nonconforming"))]
+        datastream_indirect: false,
+        #[cfg(feature = "nonconforming")]
+        namespace_https,
+        #[cfg(not(feature = "nonconforming"))]
+        namespace_https: false,
     };
 
     let _ = writeln!(out, "Acquiring:   {} root(s)", roots.len());

@@ -10,7 +10,11 @@
 
 use crate::error::{Error, Locus, Result};
 
-/// One of the four storage forms AFF4-L v1.0-ALPHA §6 defines.
+/// One of the storage forms AFF4-L v1.0-ALPHA §6 defines.
+///
+/// Five variants for four clauses: AFF4-L v1.0-ALPHA §6.3 covers both a map
+/// over a stream several files share and a map over a stream one file has to
+/// itself, and a writer has to be told which of the two to produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageForm {
     /// Base64 inside `information.turtle` (AFF4-L v1.0-ALPHA §6.2).
@@ -19,6 +23,15 @@ pub enum StorageForm {
     ZipSegment,
     /// A map addressing a shared image stream (AFF4-L v1.0-ALPHA §6.3).
     SharedMap,
+    /// A map addressing an image stream this subject alone uses
+    /// (AFF4-L v1.0-ALPHA §6.3).
+    ///
+    /// The same clause as [`Self::SharedMap`] and a different construct.
+    /// AFF4-L v1.0-ALPHA §6.3 permits several files to share one stream; when
+    /// they do not, the stream's block hashes describe one file's bytes, so
+    /// AFF4-L v1.0-ALPHA §6.3.1's block map digest is computable. Over a shared
+    /// stream it is not.
+    OwnMap,
     /// The subject's own image stream (AFF4-L v1.0-ALPHA §6.4).
     OwnImageStream,
 }
@@ -31,6 +44,7 @@ impl StorageForm {
             Self::InMetadata => "in-metadata",
             Self::ZipSegment => "ZIP segment",
             Self::SharedMap => "map",
+            Self::OwnMap => "own map",
             Self::OwnImageStream => "image stream",
         }
     }
@@ -91,6 +105,11 @@ pub fn storage_form_of_with_reference<S: AsRef<str>>(
     if declares("ZipSegment") || declares("zip_segment") {
         found.push(StorageForm::ZipSegment);
     }
+    // A Map over its own stream and a Map over a shared one are the same
+    // types and the same properties; they differ only in how many subjects
+    // name the same `aff4:dependentStream`. The reader does not need to tell
+    // them apart, because AFF4-L v1.0-ALPHA §6.3 gives both the same meaning,
+    // so this reports `SharedMap` for either.
     if declares("Map") {
         found.push(StorageForm::SharedMap);
     }

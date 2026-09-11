@@ -2744,6 +2744,20 @@ fn verify_image(
             verify_map_segment_digest(object, &image, volume, mapping, hash, session);
             continue;
         }
+        // `blockMapHash` is a composition over the map's segments and its
+        // streams' block hashes, not a pass over the address space, and it
+        // carries an ordinary `aff4:SHA512` datatype — so like the four above
+        // it is told apart by its predicate alone.
+        //
+        // Reached when one subject is both the image and the map, which is the
+        // form AFF4-L v1.0-ALPHA §6.3 gives a logical file. A separate `Map`
+        // subject is checked by the map path instead; this arm is what stops a
+        // combined subject's copy from being hashed as though it covered the
+        // image's bytes, which mismatched a container whose value was right.
+        if hash.predicate == "blockMapHash" {
+            verify_block_map_hash(object, &image, volume, mapping, hash, session);
+            continue;
+        }
         match &hash.algorithm {
             HashAlgorithm::BlockMapSha512 => {
                 verify_block_map_hash(object, &image, volume, mapping, hash, session);
@@ -2774,6 +2788,10 @@ fn verify_image(
 fn records_whole_image_digest(object: &crate::model::Aff4Object) -> bool {
     object.hashes.iter().any(|h| {
         h.algorithm != HashAlgorithm::BlockMapSha512
+            // The map's own copy of the same value, which a combined
+            // image-and-map subject carries under an ordinary SHA-512 datatype
+            // and so is recognized by its predicate.
+            && h.predicate != "blockMapHash"
             // A map segment digest covers the map, not the address space, so a
             // container recording only those has nothing covering its filled
             // gaps — the same reasoning that excludes `blockMapHash`.

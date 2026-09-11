@@ -3069,7 +3069,10 @@ fn report_v21_namespaces(
         if !crate::lexicon::is_known_namespace(namespace) {
             continue;
         }
-        let expected = crate::lexicon::namespace_for(Generation::Aff4L10, local);
+        // `false`: a reader already honors either namespace through
+        // `is_known_namespace`, so this only needs to name the one a writer
+        // would have used.
+        let expected = crate::lexicon::namespace_for(Generation::Aff4L10, local, false);
         if namespace != expected {
             deviations.push(Deviation::new(
                 (*volume.locus).clone().subject(object.arn.as_str()),

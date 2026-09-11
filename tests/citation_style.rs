@@ -17,6 +17,7 @@ const SINGLE_DOCUMENT_MODULES: &[(&str, Document)] = &[
     ("src/write/dedupe.rs", Document::Paper2019),
     ("tests/logical_acquire.rs", Document::Paper2019),
     ("tests/dedupe_acquire.rs", Document::Paper2019),
+    ("tests/nonconforming.rs", Document::Alpha),
 ];
 
 /// A document a single-document module may cite.

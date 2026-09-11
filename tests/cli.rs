@@ -3944,3 +3944,67 @@ fn multi_part_discovery_needs_no_flag() {
         .success();
     assert_eq!(std::fs::read(&exported).unwrap(), expected);
 }
+
+/// A default build's command line must not offer the `nonconforming` flags.
+///
+/// This is a test of the **command-line surface**, which is exactly what the
+/// feature gates and exactly what the documentation claims: no shipped binary
+/// writes one of these containers in response to anything a user can type. It
+/// does not, and cannot, show the capability is absent from the binary — the
+/// `LogicalOptions` fields behind these flags are public and ungated in every
+/// build, so a program linking the library can still ask for them. A `cfg`
+/// that silently stopped applying would leave the CLI claim false with nothing
+/// to say so, which for a tool whose output supports evidentiary claims is
+/// worth one test.
+#[test]
+#[cfg(not(feature = "nonconforming"))]
+fn a_default_build_offers_no_nonconforming_flags() {
+    let assert = aff4tools().args(["acquire", "--help"]).assert().success();
+    let help = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    let flags = [
+        "--storage-form",
+        "--datastream-indirect",
+        "--namespace-https",
+    ];
+
+    // Not advertised.
+    for flag in flags {
+        assert!(
+            !help.contains(flag),
+            "a default build offers {flag}, which must not ship"
+        );
+    }
+
+    // And not accepted either: an undocumented flag that still parsed would
+    // leave the capability reachable from the command line while the help
+    // text said otherwise. Refused before any container is opened, so no
+    // output path is named here.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let source = dir.path().join("evidence");
+    std::fs::create_dir_all(&source).expect("the fixture tree");
+    std::fs::write(source.join("alpha.txt"), b"alpha\n").expect("a file");
+    let container = dir.path().join("evidence.aff4l");
+
+    for flag in flags {
+        let mut command = aff4tools();
+        command
+            .args(["acquire", "--logical"])
+            .arg(&source)
+            .arg("--output")
+            .arg(&container)
+            .arg(flag);
+        // `--storage-form` takes a value; the other two are switches. Supplying
+        // one regardless keeps the rejection about the flag's absence rather
+        // than about a missing value.
+        if flag == "--storage-form" {
+            command.arg("own-map");
+        }
+        command.assert().failure().code(2);
+    }
+
+    assert!(
+        !container.exists(),
+        "a rejected nonconforming flag still wrote a container"
+    );
+}

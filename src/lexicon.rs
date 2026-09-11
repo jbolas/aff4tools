@@ -54,6 +54,18 @@ pub const LEGACY_NAMESPACE: &str = "http://afflib.org/2009/aff4#";
 /// itself, so those do not move.
 pub const AFF4L_NAMESPACE: &str = "http://aff4.org/Schema/2022/#";
 
+/// The `aff4l` namespace as AFF4-L v1.0-ALPHA §4.1's prose spells it.
+///
+/// **Not what this tool writes.** The clause's prose gives `https://` and every
+/// example in the document gives `http://`; [`AFF4L_NAMESPACE`] follows the
+/// examples, on the reasoning that implementations are written against
+/// examples. An RDF namespace is compared as an exact string, so the two denote
+/// different vocabularies and only one can be right.
+///
+/// This exists so a reference image can carry the other reading and let the
+/// standard's author decide. Reachable only under `--features nonconforming`.
+pub const AFF4L_NAMESPACE_HTTPS: &str = "https://aff4.org/Schema/2022/#";
+
 /// Whether `namespace` is one this project recognizes as an AFF4 vocabulary.
 ///
 /// A property outside these is a vendor extension: legitimate under RDF, and
@@ -64,11 +76,22 @@ pub const AFF4L_NAMESPACE: &str = "http://aff4.org/Schema/2022/#";
 ///
 /// This is the read side of AFF4-L v1.0-ALPHA §4.1's permission to accept either namespace. The
 /// write side is stricter: see `Generation::namespace_for`.
+///
+/// **Includes [`AFF4L_NAMESPACE_HTTPS`] too, and this does not loosen
+/// leniency.** The leniency itself comes from `local_name` stripping the
+/// namespace before a term is matched against the lexicon, elsewhere in this
+/// module — this function only decides whether a namespace is *ours* at all,
+/// so a term can be checked against AFF4-L v1.0-ALPHA §4.1 rather than waved
+/// through as a vendor extension. Omitting the `https` spelling here would
+/// not make reading stricter; it would make `report_v21_namespaces` blind to
+/// it, since a namespace this function rejects is skipped before the
+/// namespace comparison that raises `DeviationKind::WrongTermNamespace` ever
+/// runs.
 #[must_use]
 pub fn is_known_namespace(namespace: &str) -> bool {
     matches!(
         namespace,
-        STANDARD_NAMESPACE | LEGACY_NAMESPACE | AFF4L_NAMESPACE
+        STANDARD_NAMESPACE | LEGACY_NAMESPACE | AFF4L_NAMESPACE | AFF4L_NAMESPACE_HTTPS
     )
 }
 
@@ -117,10 +140,20 @@ const AFF4L_TERMS: &[&str] = &[
 ///
 /// A generation that predates v1.0-ALPHA has only one vocabulary, so every
 /// term takes the base namespace there whatever this table says.
+///
+/// `https` selects between AFF4-L v1.0-ALPHA §4.1's two readings for the
+/// `aff4l` namespace itself: `false` follows the document's examples
+/// ([`AFF4L_NAMESPACE`]), `true` follows its prose ([`AFF4L_NAMESPACE_HTTPS`]).
+/// It is `false` everywhere a user can reach; only `--features nonconforming`
+/// can set it `true`, to write a reference image carrying the other reading.
 #[must_use]
-pub fn namespace_for(generation: Generation, local_name: &str) -> &'static str {
+pub fn namespace_for(generation: Generation, local_name: &str, https: bool) -> &'static str {
     if generation == Generation::Aff4L10 && AFF4L_TERMS.contains(&local_name) {
-        AFF4L_NAMESPACE
+        if https {
+            AFF4L_NAMESPACE_HTTPS
+        } else {
+            AFF4L_NAMESPACE
+        }
     } else {
         STANDARD_NAMESPACE
     }

@@ -715,9 +715,17 @@ fn data_stream_of(arn: &Arn, graph: &Graph, lexicon: &Lexicon, locus: &Locus) ->
     // namespace prefix in support of backwards compatibility" — so a v2.1
     // container writes `aff4l:dataStream` where an earlier one wrote
     // `aff4:dataStream`, and both name the same edge.
+    //
+    // `false`: a reader already honors either namespace through
+    // `is_known_namespace`, so this only needs to name the one a writer would
+    // have used.
     let alpha_predicate = format!(
         "{}{}",
-        crate::lexicon::namespace_for(crate::lexicon::Generation::Aff4L10, lexicon.data_stream),
+        crate::lexicon::namespace_for(
+            crate::lexicon::Generation::Aff4L10,
+            lexicon.data_stream,
+            false
+        ),
         lexicon.data_stream
     );
 
