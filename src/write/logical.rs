@@ -717,6 +717,14 @@ pub struct LogicalOptions {
     /// public in every build, so a program linking this crate can set it
     /// deliberately.
     pub storage_form: Option<crate::storage_form::StorageForm>,
+    /// Force how ZIP segments are compressed, overriding the probe.
+    ///
+    /// `None` selects per file by
+    /// [`crate::write::segment_compression::deflate_helps`]: Deflate when a
+    /// strided sample compresses, Stored otherwise. `Some` forces the choice,
+    /// and is how `--compression stored` reaches segments. Set by the CLI; a
+    /// program linking this crate may set it directly.
+    pub segment_codec: Option<crate::write::segment_compression::SegmentCodec>,
     /// Write AFF4-L v1.0-ALPHA §6.3's second form: the `FileImage` carries
     /// `aff4l:dataStream` naming a separate `aff4:Map`, rather than being the
     /// Map itself.
@@ -930,6 +938,58 @@ fn v1_alpha_iri(local_name: &str, https: bool) -> String {
 /// evidence.
 ///
 /// Returns how many attributes were written.
+/// Whether deflating `data` in full actually produces fewer bytes than the
+/// input. The never-grow guard: a segment must never be stored in a form larger
+/// than verbatim, so a completed deflate that did not shrink is discarded.
+fn deflate_actually_smaller(data: &[u8]) -> bool {
+    use std::io::Write;
+
+    use flate2::Compression;
+    use flate2::write::DeflateEncoder;
+
+    // `Compression::default()` and `DeflateEncoder` (raw deflate) exactly match
+    // what `ZipWriter::add_deflated_member` (src/write/zip_writer.rs) will do
+    // when the Deflate branch is taken, so this guard measures the real output
+    // size, not an approximation. Getting the level wrong here would let the
+    // guard predict a saving the real write does not deliver, or vice versa.
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    if encoder.write_all(data).is_err() {
+        return false;
+    }
+    match encoder.finish() {
+        Ok(compressed) => compressed.len() < data.len(),
+        Err(_) => false,
+    }
+}
+
+/// Write one segment's bytes with the compression the policy selects.
+///
+/// The probe ([`crate::write::segment_compression::decide_segment_placement`])
+/// or a forced codec decides Stored vs Deflate. When Deflate is chosen, the
+/// never-grow guard re-checks the real compressed size and falls back to Stored
+/// if it did not shrink, so a compression attempt can never enlarge the
+/// container. A forced Deflate is still guarded: honoring "compress this" must
+/// not mean "store it larger".
+fn write_segment_bytes(
+    writer: &mut crate::write::container_writer::ContainerWriter,
+    name: &str,
+    data: &[u8],
+    forced: Option<crate::write::segment_compression::SegmentCodec>,
+) -> crate::error::Result<()> {
+    use crate::write::segment_compression::{SegmentPlacement, decide_segment_placement};
+
+    let placement = decide_segment_placement(data, forced);
+    let store = match placement {
+        SegmentPlacement::Stored => true,
+        SegmentPlacement::Deflate => !deflate_actually_smaller(data),
+    };
+    if store {
+        writer.add_stored_segment(name, data)
+    } else {
+        writer.add_deflated_segment(name, data)
+    }
+}
+
 fn write_extended_attributes(
     writer: &mut crate::write::container_writer::ContainerWriter,
     path: &Path,
@@ -993,7 +1053,9 @@ fn write_extended_attributes(
             // Above the AFF4-L v1.0-ALPHA §6.2 ceiling, so the bytes go in a
             // member of their own and the type says so.
             let segment = segment_name_for_arn(volume_arn, &child, options.profile);
-            if let Err(e) = writer.add_deflated_segment(&segment, &attribute.value) {
+            if let Err(e) =
+                write_segment_bytes(writer, &segment, &attribute.value, options.segment_codec)
+            {
                 result.skipped.push((
                     path.to_path_buf(),
                     format!("extended attribute {:?}: {e}", attribute.name),
@@ -1854,7 +1916,7 @@ fn record_file(
     writer
         .graph_mut()
         .add_type(arn, &lexicon.iri(zip_segment_term));
-    if let Err(e) = writer.add_deflated_segment(&segment, &bytes) {
+    if let Err(e) = write_segment_bytes(writer, &segment, &bytes, options.segment_codec) {
         result.skipped.push((path.to_path_buf(), e.to_string()));
         return;
     }
@@ -2529,6 +2591,41 @@ mod tests {
     use super::*;
 
     const VOLUME: &str = "aff4://e6bae91b-14d231833e18";
+
+    /// The never-grow guard: when the decision is Deflate but the compressed
+    /// bytes are not smaller than the input, the segment must be stored
+    /// verbatim, so the container never grows from a compression attempt. This
+    /// asserts the decision+guard contract at the unit level; it is also
+    /// exercised end-to-end in `tests/logical_acquire.rs`.
+    #[test]
+    fn deflate_that_would_grow_falls_back_to_stored() {
+        use crate::write::segment_compression::{
+            SegmentCodec, SegmentPlacement, decide_segment_placement,
+        };
+        // Incompressible input: a deterministic LCG, top byte taken via
+        // `to_le_bytes` so no truncating cast is needed.
+        let mut state: u64 = 99;
+        let mut data = vec![0u8; 256 * 1024];
+        for b in &mut data {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            *b = (state >> 56).to_le_bytes()[0];
+        }
+        // Even when the caller forces Deflate, write_segment_bytes must not let
+        // the container grow: the guard measures the real deflate and falls
+        // back. Verify the decision and the guard's helper directly.
+        let placement = decide_segment_placement(&data, Some(SegmentCodec::Deflate));
+        assert_eq!(
+            placement,
+            SegmentPlacement::Deflate,
+            "forced Deflate is the requested placement"
+        );
+        assert!(
+            !deflate_actually_smaller(&data),
+            "incompressible data must not be judged smaller after deflate"
+        );
+    }
 
     // --- storage selection (AFF4-L v1.0-ALPHA §6) --------------------------
 

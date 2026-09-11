@@ -4152,6 +4152,20 @@ fn run_acquire_logical(
         storage_form: storage_form.map(Into::into),
         #[cfg(not(feature = "nonconforming"))]
         storage_form: None,
+        // A ZIP segment has only Stored and Deflate. `--compression stored`
+        // forces Stored; `zlib`/`snappy` force Deflate for segments (those
+        // codecs frame ImageStream chunks, not ZIP members, so for a segment
+        // they all mean "compressed"). `lz4` is the flag's default and does not
+        // apply to segments, so it maps to `None`: the per-file probe decides.
+        segment_codec: match compression {
+            Compression::Stored => {
+                Some(aff4tools::write::segment_compression::SegmentCodec::Stored)
+            }
+            Compression::Zlib | Compression::Snappy => {
+                Some(aff4tools::write::segment_compression::SegmentCodec::Deflate)
+            }
+            Compression::Lz4 => None,
+        },
         #[cfg(feature = "nonconforming")]
         datastream_indirect,
         #[cfg(not(feature = "nonconforming"))]

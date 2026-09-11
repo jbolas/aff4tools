@@ -1318,3 +1318,189 @@ fn the_digest_table_refuses_to_overwrite() {
         "the existing table must be left untouched"
     );
 }
+
+// --- segment compression: Stored vs Deflate ZIP method ---------------------
+//
+// A ZIP file member is stored with one of two methods, Stored (verbatim) or
+// Deflate. `--compression stored` forces Stored; `zlib`/`snappy` force Deflate;
+// with no flag a per-file probe decides. These tests acquire real files and
+// read back the ZIP method each file member actually received.
+
+/// The ZIP compression method of the first file-content member (an
+/// `aff4://<guid>` member that is not an index, block-hash, or metadata
+/// member) of a written container: "stored" or "deflate".
+fn segment_method(container: &Path) -> String {
+    let out = std::process::Command::new("unzip")
+        .arg("-v")
+        .arg(container)
+        .output()
+        .expect("unzip must run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        // A `unzip -v` data row begins with the numeric Length column, then the
+        // Method column. The archive-comment line also carries the volume ARN
+        // (`aff4://…`) but is not a data row, so require a leading number to
+        // skip it — otherwise the ARN line is matched and no method is read.
+        let mut fields = line.split_whitespace();
+        let Some(length) = fields.next() else {
+            continue;
+        };
+        if !length.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let method = fields.next().unwrap_or("");
+        if line.contains("aff4://")
+            && !line.contains(".index")
+            && !line.contains("blockHash")
+            && !line.contains("information.turtle")
+        {
+            return if method.starts_with("Defl") {
+                "deflate".into()
+            } else {
+                "stored".into()
+            };
+        }
+    }
+    "none".into()
+}
+
+/// A high-entropy file, forced Stored, is stored verbatim.
+#[test]
+fn compression_stored_forces_stored_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    write_file(&src.join("f.bin"), &incompressible(2 * 1024 * 1024));
+    let out = dir.path().join("c.aff4l");
+
+    aff4tools()
+        .args([
+            "acquire",
+            "--aff4l-v1.0",
+            "--hash",
+            "sha256",
+            "--no-verify",
+            "--compression",
+            "stored",
+            "--logical",
+        ])
+        .arg(&src)
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert_eq!(segment_method(&out), "stored");
+}
+
+/// A compressible file, forced zlib, is deflated.
+#[test]
+fn compression_zlib_forces_deflate_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    write_file(&src.join("f.txt"), &vec![b'A'; 2 * 1024 * 1024]);
+    let out = dir.path().join("c.aff4l");
+
+    aff4tools()
+        .args([
+            "acquire",
+            "--aff4l-v1.0",
+            "--hash",
+            "sha256",
+            "--no-verify",
+            "--compression",
+            "zlib",
+            "--logical",
+        ])
+        .arg(&src)
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert_eq!(segment_method(&out), "deflate");
+}
+
+/// With no --compression, the probe stores an incompressible file verbatim.
+#[test]
+fn default_probe_stores_incompressible() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    write_file(&src.join("f.bin"), &incompressible(2 * 1024 * 1024));
+    let out = dir.path().join("c.aff4l");
+
+    aff4tools()
+        .args([
+            "acquire",
+            "--aff4l-v1.0",
+            "--hash",
+            "sha256",
+            "--no-verify",
+            "--logical",
+        ])
+        .arg(&src)
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert_eq!(segment_method(&out), "stored");
+}
+
+/// With no --compression, the probe deflates a compressible file.
+#[test]
+fn default_probe_deflates_compressible() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    write_file(&src.join("f.txt"), &vec![b'Z'; 2 * 1024 * 1024]);
+    let out = dir.path().join("c.aff4l");
+
+    aff4tools()
+        .args([
+            "acquire",
+            "--aff4l-v1.0",
+            "--hash",
+            "sha256",
+            "--no-verify",
+            "--logical",
+        ])
+        .arg(&src)
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert_eq!(segment_method(&out), "deflate");
+}
+
+/// Whatever the method, the acquired file verifies: the choice must never
+/// change the reconstructed bytes.
+#[test]
+fn stored_segment_still_verifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    write_file(&src.join("f.bin"), &incompressible(2 * 1024 * 1024));
+    let out = dir.path().join("c.aff4l");
+
+    aff4tools()
+        .args([
+            "acquire",
+            "--aff4l-v1.0",
+            "--hash",
+            "sha256",
+            "--compression",
+            "stored",
+            "--logical",
+        ])
+        .arg(&src)
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+
+    aff4tools().args(["verify"]).arg(&out).assert().success();
+}
