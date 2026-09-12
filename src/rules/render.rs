@@ -22,12 +22,27 @@ pub fn render_catalog() -> String {
 
     out.push_str("## Rule states\n\n");
     out.push_str("| State | Meaning |\n|---|---|\n");
-    out.push_str("| detected | A checker exists and runs. |\n");
+    out.push_str(
+        "| enforced | A violation refuses the container rather than producing a deviation. |\n",
+    );
+    out.push_str(
+        "| detected | `aff4tools conformance` checks for compliance and reports a deviation. |\n",
+    );
+    out.push_str(
+        "| honored | `aff4tools info` or `acquire` honor this rule when reading or writing containers. |\n",
+    );
     out.push_str(
         "| not implemented | Declared, but no checker exists yet. Reported as a coverage gap. |\n",
     );
     out.push_str(
         "| not checkable | No checker can exist yet, because the requirement itself is unsettled. |\n\n",
+    );
+
+    out.push_str("## Governs\n\n");
+    out.push_str(
+        "Whether a rule binds the content of a container, or the behavior of a reader or a writer. \
+         A rule may name more than one actor only where its state is the same for each; \
+         `not checkable` rules carry `-`.\n\n",
     );
 
     for document in Document::ALL {
@@ -40,7 +55,7 @@ pub fn render_catalog() -> String {
         }
 
         let _ = writeln!(out, "## {}\n", document.name());
-        out.push_str("| Rule | Level | State | Requirement |\n|---|---|---|---|\n");
+        out.push_str("| Rule | Level | State | Governs | Requirement |\n|---|---|---|---|---|\n");
         for rule in rules {
             let clause = if rule.id.clause == "none" {
                 "not legislated"
@@ -49,11 +64,12 @@ pub fn render_catalog() -> String {
             };
             let _ = writeln!(
                 out,
-                "| `{}` ({}) | {} | {} | {} |",
+                "| `{}` ({}) | {} | {} | {} | {} |",
                 rule.id,
                 clause,
                 rule.requirement.as_str(),
                 rule.state.as_str(),
+                rule.governs.as_str(),
                 rule.statement
             );
         }

@@ -60,15 +60,18 @@ pub struct ContainerSummary {
     /// rather than stripping it to a bare local name, which would make an
     /// extension indistinguishable from a standard type.
     pub prefixes: Vec<(String, String)>,
-    /// The ARNs the volume declares via `aff4:contains` — its own authoritative
-    /// statement of what it holds. Empty when the predicate is absent, as it is
-    /// on every pre-standard container observed so far.
-    pub manifest: Vec<String>,
-    /// Where the manifest disagrees with the objects this crate actually found.
+    /// The ARNs the volume names via `aff4:contains`, as parsed.
     ///
-    /// Empty for every canonical reference container: `aff4:contains` is meant
-    /// to be authoritative, so a disagreement is a defect worth surfacing, not
-    /// a condition to normalise away.
+    /// No specification defines the predicate; it is a convention of the
+    /// reference implementations, which write it for v1.0 and pre-standard
+    /// containers but not for the AFF4-L containers they produce. Empty when
+    /// the predicate is absent, which is not a defect.
+    pub manifest: Vec<String>,
+    /// ARNs `aff4:contains` names that no object in this volume describes.
+    ///
+    /// Empty for every canonical reference container. An entry here is a
+    /// reference that cannot be resolved, not a departure from a requirement:
+    /// nothing obliges a volume to write the predicate at all.
     pub manifest_disagreements: Vec<ManifestDisagreement>,
     /// How many objects of each role the container describes.
     ///
@@ -249,26 +252,26 @@ pub struct VolumeInfo {
     pub arn_source: ArnSource,
 }
 
-/// One ARN where the volume's `aff4:contains` manifest and the objects this
-/// crate found disagree.
+/// One ARN a volume's `aff4:contains` names that nothing in it describes.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ManifestDisagreement {
     /// The ARN involved.
     pub arn: String,
-    /// How the manifest and the found objects disagree about it.
+    /// How the enumeration and the found objects disagree about it.
     pub kind: ManifestIssue,
 }
 
-/// The two ways a manifest can disagree with what was actually found.
+/// How a volume's `aff4:contains` can disagree with what was actually found.
+///
+/// Only the unresolvable direction is a finding. An object the enumeration does
+/// not name is not one: no specification requires the predicate to be written,
+/// let alone to be exhaustive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestIssue {
-    /// The volume declares this ARN via `aff4:contains`, but no object in this
+    /// The volume names this ARN via `aff4:contains`, but no object in this
     /// volume describes it.
     DeclaredButAbsent,
-    /// An object local to this volume is described here, but the volume's
-    /// `aff4:contains` never names it.
-    PresentButUndeclared,
 }
 
 /// Storage-layer counts.

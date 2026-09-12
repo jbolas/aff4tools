@@ -33,14 +33,19 @@ impl Coverage {
 
     /// Rules in scope that no checker evaluated, in catalog order.
     ///
-    /// [`RuleState::Detected`] rules are evaluated by definition.
-    /// [`RuleState::Honored`] rules are met by how this build behaves rather
-    /// than by anything a container carries, so reporting one as a gap would
-    /// misstate the position — the rule holds, and no container could show
-    /// otherwise.
+    /// [`RuleState::Detected`] rules are evaluated by definition, and
+    /// [`RuleState::Enforced`] rules are checked before conformance runs — a
+    /// violation refuses the container — so neither is a gap. [`RuleState::Honored`]
+    /// rules are met by how this build behaves rather than by anything a
+    /// container carries, so reporting one as a gap would misstate the position —
+    /// the rule holds, and no container could show otherwise.
     pub fn unevaluated(&self) -> impl Iterator<Item = &'static RuleInfo> + '_ {
-        rules_for_generation(self.generation)
-            .filter(|rule| !matches!(rule.state, RuleState::Detected | RuleState::Honored))
+        rules_for_generation(self.generation).filter(|rule| {
+            !matches!(
+                rule.state,
+                RuleState::Detected | RuleState::Enforced | RuleState::Honored
+            )
+        })
     }
 
     /// Whether any unevaluated rule is binding — a MUST or a MUST NOT.

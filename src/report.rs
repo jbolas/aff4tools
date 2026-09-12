@@ -4,8 +4,8 @@
 use std::io::Write;
 
 use aff4tools::{
-    Aff4Object, ContainerSummary, EdgeKind, HashAlgorithm, Locality, ManifestIssue, ObjectCounts,
-    ObjectRole, StoredHash, thousands,
+    Aff4Object, ContainerSummary, EdgeKind, HashAlgorithm, Locality, ObjectCounts, ObjectRole,
+    StoredHash, thousands,
 };
 
 use crate::{ObjectFilter, human_bytes};
@@ -502,7 +502,7 @@ fn write_conformance_pointer(
 /// Two things this function must never do, regardless of how the
 /// layout evolves: hide that a deviation was recorded, or print anything that
 /// could read as a checked/verified digest. Per-object properties, edges, the
-/// segment-kind breakdown, and the manifest reconciliation are still dropped
+/// segment-kind breakdown, and the object enumeration are still dropped
 /// in favor of counts — but hashes are **not** omitted (reversed from this
 /// function's first version): the user asked for linear bitstream hashes and
 /// the stored/described sizes they cover, on the same screen, so a brief
@@ -811,12 +811,13 @@ fn is_spine_edge(kind: &EdgeKind) -> bool {
     )
 }
 
-/// Order objects for display: the data path first, then the volume's
-/// `aff4:contains` manifest, then everything else.
+/// Order objects for display: the data path first, then any `aff4:contains`
+/// enumeration, then everything else.
 ///
-/// Three tiers, with a fallback when no manifest exists: the middle tier is
-/// empty and the order collapses to the data path followed by turtle
-/// first-appearance order.
+/// Three tiers, with a fallback when the volume states no enumeration: the
+/// middle tier is empty and the order collapses to the data path followed by
+/// turtle first-appearance order. Display order only — no tier expresses a
+/// conformance judgment.
 ///
 /// # Tier 1 — the data path
 ///
@@ -828,8 +829,8 @@ fn is_spine_edge(kind: &EdgeKind) -> bool {
 /// kinds **in either direction** — a Standard map asserts `dependentStream`
 /// toward its stream, but a pre-standard map is reached only by the stream's
 /// own `target` edge pointing back at the map, since pre-standard's
-/// map→stream edge is `aff4:contains` (modelled as the volume manifest, not
-/// a [`GraphEdge`] — see `container.rs`). Reading the graph as undirected for
+/// map→stream edge is `aff4:contains` (parsed into the enumeration, not a
+/// [`GraphEdge`] — see `container.rs`). Reading the graph as undirected for
 /// this purpose is what lets one algorithm serve both spellings without a
 /// generation-specific branch. A stream's `BlockHashes` children (ARNs of the
 /// form `<stream>/...`) are attached immediately after it, since they
@@ -839,20 +840,22 @@ fn is_spine_edge(kind: &EdgeKind) -> bool {
 /// first-appearance order within each pass: an AFF4-L container with several
 /// `FileImage` objects has one root per file, each a spine of one.
 ///
-/// # Tier 2 — the manifest
+/// # Tier 2 — the enumeration
 ///
-/// Every object not already placed, in the volume's own `aff4:contains`
-/// order — the container's own declaration, and the most defensible
-/// ordering authority available short of the data path itself.
+/// Every object not already placed, in the order the volume's `aff4:contains`
+/// names them. A writer's own stated order is a more stable presentation than
+/// turtle order alone; it carries no authority beyond that.
 ///
 /// # Tier 3 — everything else
 ///
-/// Objects the manifest does not declare (or, with no manifest, everything
-/// tier 1 did not reach), in turtle first-appearance order. When a manifest
-/// exists, this tier additionally groups by role, so that a container with
-/// many objects of one type (pre-standard's `Query`/`QueryAction`/`QueryItem`
-/// triad) does not interleave them; the no-manifest fallback stays flat,
-/// matching the tool's prior behavior exactly.
+/// Objects the enumeration does not name (or, where none exists, everything
+/// tier 1 did not reach), in turtle first-appearance order. Being outside the
+/// enumeration is ordinary: the volume's own ARN and every `BlockHashes`
+/// sub-resource land here on a container that is entirely well-formed. When an
+/// enumeration exists, this tier additionally groups by role, so that a
+/// container with many objects of one type (pre-standard's
+/// `Query`/`QueryAction`/`QueryItem` triad) does not interleave them; the
+/// fallback stays flat, matching the tool's prior behavior exactly.
 fn order_objects(summary: &ContainerSummary) -> Vec<&Aff4Object> {
     let objects = &summary.objects;
 
@@ -952,7 +955,7 @@ fn order_objects(summary: &ContainerSummary) -> Vec<&Aff4Object> {
         }
     }
 
-    // Tier 2: the volume's own manifest, in declared order.
+    // Tier 2: the volume's own aff4:contains, in the order it names them.
     for arn in &summary.manifest {
         if visited.contains(arn.as_str()) {
             continue;
@@ -963,9 +966,9 @@ fn order_objects(summary: &ContainerSummary) -> Vec<&Aff4Object> {
         }
     }
 
-    // Tier 3: everything else. Grouped by role only when a manifest exists —
-    // the no-manifest fallback is plain turtle order, the documented
-    // pre-existing behavior (A8.4 rule 4).
+    // Tier 3: everything else. Grouped by role only when an enumeration exists
+    // — the fallback is plain turtle order, the documented pre-existing
+    // behavior (A8.4 rule 4).
     let remaining: Vec<&Aff4Object> = objects
         .iter()
         .filter(|o| !visited.contains(o.arn.as_str()))
@@ -1071,9 +1074,9 @@ fn walk_spine<'a>(
 /// A `BTreeMap` keyed by the role's label would resort alphabetically, which
 /// is exactly the kind of ordering authority this task set out to remove
 /// — so this sorts on first-appearance-of-the-role instead, which
-/// keeps the leading objects (usually the volume itself, then whatever the
-/// manifest omitted) in a position close to where turtle order already put
-/// them.
+/// keeps the leading objects (usually the volume itself, then whatever
+/// `aff4:contains` did not name) in a position close to where turtle order
+/// already put them.
 fn group_by_role(remaining: Vec<&Aff4Object>) -> Vec<&Aff4Object> {
     let mut role_order: Vec<&ObjectRole> = Vec::new();
     for object in &remaining {
@@ -1089,120 +1092,27 @@ fn group_by_role(remaining: Vec<&Aff4Object>) -> Vec<&Aff4Object> {
     grouped
 }
 
-// --- the volume manifest ----------------------------
+// --- the described-object count ---------------------
 
-/// Write the `Described objects` block: the manifest's status, and the
-/// declared/described reconciliation when one exists.
+/// Write the `Described objects` count.
 ///
-/// Three cases, matching the three rows of A8.4 rule 9's table — distinguished
-/// by whether the volume is the subject of an `aff4:contains` triple at all,
-/// not by whether [`ContainerSummary::manifest`] is non-empty, since a real
-/// declaration can validly list zero ARNs (the middle row) and that is a
-/// different fact from no declaration at all (the third row). Both produce an
-/// empty `manifest` vector, so this cannot be told apart by `manifest` alone.
+/// A plain fact about `information.turtle`. No specification defines
+/// `aff4:contains`, so whether a volume writes it, and how much of itself it
+/// names there, is not something to reconcile or report against: the earlier
+/// form of this block printed a declared-versus-described tally that read as a
+/// discrepancy on a perfectly ordinary container, since the volume's own ARN
+/// and its `BlockHashes` sub-resources are never named by the predicate.
 ///
-/// `container.rs`'s `build_manifest` does not surface that boolean directly,
-/// but its behavior makes it recoverable: with no `aff4:contains` triple at
-/// all, `build_manifest` returns immediately and `manifest_disagreements`
-/// stays empty (rule 9's third row). With a real-but-empty declaration
-/// (second row), every locally-described object other than the volume itself
-/// is `PresentButUndeclared` — the declaration exists, and names nothing —
-/// so `manifest_disagreements` is non-empty whenever the container has any
-/// other local object. The one case this cannot resolve — an empty
-/// declaration in a volume describing nothing but itself — is not observed
-/// anywhere in the reference corpus; a real container in that state would
-/// read as row three, a fallback that only understates a rare, otherwise
-/// harmless case.
-///
-/// A disagreement is also recorded as a deviation (`container.rs`'s
-/// `build_manifest`) and listed by `aff4tools conformance`; this block states
-/// it inline as well, since a reader following the reconciliation should not
-/// have to run a second command to see what disagreed.
+/// Where a stated entry names an ARN nothing describes, that is an
+/// unresolvable reference, reported by `aff4tools conformance` under
+/// `AFF4_V1_0A/none/2` rather than here.
 fn write_manifest_block(out: &mut impl Write, summary: &ContainerSummary) -> std::io::Result<()> {
     writeln!(out)?;
-
-    let has_declaration =
-        !summary.manifest.is_empty() || !summary.manifest_disagreements.is_empty();
-
-    if !has_declaration {
-        writeln!(
-            out,
-            "Described objects: {} in this volume's information.turtle",
-            summary.objects.len()
-        )?;
-        writeln!(
-            out,
-            "This volume declares no aff4:contains manifest. Object order below \
-             follows the data path, then turtle first-appearance order."
-        )?;
-        return Ok(());
-    }
-
     writeln!(
         out,
         "Described objects: {} in this volume's information.turtle",
         summary.objects.len()
-    )?;
-
-    if summary.manifest.is_empty() {
-        writeln!(
-            out,
-            "The volume's aff4:contains manifest declares 0 objects."
-        )?;
-        return Ok(());
-    }
-
-    let declared_but_absent = summary
-        .manifest_disagreements
-        .iter()
-        .filter(|d| d.kind == ManifestIssue::DeclaredButAbsent)
-        .count();
-    let present_but_undeclared = summary
-        .manifest_disagreements
-        .iter()
-        .filter(|d| d.kind == ManifestIssue::PresentButUndeclared)
-        .count();
-
-    writeln!(
-        out,
-        "  The volume's aff4:contains manifest declares {} of them.",
-        summary.manifest.len()
-    )?;
-
-    if present_but_undeclared > 0 {
-        writeln!(
-            out,
-            "  {present_but_undeclared} are described but not declared:"
-        )?;
-        for disagreement in summary
-            .manifest_disagreements
-            .iter()
-            .filter(|d| d.kind == ManifestIssue::PresentButUndeclared)
-        {
-            writeln!(out, "    {}", disagreement.arn)?;
-        }
-    } else {
-        writeln!(out, "  0 are described but not declared.")?;
-    }
-
-    if declared_but_absent > 0 {
-        writeln!(
-            out,
-            "  {declared_but_absent} are declared but not described \
-             (see `aff4tools conformance`):"
-        )?;
-        for disagreement in summary
-            .manifest_disagreements
-            .iter()
-            .filter(|d| d.kind == ManifestIssue::DeclaredButAbsent)
-        {
-            writeln!(out, "    {}", disagreement.arn)?;
-        }
-    } else {
-        writeln!(out, "  0 are declared but not described.")?;
-    }
-
-    Ok(())
+    )
 }
 
 // --- case metadata header block --------------------------------------------
@@ -1975,8 +1885,9 @@ mod tests {
 
     /// Wrap objects in the minimum summary the report functions read.
     ///
-    /// No manifest and no deviations: this exists to exercise ordering, and a
-    /// manifest would route objects through tier 2 instead of the spine walk.
+    /// No `aff4:contains` and no deviations: this exists to exercise ordering,
+    /// and an enumeration would route objects through tier 2 instead of the
+    /// spine walk.
     fn summary_of(objects: Vec<Aff4Object>) -> ContainerSummary {
         let locus = aff4tools::Locus::new(std::path::PathBuf::from("test.aff4"));
         let counts = counts_of(&objects);

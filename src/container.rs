@@ -650,8 +650,9 @@ impl Container {
             };
             described.insert(Arc::clone(&subject));
 
-            // The volume's own subject carries the `aff4:contains` manifest.
-            // Captured here because this is the only pass over it.
+            // The volume's own subject carries `aff4:contains`, where it is
+            // written at all. Captured here because this is the only pass
+            // over it.
             if &*subject == volume_arn.as_str() {
                 manifest_declared = subject_graph
                     .statements_for(&subject)
@@ -696,9 +697,8 @@ impl Container {
                 // The ARN string is already held by `described`; share that
                 // allocation rather than keeping `Aff4Object`'s owned copy. A
                 // million owned `Arn`s cost ~0.16 GB, a million `LocalArn`s
-                // ~0.02 GB, and the manifest comparison reads no other field.
+                // ~0.02 GB, and the `aff4:contains` check reads no other field.
                 local.push(LocalArn {
-                    volume_len: u32::try_from(object.arn.volume().len()).unwrap_or(u32::MAX),
                     arn: Arc::clone(&subject),
                 });
             }
@@ -955,7 +955,6 @@ one as {}; membership in the set cannot be told from the names alone",
             .iter()
             .filter(|o| matches!(o.locality, Locality::Local))
             .map(|o| LocalArn {
-                volume_len: u32::try_from(o.arn.volume().len()).unwrap_or(u32::MAX),
                 arn: Arc::from(o.arn.as_str()),
             })
             .collect();
@@ -1107,10 +1106,11 @@ one as {}; membership in the set cannot be told from the names alone",
 
         self.report_stream_conflicts(&locus, &mut deviations);
 
-        // The manifest comparison is skipped, not approximated. It needs every
-        // local ARN, which is the retention this function exists to avoid, and
-        // `--brief` renders no disagreement — it prints only the deviation
-        // count and points at `conformance`, which does the full comparison.
+        // The `aff4:contains` check is skipped, not approximated. It needs
+        // every local ARN, which is the retention this function exists to
+        // avoid, and `--brief` renders no finding from it — it prints only the
+        // deviation count and points at `conformance`, which does the full
+        // check.
         let _ = (&manifest, manifest_declared);
 
         let segments = segment_summary(self.volumes.primary());
@@ -1281,7 +1281,7 @@ fn build_object(
             "stored" => {
                 stored_in = statement.object.as_iri().map(ToString::to_string);
             }
-            // Modelled separately as `ContainerSummary::manifest`.
+            // Parsed separately into `ContainerSummary::manifest`.
             "contains" => {}
             _ => {
                 // Any literal whose datatype is a timestamp gets checked, so a
@@ -2450,32 +2450,21 @@ fn dedupe_subject_deviation(locus: &Locus, count: usize) -> Deviation {
     )
 }
 
-/// A local object's ARN, reduced to what the manifest comparison reads.
+/// A local object's ARN, as the `aff4:contains` check reads it.
 ///
 /// [`Container::deviations_only`] must remember every local ARN until the whole
-/// file is parsed, because the volume's `aff4:contains` manifest may appear
-/// after the objects it declares. Keeping a million [`Arn`]s to do so costs
-/// ~0.16 GB in `String`s that duplicate ones the parser already interned.
-///
-/// This shares the parser's allocation and precomputes the one derived value
-/// [`compare_manifest`] needs — the length of the volume prefix, for the
-/// sub-resource test. `u32` because an ARN longer than 4 GB is not a thing a
-/// container can contain.
+/// file is parsed, because a volume's `aff4:contains` may appear after the
+/// objects it names. Keeping a million [`Arn`]s to do so costs ~0.16 GB in
+/// `String`s that duplicate ones the parser already interned; this shares the
+/// parser's allocation instead.
 #[derive(Debug)]
 struct LocalArn {
     arn: Arc<str>,
-    volume_len: u32,
 }
 
 impl LocalArn {
     fn as_str(&self) -> &str {
         &self.arn
-    }
-
-    /// The volume portion, as [`Arn::volume`] would return it.
-    fn volume(&self) -> &str {
-        let end = (self.volume_len as usize).min(self.arn.len());
-        &self.arn[..end]
     }
 }
 
@@ -2514,22 +2503,30 @@ fn defer_object_references(object: &Aff4Object, deferred: &mut Vec<DeferredRefer
     }
 }
 
-/// Compare the volume's `aff4:contains` manifest against the local objects found.
+/// Check the ARNs a volume's `aff4:contains` names against the objects found.
+///
+/// No specification defines `aff4:contains`: it is a convention of the
+/// reference implementations, and a volume that omits it is as correct as one
+/// that states it. So its absence is never a finding, and an object it does not
+/// name is never a finding either.
+///
+/// What is checked is internal consistency of a statement the writer chose to
+/// make: an entry naming an ARN nothing in this volume describes is an
+/// unresolvable reference, reported as [`DeviationKind::DanglingReference`]
+/// under rule `AFF4_V1_0A/none/2`.
 ///
 /// The single implementation behind both [`build_manifest`] and
 /// [`Container::deviations_only`]. Extracted rather than written twice: the two
-/// commands must report the same disagreements about the same container, and a
-/// second copy of these rules would be free to drift from this one.
+/// commands must report the same findings about the same container, and a
+/// second copy would be free to drift from this one.
 ///
-/// `declared` is whether the volume makes an `aff4:contains` statement at all,
-/// which is distinct from whether that statement names anything — see
-/// [`build_manifest`]'s table. When no declaration exists there is nothing for
-/// an object to disagree with, so no disagreement is recorded however many
-/// objects were found.
+/// `declared` is whether the volume makes an `aff4:contains` statement at all.
+/// With no statement there is nothing to check for consistency.
 ///
-/// Both directions use a [`HashSet`] rather than a scan. On a container whose
-/// manifest names every object, the pairwise form is quadratic — at a million
-/// objects that is 10^12 comparisons, which never finishes.
+/// Membership is tested through a [`HashSet`] rather than a scan. On a
+/// container whose enumeration names every object, the pairwise form is
+/// quadratic — at a million objects that is 10^12 comparisons, which never
+/// finishes.
 fn compare_manifest(
     manifest: &[String],
     declared: bool,
@@ -2544,7 +2541,6 @@ fn compare_manifest(
     }
 
     let present: HashSet<&str> = local.iter().map(LocalArn::as_str).collect();
-    let declared_set: HashSet<&str> = manifest.iter().map(String::as_str).collect();
 
     for arn in manifest {
         if present.contains(arn.as_str()) {
@@ -2558,33 +2554,9 @@ fn compare_manifest(
             locus.clone().subject(volume.as_str()).predicate("contains"),
             DeviationKind::DanglingReference,
             format!(
-                "the volume's manifest declares {arn}, which no object in this \
-                 volume describes"
+                "aff4:contains names {arn}, which no object in this volume \
+                 describes"
             ),
-        ));
-    }
-
-    for arn in local {
-        let text = arn.as_str();
-        if text == volume.as_str() {
-            continue; // The volume does not list itself.
-        }
-        if declared_set.contains(text) {
-            continue;
-        }
-        // A sub-resource of a declared ARN (e.g. a BlockHashes object at
-        // `<stream>/blockhash.sha1`), not a separate undeclared object.
-        if declared_set.contains(arn.volume()) {
-            continue;
-        }
-        disagreements.push(ManifestDisagreement {
-            arn: text.to_string(),
-            kind: ManifestIssue::PresentButUndeclared,
-        });
-        deviations.push(Deviation::new(
-            locus.clone().subject(text),
-            DeviationKind::UndeclaredObject,
-            "this object is described here, but the volume's aff4:contains manifest never names it",
         ));
     }
 
@@ -3363,7 +3335,7 @@ fn declares_local_type(object: &Aff4Object, local: &str) -> bool {
         .any(|t| t.rsplit(['#', '/']).next() == Some(local))
 }
 
-/// [`compare_manifest`], discarding the disagreements `conformance` does not render.
+/// [`compare_manifest`], discarding the findings `conformance` does not render.
 fn report_manifest_disagreements(
     manifest: &[String],
     declared: bool,

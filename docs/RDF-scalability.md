@@ -164,7 +164,7 @@ canonical container's output changed.
   totals.
 - **Found and removed quadratic scans.** Three linear searches inside per-object loops
   were invisible on corpus containers and fatal at scale: dangling-reference
-  checks (10¹⁴ comparisons at 10M), manifest reconciliation (10¹²), and striped
+  checks (10¹⁴ comparisons at 10M), the `aff4:contains` check (10¹²), and striped
   volume merging (10¹⁴). All are hash lookups now.
 
 ## Measuring this at all

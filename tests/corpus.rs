@@ -2951,57 +2951,61 @@ fn a_striped_set_leaves_no_recorded_digest_unaccounted_for() {
     );
 }
 
+/// `aff4:contains` is parsed wherever a writer states it, even though no
+/// specification defines it and nothing requires it to be exhaustive.
+///
+/// `Base-Linear.aff4` names seven ARNs and describes ten objects: the volume
+/// does not name itself, and the two `BlockHashes` sub-resources are not named
+/// either. That gap is ordinary, which is why nothing here checks for one.
 #[test]
-fn the_volume_manifest_is_modelled_across_generations() {
-    // Standard: seven declared, all present.
+fn an_aff4_contains_enumeration_is_parsed_when_stated() {
     let s = summarize(&format!("{STD}/Base-Linear.aff4"));
     assert_eq!(s.manifest.len(), 7, "aff4:contains names seven ARNs");
     assert!(
         s.manifest
             .iter()
             .any(|a| a == "aff4://cf853d0b-5589-4c7c-8358-2ca1572b87eb"),
-        "the disk image must be declared: {:?}",
+        "the disk image must be among them: {:?}",
         s.manifest
     );
     assert!(
         s.manifest_disagreements.is_empty(),
-        "a canonical container should agree with itself: {:?}",
+        "every ARN named is described in this container: {:?}",
         s.manifest_disagreements
     );
 
     // The pre-standard half of this test is gone: those containers are
-    // declined at open, so no manifest can be built for one. See
+    // declined at open, so nothing can be parsed from one. See
     // `a_pre_standard_container_is_declined`.
 }
 
 /// `dream.aff4`'s `information.turtle` describes exactly one subject (its
-/// `FileImage`) and no `ZipVolume` at all, so there is no `aff4:contains`
-/// triple anywhere in the container — audit A8.4 rule 9's third row, "no
-/// declaration exists". The lone object is therefore not "present but
-/// undeclared": there is no declaration for it to disagree with. This is the
-/// regression this test exists to catch: treating "the ARN list came back
-/// empty" as equivalent to "nothing was declared" flags every local object as
-/// an undeclared-manifest deviation, conflating rule 9's middle row (a real but
-/// empty declaration) with its third (no declaration at all).
+/// `FileImage`) and no `ZipVolume` at all, so no `aff4:contains` triple exists
+/// anywhere in the container. That is not a defect: pyaff4 writes the predicate
+/// for v1.0 and pre-standard containers but not for the AFF4-L containers it
+/// produces, and no specification defines it in the first place.
+///
+/// Reading a container that states nothing must therefore produce no finding
+/// of any kind from this quarter.
 #[test]
-fn a_volume_with_no_contains_triple_yields_an_empty_manifest_and_no_deviation() {
+fn a_volume_with_no_contains_triple_yields_nothing_to_report() {
     let s = summarize(&format!("{LOGICAL}/dream.aff4"));
 
     assert!(
         s.manifest.is_empty(),
-        "dream.aff4 declares no aff4:contains at all: {:?}",
+        "dream.aff4 states no aff4:contains at all: {:?}",
         s.manifest
     );
     assert!(
         s.manifest_disagreements.is_empty(),
-        "an absent manifest is not a disagreement: {:?}",
+        "nothing is stated, so nothing can be unresolvable: {:?}",
         s.manifest_disagreements
     );
     assert!(
         !s.deviations
             .iter()
-            .any(|d| d.kind == DeviationKind::UndeclaredObject),
-        "an absent manifest must not produce UndeclaredObject: {:#?}",
+            .any(|d| d.kind == DeviationKind::DanglingReference),
+        "an absent aff4:contains must not produce a dangling reference: {:#?}",
         s.deviations
     );
 }

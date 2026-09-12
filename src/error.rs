@@ -511,17 +511,6 @@ pub enum DeviationKind {
     /// The reference cannot be resolved or attributed: it is neither a
     /// described object nor a declared external one.
     DanglingReference,
-    /// An object local to this volume is described in `information.turtle`,
-    /// but the volume's own `aff4:contains` manifest never names it.
-    ///
-    /// The manifest is the volume's authoritative statement of what it holds
-    /// (v1.0a §5.4); an object outside it is legal RDF but not accounted for by
-    /// the container's own bookkeeping. Sub-resources named by suffixing a
-    /// declared ARN's path (`BlockHashes` objects, `<stream>/blockhash.sha1`)
-    /// are not undeclared — every corpus writer omits those from `contains` as
-    /// a matter of course — nor is the volume's own ARN, which does not list
-    /// itself.
-    UndeclaredObject,
     /// A v2.1 object's resource name is not the AFF4 scheme plus a GUID.
     ///
     /// AFF4-L v1.0-ALPHA §2 fixes the shape, and AFF4-L v1.0-ALPHA §1.1
@@ -801,7 +790,6 @@ impl std::fmt::Display for DeviationKind {
             Self::ExternalReference => "reference to another volume",
             Self::ConflictingStreamValue => "volumes disagree about a stream",
             Self::DanglingReference => "reference to an object nothing describes",
-            Self::UndeclaredObject => "object outside the volume's own manifest",
             Self::NonGuidArn => "resource name is not a GUID",
             Self::UppercaseGuidArn => "resource name GUID is not lower case",
             Self::EscapedV21MemberName => "member name escaped where v2.1 stores it literally",
@@ -967,11 +955,6 @@ mod tests {
             ),
             (
                 DeviationKind::InconsistentVolumeArn,
-                Generation::Standard10,
-                Some("§5.4"),
-            ),
-            (
-                DeviationKind::UndeclaredObject,
                 Generation::Standard10,
                 Some("§5.4"),
             ),

@@ -798,14 +798,49 @@ fn the_report_shows_graph_relationships_not_bare_arns() {
     let assert = aff4tools().args(["info", &path]).assert().success();
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
 
-    // The volume's own manifest is reported.
-    assert!(out.contains("contains"), "no manifest shown:\n{out}");
-
     // Objects are no longer ordered by ARN: the disk image precedes the
     // image stream that backs it, though its UUID sorts later.
     let image = out.find("cf853d0b").expect("disk image");
     let stream = out.find("c215ba20").expect("image stream");
     assert!(image < stream, "graph order, not ARN order:\n{out}");
+}
+
+/// `aff4:contains` is shown on the volume when the writer states it, and
+/// nothing is printed about it when the writer does not.
+///
+/// No specification defines the predicate, so its absence is unremarkable and
+/// must not produce output of any kind — not a count, not a reconciliation,
+/// and not a sentence saying it is missing.
+#[cfg(feature = "corpus")]
+#[test]
+fn the_volume_line_reports_aff4_contains_only_when_it_is_stated() {
+    let stated = corpus_path("pyaff4/test_images/AFF4Std/Base-Linear.aff4");
+    let assert = aff4tools()
+        .args(["info", "--objects", "all", &stated])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        out.contains("declares 7 objects (aff4:contains)"),
+        "the stated enumeration belongs on the volume line:\n{out}"
+    );
+
+    // dream.aff4 describes no ZipVolume at all, so nothing states the
+    // predicate anywhere in the container.
+    let absent = corpus_path("pyaff4/test_images/AFF4-L/dream.aff4");
+    let assert = aff4tools()
+        .args(["info", "--objects", "all", &absent])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        !out.contains("contains"),
+        "an unstated aff4:contains must produce no output:\n{out}"
+    );
+    assert!(
+        !out.to_lowercase().contains("manifest"),
+        "nothing should be described as a manifest:\n{out}"
+    );
 }
 
 /// A stripe is the hard case: an external stream with no size and no hash,

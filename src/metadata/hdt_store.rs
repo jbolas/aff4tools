@@ -42,7 +42,7 @@ pub struct HdtStore {
     /// Subjects in first-appearance order.
     ///
     /// HDT's dictionary is sorted, but the report's tier-3 fallback presents
-    /// objects in turtle order when no `aff4:contains` manifest exists. Storing
+    /// objects in turtle order when no `aff4:contains` is stated. Storing
     /// the order separately is what keeps `info` output identical between
     /// backends; it costs one `String` per subject, which is negligible beside
     /// the statements themselves.

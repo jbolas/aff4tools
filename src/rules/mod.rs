@@ -142,30 +142,49 @@ impl Requirement {
 
 /// What aff4tools can currently do about a rule. Changes as phases land.
 ///
-/// The distinction between the last two matters to a reader:
-/// [`Self::NotImplemented`] is work this project has not done, while
-/// [`Self::NotCheckable`] is a question the standard has not answered.
+/// The distinction between [`Self::NotImplemented`] and [`Self::NotCheckable`]
+/// matters to a reader: the first is work this project has not done, while the
+/// second is a question the standard has not answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleState {
-    /// A checker exists and runs.
+    /// A violation refuses the container rather than producing a deviation.
+    ///
+    /// The check runs, but outside the conformance pass: a failure is
+    /// `Error::Malformed` (exit 5) or `Error::Unsupported` (exit 6), and the
+    /// container never opens. v1.0a §1.1's reader obligation is the case —
+    /// `container.rs`'s `identify` refuses a missing or invalid version before
+    /// any rule is evaluated.
+    ///
+    /// Distinct from [`Self::Detected`], where the container opens and a
+    /// departure becomes a deviation in the report. An `Enforced` rule is not a
+    /// coverage gap: the check exists.
+    Enforced,
+    /// A checker exists and runs during the conformance pass.
     Detected,
+    /// Satisfied by construction, so there is nothing for a checker to find.
+    ///
+    /// Two ways a rule reaches this state:
+    ///
+    /// - **The rule binds aff4tools, not the container.** A reader- or
+    ///   writer-side obligation is satisfied by how this build behaves —
+    ///   AFF4-L v1.0-ALPHA §4.1's leave to accept either namespace is one.
+    /// - **It is a permission, and nothing can violate it.** A `MAY` is met by
+    ///   taking it or leaving it.
+    ///
+    /// Reporting such a rule as an unevaluated gap would misstate the
+    /// position: the rule is met, and no container could show otherwise.
+    ///
+    /// Distinct from [`Self::Detected`], which is a claim about the container
+    /// ("checked, and here is the result"); `Honored` is a claim about
+    /// aff4tools ("this holds without checking"). Distinct too from
+    /// [`Self::NotCheckable`], which is a question the standard has not
+    /// answered.
+    Honored,
     /// Declared, but no checker exists yet.
     NotImplemented,
     /// No checker can exist yet, because the requirement itself is unsettled.
     NotCheckable,
-    /// Honored by this build, but not a property of any container.
-    ///
-    /// A permission granted to a *reader* is satisfied by how aff4tools
-    /// behaves, not by anything a container carries — AFF4-L v1.0-ALPHA §4.1's
-    /// leave to accept either namespace is the example. Reporting such a rule
-    /// as an unevaluated gap would misstate the position: the rule is met, and
-    /// no container could show otherwise.
-    ///
-    /// Distinct from [`Self::Detected`], which raises a deviation when a
-    /// container departs, and from [`Self::NotCheckable`], which is a question
-    /// the standard has not answered.
-    Honored,
 }
 
 impl RuleState {
@@ -173,11 +192,71 @@ impl RuleState {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Enforced => "enforced",
             Self::Detected => "detected",
+            Self::Honored => "honored",
             Self::NotImplemented => "not implemented",
             Self::NotCheckable => "not checkable",
-            Self::Honored => "honored",
         }
+    }
+}
+
+/// What a rule binds: the content of a container, or the behavior of a reader
+/// or a writer.
+///
+/// This is a separate axis from [`RuleState`]. `Governs` says *whose* obligation
+/// the rule is; `RuleState` says what aff4tools does about it. Only a container
+/// rule can be [`RuleState::Detected`], because only a container carries a
+/// departure a conformance pass could observe; reader and writer rules bind
+/// aff4tools' own behavior, so they are `Enforced`, `Honored`, or
+/// `NotImplemented`, never `Detected`.
+///
+/// A rule may govern more than one actor, but only when its state is the same
+/// for each. Where a clause binds a writer and a reader with different states
+/// or requirement levels, it becomes separate rules — as AFF4-L v1.0-ALPHA §4.4
+/// and AFF4-L v1.0-ALPHA §6.3.1 do.
+///
+/// A [`RuleState::NotCheckable`] rule carries no governed actor: the question
+/// the standard leaves open includes whom it binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Governs {
+    /// The content of a container.
+    Container,
+    /// The behavior of a reader.
+    Reader,
+    /// The behavior of a writer.
+    Writer,
+    /// Both a reader and a writer, at the same state and requirement level.
+    ReaderWriter,
+    /// No actor, for a [`RuleState::NotCheckable`] rule.
+    Unsettled,
+}
+
+impl Governs {
+    /// Rendered for the generated catalog, matching the proposal's spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Reader => "reader",
+            Self::Writer => "writer",
+            Self::ReaderWriter => "reader, writer",
+            Self::Unsettled => "-",
+        }
+    }
+
+    /// Whether this governance includes a reader.
+    #[must_use]
+    pub fn includes_reader(self) -> bool {
+        matches!(self, Self::Reader | Self::ReaderWriter)
+    }
+
+    /// Whether this governance names a reader or a writer, as opposed to the
+    /// container or nothing.
+    #[must_use]
+    pub fn is_behavioral(self) -> bool {
+        matches!(self, Self::Reader | Self::Writer | Self::ReaderWriter)
     }
 }
 
@@ -194,6 +273,8 @@ pub struct RuleInfo {
     pub requirement: Requirement,
     /// What aff4tools can currently do about it.
     pub state: RuleState,
+    /// Whose obligation the rule is: the container, a reader, or a writer.
+    pub governs: Governs,
     /// A one-line statement of the requirement, in this project's own words.
     ///
     /// Written rather than quoted: transcribing the document would redistribute
@@ -224,6 +305,7 @@ macro_rules! declare_rule {
         id: ($document:expr, $clause:literal, $ordinal:literal),
         requirement: $requirement:ident,
         state: $state:ident,
+        governs: $governs:ident,
         statement: $statement:literal,
         kind: $kind:expr,
         routine: $routine:literal,
@@ -232,6 +314,7 @@ macro_rules! declare_rule {
             id: $crate::rules::RuleId::new($document, $clause, $ordinal),
             requirement: $crate::rules::Requirement::$requirement,
             state: $crate::rules::RuleState::$state,
+            governs: $crate::rules::Governs::$governs,
             statement: $statement,
             kind: $kind,
             routine: $routine,
@@ -366,12 +449,24 @@ mod tests {
         assert_eq!(id.to_string(), "AFF4_V1_0A/none/1");
     }
 
-    /// The three states mean different things to a reader and must not collapse.
+    /// The five states mean different things to a reader and must not collapse.
     #[test]
     fn rule_states_are_distinct() {
+        assert_eq!(RuleState::Enforced.as_str(), "enforced");
         assert_eq!(RuleState::Detected.as_str(), "detected");
+        assert_eq!(RuleState::Honored.as_str(), "honored");
         assert_eq!(RuleState::NotImplemented.as_str(), "not implemented");
         assert_eq!(RuleState::NotCheckable.as_str(), "not checkable");
+    }
+
+    /// The governed actors render as the catalog spells them.
+    #[test]
+    fn governs_renders_each_actor() {
+        assert_eq!(Governs::Container.as_str(), "container");
+        assert_eq!(Governs::Reader.as_str(), "reader");
+        assert_eq!(Governs::Writer.as_str(), "writer");
+        assert_eq!(Governs::ReaderWriter.as_str(), "reader, writer");
+        assert_eq!(Governs::Unsettled.as_str(), "-");
     }
 
     #[test]
@@ -387,6 +482,7 @@ mod tests {
             id: (Document::Aff4Standard10a, "§5.4", 1),
             requirement: Must,
             state: Detected,
+            governs: Container,
             statement: "The ZIP comment carries the volume ARN starting at offset 0.",
             kind: Some(crate::error::DeviationKind::NulPaddedComment),
             routine: true,
@@ -395,6 +491,7 @@ mod tests {
         assert_eq!(SAMPLE.id.to_string(), "AFF4_V1_0A/5.4/1");
         assert_eq!(SAMPLE.requirement, Requirement::Must);
         assert_eq!(SAMPLE.state, RuleState::Detected);
+        assert_eq!(SAMPLE.governs, Governs::Container);
         assert!(SAMPLE.statement.ends_with('.'), "statements are sentences");
         const { assert!(SAMPLE.routine) };
     }
@@ -425,7 +522,6 @@ mod tests {
             K::ExternalReference,
             K::ConflictingStreamValue,
             K::DanglingReference,
-            K::UndeclaredObject,
         ];
 
         for kind in all_kinds {
@@ -439,6 +535,121 @@ mod tests {
                 "{kind:?} must have exactly one rule, found {}",
                 matches.len()
             );
+        }
+    }
+
+    /// A `Detected` rule states a claim about container content — it must
+    /// govern exactly the container, because only a container carries a
+    /// departure a conformance pass could observe. This is the invariant that
+    /// forces "which clause requires this of a container?" for every checker.
+    #[test]
+    fn detected_rules_govern_the_container() {
+        for rule in all_rules() {
+            if rule.state == RuleState::Detected {
+                assert_eq!(
+                    rule.governs,
+                    Governs::Container,
+                    "{} is Detected but does not govern the container",
+                    rule.id
+                );
+            }
+        }
+    }
+
+    /// An `Enforced` rule refuses the container, which is reader behavior, so
+    /// its governance must include the reader.
+    #[test]
+    fn enforced_rules_govern_a_reader() {
+        for rule in all_rules() {
+            if rule.state == RuleState::Enforced {
+                assert!(
+                    rule.governs.includes_reader(),
+                    "{} is Enforced but does not govern a reader",
+                    rule.id
+                );
+            }
+        }
+    }
+
+    /// A rule that binds a reader or a writer describes aff4tools' behavior, not
+    /// a container's content, so it can carry no deviation kind — a
+    /// `DeviationKind` is a departure a container makes.
+    #[test]
+    fn behavioral_rules_raise_no_deviation() {
+        for rule in all_rules() {
+            if rule.governs.is_behavioral() {
+                assert!(
+                    rule.kind.is_none(),
+                    "{} governs a reader or writer but names a deviation kind",
+                    rule.id
+                );
+            }
+        }
+    }
+
+    /// A `NotCheckable` rule leaves open what a container must do, which
+    /// includes whom the requirement binds, so it names no governed actor. Every
+    /// other state does name one.
+    #[test]
+    fn only_not_checkable_rules_are_unsettled() {
+        for rule in all_rules() {
+            let unsettled = rule.governs == Governs::Unsettled;
+            let not_checkable = rule.state == RuleState::NotCheckable;
+            assert_eq!(
+                unsettled, not_checkable,
+                "{} pairs governs={:?} with state={:?}; `-` is for not-checkable rules alone",
+                rule.id, rule.governs, rule.state
+            );
+        }
+    }
+
+    /// Rules are declared in the order the document reads: a section's own
+    /// rules first, then its subsections in numerical order. This is the order
+    /// the generated catalog and the `info`/`conformance` reports present, so a
+    /// rule slipped in out of place would read wrongly to an examiner.
+    ///
+    /// The `none/*` sentinel rules are excluded — they legislate nothing and
+    /// are appended after the document's real rules by design.
+    #[test]
+    fn rules_are_declared_in_reading_order() {
+        // A clause's sort key: its dotted section parts, then the ordinal.
+        // Section 6 sorts before 6.1; 6.1 before 6.2; each before 6.3.1. A
+        // shorter prefix sorts first, which is exactly "the section's own rules
+        // before its subsections".
+        //
+        // A part may carry a trailing letter — clause 9a exists in one standard,
+        // sorting after 9 and before 10. Each part is therefore split into its
+        // leading number and any letter suffix, so 9 < 9a < 10 all hold.
+        fn part_key(part: &str) -> (u32, &str) {
+            let split = part
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(part.len());
+            let (digits, suffix) = part.split_at(split);
+            // Every real clause part begins with a digit; a `0` for a malformed
+            // one would sort it first and trip the ordering assertion loudly,
+            // which is the behavior a test wants over a panic in a closure.
+            (digits.parse::<u32>().unwrap_or(0), suffix)
+        }
+
+        fn key(rule: &RuleInfo) -> (Vec<(u32, &'static str)>, u16) {
+            let parts = rule.id.clause_number().split('.').map(part_key).collect();
+            (parts, rule.id.ordinal)
+        }
+
+        for document in Document::ALL {
+            let keys: Vec<_> = all_rules()
+                .iter()
+                .filter(|r| r.id.document == document && r.id.clause != "none")
+                .map(key)
+                .collect();
+            for window in keys.windows(2) {
+                assert!(
+                    window[0] <= window[1],
+                    "{document:?} rules are out of reading order: {:?} precedes {:?}",
+                    window[0],
+                    window[1]
+                );
+            }
         }
     }
 
@@ -498,7 +709,7 @@ mod tests {
             .collect();
         assert_eq!(
             alpha.len(),
-            50,
+            51,
             "every normative statement in the standard needs a declaration; {} are declared",
             alpha.len()
         );
@@ -568,12 +779,12 @@ mod tests {
                 "AFF4L_V1_ALPHA/5/3",
                 "AFF4L_V1_ALPHA/5/4",
                 "AFF4L_V1_ALPHA/5/5",
+                "AFF4L_V1_ALPHA/6/3",
+                "AFF4L_V1_ALPHA/6/4",
                 "AFF4L_V1_ALPHA/6.1/1",
                 "AFF4L_V1_ALPHA/6.1/2",
                 "AFF4L_V1_ALPHA/6.1/3",
                 "AFF4L_V1_ALPHA/6.2/1",
-                "AFF4L_V1_ALPHA/6/3",
-                "AFF4L_V1_ALPHA/6/4",
                 "AFF4L_V1_ALPHA/8/1",
                 "AFF4L_V1_ALPHA/10.1/1",
                 "AFF4L_V1_ALPHA/10.1/2",

@@ -54,9 +54,9 @@ pub trait MetadataStore {
     ///
     /// Order is part of the contract, not an implementation detail: the
     /// report's tier-3 fallback presents objects in turtle order when a
-    /// container declares no `aff4:contains` manifest, so a backend that
-    /// returned subjects in dictionary order would silently reorder the output
-    /// of `info` on every pre-standard container.
+    /// container states no `aff4:contains`, so a backend that returned
+    /// subjects in dictionary order would silently reorder the output of
+    /// `info` on every AFF4-L container.
     fn subjects(&self) -> Vec<String>;
 
     /// Every statement about `subject`, in the order the container states them.

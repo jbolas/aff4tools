@@ -5514,9 +5514,13 @@ struct ConformanceCoverage {
     requirement: aff4tools::rules::Requirement,
     /// Why it went unchecked, as [`RuleState`] serializes it:
     /// `not_implemented` is work this project has not done, `not_checkable` a
-    /// question the standard has not answered. Never `detected`, since a rule
-    /// with a checker is not a coverage gap.
+    /// question the standard has not answered. Never `detected`, `enforced` or
+    /// `honored`, since none of those is a coverage gap.
     state: aff4tools::rules::RuleState,
+    /// Whose obligation the rule is, as [`Governs`] serializes it: `container`,
+    /// `reader`, `writer`, `reader_writer`, or `unsettled` for a
+    /// `not_checkable` rule.
+    governs: aff4tools::rules::Governs,
     /// What the rule requires, in this project's own words.
     statement: &'static str,
 }
@@ -5527,6 +5531,7 @@ impl ConformanceCoverage {
             rule: rule.id.to_string(),
             requirement: rule.requirement,
             state: rule.state,
+            governs: rule.governs,
             statement: rule.statement,
         }
     }
