@@ -98,6 +98,9 @@ pub struct ObjectCounts {
     pub files: usize,
     /// `aff4:FolderImage` objects.
     pub folders: usize,
+    /// `aff4l:FileExtendedAttribute` and alternate-data-stream objects.
+    /// aka xattrs or extended attributes. (AFF4-L v1.0-ALPHA §4.2).
+    pub file_substreams: usize,
     /// Objects the `Bitstream` section could show: an image-like role or an
     /// `ImageStream`, carrying a `hash` or `blockMapHash`.
     ///
@@ -165,6 +168,7 @@ impl ObjectCounts {
             ObjectRole::ImageStream => self.image_streams += 1,
             ObjectRole::FileImage => self.files += 1,
             ObjectRole::FolderImage => self.folders += 1,
+            ObjectRole::FileSubStream => self.file_substreams += 1,
             _ => {}
         }
     }

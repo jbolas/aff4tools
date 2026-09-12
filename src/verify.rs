@@ -539,6 +539,13 @@ pub struct WorkEstimate {
     /// How many bevies those bytes span.
     pub bevies: u64,
     /// The codecs involved, for a caller that wants to name them.
+    ///
+    /// Still collected, deliberately, though the CLI no longer prints it in
+    /// the pre-run scope line: a container mixes storage forms, so one list of
+    /// chunk codecs described part of the work as though it covered all of it.
+    /// It remains in the serialized estimate for a caller that has a use for
+    /// the set — a chunk codec is a real property of the bevy-backed streams,
+    /// just not a summary of the whole read.
     pub codecs: Vec<String>,
     /// Whether per-chunk block hashes were requested, which adds two digests
     /// per chunk over the same data.

@@ -188,7 +188,7 @@ fn the_report_says_verification_read_the_container_not_the_source() {
         .find("Verifying:")
         .expect("the verify pass must be announced:\n{report}");
     let verdict = report
-        .find("Verify:")
+        .find("Verification results:")
         .expect("the verify result must be reported");
     assert!(
         announced < verdict,
@@ -257,7 +257,7 @@ fn every_acquisition_mode_verifies_by_default_and_honors_no_verify() {
         )
         .to_string();
         assert!(
-            report.contains("Verifying:") && report.contains("Verify:"),
+            report.contains("Verifying:") && report.contains("Verification results:"),
             "{flag} must verify by default; writing unverified evidence is the \
              failure this tool exists to prevent:\n{report}"
         );
@@ -280,7 +280,7 @@ fn every_acquisition_mode_verifies_by_default_and_honors_no_verify() {
         )
         .to_string();
         assert!(
-            !report.contains("Verifying:") && !report.contains("Verify:"),
+            !report.contains("Verifying:") && !report.contains("Verification results:"),
             "{flag} must honor --no-verify; reporting a verdict for a check the \
              operator declined would be a false claim:\n{report}"
         );
@@ -327,7 +327,7 @@ fn no_verify_skips_the_container_re_read_and_states_the_scope() {
     // The check must genuinely not run: reporting a verdict here would claim
     // a proof that was never computed.
     assert!(
-        !report.contains("Verifying:") && !report.contains("Verify:"),
+        !report.contains("Verifying:") && !report.contains("Verification results:"),
         "--no-verify must skip the verify pass entirely:\n{report}"
     );
 
@@ -625,7 +625,7 @@ fn an_image_acquisition_writes_a_log_beside_the_container() {
         "the log must carry a header identifying the run:\n{body}"
     );
     assert!(
-        body.contains("Verify:"),
+        body.contains("Verification results:"),
         "the log must record the verification verdict, not just the preamble:\n{body}"
     );
 }
@@ -1212,7 +1212,10 @@ mod corpus {
             "Content Type:",
             "AFF4 Version:",
             "Tool:",
-            "Zip segments:",
+            // Was "Zip segments:". That label named a count of ZIP members
+            // here and a count of *files* in the storage breakdown, so the
+            // member count took the unambiguous name.
+            "ZIP members:",
         ] {
             assert_eq!(
                 value_column(prefix),
@@ -2551,6 +2554,126 @@ fn no_corpus_container_triggers_the_listing_degrade() {
 /// Built by acquiring a directory of 2,100 small files — just over
 /// `LARGE_LISTING_THRESHOLD` — rather than with a corpus fixture, because no
 /// reference container is large enough to reach the branch. Without this the
+/// `info`'s storage accounting names where each file's bytes went, and its
+/// parts sum to the total above them.
+///
+/// The figures were previously split between two commands: `verify` printed
+/// the breakdown and `info` printed only the ZIP member count, which is a
+/// packing figure. `info` is the command for describing a container, so it
+/// showed the less informative of the two.
+#[test]
+fn info_reports_where_file_bytes_are_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("sub")).unwrap();
+    for i in 0..4 {
+        std::fs::write(tree.join(format!("f{i}.txt")), b"content\n").unwrap();
+    }
+    std::fs::write(tree.join("sub").join("nested.txt"), b"x\n").unwrap();
+
+    let container = dir.path().join("out.aff4");
+    aff4tools()
+        .args(["acquire", "--logical"])
+        .arg(&tree)
+        .arg("--output")
+        .arg(&container)
+        .assert()
+        .success();
+
+    let out = aff4tools()
+        .args(["info"])
+        .arg(&container)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out).to_string();
+
+    assert!(
+        text.contains("Total files:"),
+        "the file total must lead the storage block:\n{text}"
+    );
+    assert!(
+        text.contains("Stored as Zip segments:"),
+        "each form must say where the bytes went, not just name itself:\n{text}"
+    );
+    assert!(
+        text.contains("ZIP members:") && text.contains("total # of segments in this ZIP"),
+        "the packing figure must be labeled as packing:\n{text}"
+    );
+    // The old label meant two different things in two commands: a count of
+    // files in one, a count of archive members in the other.
+    assert!(
+        !text.lines().any(|l| l.starts_with("Zip segments:")),
+        "the bare label is ambiguous and must not reappear as its own line:\n{text}"
+    );
+}
+
+/// The `info` file excerpt names files by their recorded path, not by ARN.
+///
+/// Under AFF4-L v1.0-ALPHA §1.1 an object is named by a GUID with its path in
+/// properties, so an excerpt printing ARNs showed three opaque identifiers and
+/// told an examiner nothing about which files they were.
+#[test]
+fn info_excerpt_names_files_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    // Past `LARGE_LISTING_THRESHOLD` (2,000 described objects), where the
+    // per-object listing is suppressed and the excerpt is what the reader
+    // gets. Below it `info` prints every object in full, which needs no
+    // sample — so the excerpt only exists on containers of this size.
+    for i in 0..2_100 {
+        std::fs::write(tree.join(format!("f{i:05}.txt")), b"content\n").unwrap();
+    }
+    // A named file to look for, and an empty one: an empty file's digest is
+    // the hash of no bytes, which reads as a defect unless the entry says so.
+    std::fs::write(tree.join("aaa-named-file.txt"), b"content\n").unwrap();
+    std::fs::write(tree.join("aab-empty-file.txt"), b"").unwrap();
+
+    // A v2.1 logical acquisition appends `.aff4l` to the name it is given, so
+    // the container read back is not the path passed to `--output`.
+    let requested = dir.path().join("out");
+    let container = dir.path().join("out.aff4l");
+    aff4tools()
+        .args(["acquire", "--logical"])
+        .arg(&tree)
+        .arg("--aff4l-v1.0")
+        .arg("--output")
+        .arg(&requested)
+        .assert()
+        .success();
+
+    let out = aff4tools()
+        .args(["info"])
+        .arg(&container)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out).to_string();
+
+    assert!(
+        text.contains("named-file.txt"),
+        "the excerpt must name files by their recorded path:\n{text}"
+    );
+    assert!(
+        text.contains("Sample of"),
+        "the excerpt must say it is a sample and of what:\n{text}"
+    );
+    assert!(
+        !text.contains("\nBitstream"),
+        "the AFF4-L heading is meaningless when every file has one:\n{text}"
+    );
+    // Reading metadata is not verification, and every digest line says so.
+    assert!(
+        text.contains("[acquisition hash]"),
+        "an info excerpt must never read as a verification result:\n{text}"
+    );
+}
+
 /// degrade path is only ever exercised by hand.
 #[test]
 fn a_large_container_degrades_to_the_brief_listing() {
@@ -2572,13 +2695,20 @@ fn a_large_container_degrades_to_the_brief_listing() {
         .assert()
         .success();
 
-    // Degraded: the notice appears and no per-object property block does.
+    // Degraded: the pointer to `--full-listing` appears and no per-object
+    // property block does.
+    //
+    // The notice no longer states an object count. That figure counted every
+    // described subject — extended attributes and block-hash objects included
+    // — so printed beneath the file and folder totals it read as a third,
+    // larger count of the evidence. The pointer to the flag is what the
+    // reader needs; the number was the part that misled.
     aff4tools()
         .args(["info"])
         .arg(&container)
         .assert()
         .success()
-        .stdout(predicate::str::contains("per-object listing is not shown"))
+        .stdout(predicate::str::contains("write a full list to file"))
         .stdout(predicate::str::contains("--full-listing"));
 
     // ...and asking for the file gets the full listing, which is far longer.
@@ -3340,10 +3470,10 @@ fn read_volume_arn(path: &std::path::Path) -> String {
 ///
 /// `birthTime`, `lastWritten`, `lastAccessed`, and `recordChanged` are read
 /// from the filesystem at acquisition time, wall-clock samples rather than
-/// content. Two separate acquisitions of the same tree — with or without
-/// `--scan-first` — are entitled to disagree on them by a second or two,
+/// content. Two separate acquisitions of the same tree — with or without the
+/// initial scan — are entitled to disagree on them by a second or two,
 /// since each is a fresh `stat` taken at a different moment (and the extra
-/// pass `--scan-first` makes over the tree can itself nudge `atime`). None of
+/// pass the scan makes over the tree can itself nudge `atime`). None of
 /// that bears on whether the two runs wrote the same ARNs, triples, child
 /// edges, and order, which is the property under test.
 fn mask_datetimes(turtle: &str) -> String {
@@ -3382,11 +3512,15 @@ fn read_normalized_turtle(path: &std::path::Path) -> String {
     mask_datetimes(&buf.replace(&volume_arn, "aff4://VOLUME"))
 }
 
-/// `--scan-first` produces the same container as the default path: same ARNs,
-/// same triples, same child edges, same order. Only *when* discovery happens
-/// changes, never *what* is written.
+/// `--no-initial-scan` produces the same container as the default scanned
+/// path: same ARNs, same triples, same child edges, same order. Only *when*
+/// discovery happens changes, never *what* is written.
+///
+/// The comparison runs in this direction deliberately. The scan is the default
+/// now, so the container an examiner gets by typing nothing is the reference,
+/// and the flag must be shown not to alter it.
 #[test]
-fn scan_first_produces_the_same_container() {
+fn skipping_the_initial_scan_produces_the_same_container() {
     let dir = tempfile::tempdir().unwrap();
     let tree = dir.path().join("tree");
     std::fs::create_dir_all(tree.join("sub")).unwrap();
@@ -3403,19 +3537,19 @@ fn scan_first_produces_the_same_container() {
         .assert()
         .success();
 
-    let scanned_out = dir.path().join("scanned.aff4");
+    let unscanned_out = dir.path().join("unscanned.aff4");
     aff4tools()
         .arg("acquire")
         .arg("--logical")
         .arg(&tree)
-        .arg("--scan-first")
+        .arg("--no-initial-scan")
         .arg("--output")
-        .arg(&scanned_out)
+        .arg(&unscanned_out)
         .assert()
         .success();
 
     // Both verify clean, which is the property that matters most.
-    for container in [&default_out, &scanned_out] {
+    for container in [&default_out, &unscanned_out] {
         aff4tools().arg("verify").arg(container).assert().success();
     }
 
@@ -3423,16 +3557,16 @@ fn scan_first_produces_the_same_container() {
     // volume ARN is normalized away: same subjects, same triples, same
     // ordering.
     let default_turtle = read_normalized_turtle(&default_out);
-    let scanned_turtle = read_normalized_turtle(&scanned_out);
+    let unscanned_turtle = read_normalized_turtle(&unscanned_out);
     assert_eq!(
-        default_turtle, scanned_turtle,
-        "--scan-first must change only when discovery happens, not what is written"
+        default_turtle, unscanned_turtle,
+        "--no-initial-scan must change only when discovery happens, not what is written"
     );
 }
 
-/// `--scan-first` is rejected outside `--logical`.
+/// `--no-initial-scan` is rejected outside `--logical`.
 #[test]
-fn scan_first_requires_logical() {
+fn no_initial_scan_requires_logical() {
     let dir = tempfile::tempdir().unwrap();
     let raw = dir.path().join("source.dd");
     std::fs::write(&raw, vec![0u8; 1024]).unwrap();
@@ -3441,15 +3575,15 @@ fn scan_first_requires_logical() {
         .arg("acquire")
         .arg("--image")
         .arg(&raw)
-        .arg("--scan-first")
+        .arg("--no-initial-scan")
         .arg("--output")
         .arg(dir.path().join("out.aff4"))
         .assert()
         .failure();
 }
 
-/// `--scan-first`'s "Scanned:" line reports a fact — a file count — never an
-/// estimated total. The scanner's cost figure (`cost_of` in
+/// The default scan's "Scanned:" line reports a fact — a file count — never
+/// an estimated total. The scanner's cost figure (`cost_of` in
 /// `src/write/scan.rs`) adds a synthetic per-file overhead for progress
 /// display and is not a byte count; rendering it as one would put an
 /// estimated total in the acquisition log, which the plan forbids.
@@ -3458,7 +3592,7 @@ fn scan_first_requires_logical() {
 /// synthetic cost is provably wrong here, since the true acquired total is
 /// zero.
 #[test]
-fn scan_first_log_reports_no_estimated_total() {
+fn initial_scan_log_reports_no_estimated_total() {
     let dir = tempfile::tempdir().unwrap();
     let tree = dir.path().join("tree");
     std::fs::create_dir_all(&tree).unwrap();
@@ -3471,7 +3605,6 @@ fn scan_first_log_reports_no_estimated_total() {
         .arg("acquire")
         .arg("--logical")
         .arg(&tree)
-        .arg("--scan-first")
         .arg("--output")
         .arg(&out)
         .assert()
@@ -3748,7 +3881,7 @@ fn logical_only_flags_are_refused_with_image() {
     let img = dir.path().join("src.dd");
     std::fs::write(&img, vec![0u8; 1024]).unwrap();
 
-    for flag in ["--deduplicate", "--scan-first"] {
+    for flag in ["--deduplicate", "--no-initial-scan"] {
         let out = dir.path().join(format!("e{}.aff4", flag.len()));
         let assert = aff4tools()
             .args(["acquire", "--image"])

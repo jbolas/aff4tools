@@ -996,7 +996,7 @@ fn a_skipped_path_gets_no_child_edge() {
 /// the metadata walk predicted.
 ///
 /// The walk's figure is an estimate by the time the bytes are read — under
-/// `--scan-first` the whole tree is inventoried before the container exists,
+/// the default initial scan the whole tree is inventoried before the container exists,
 /// so on a live system a log file can grow in between. The digests and the
 /// stored segment come from the read, so a predicted size would contradict
 /// them, with nothing in the container saying which to believe.

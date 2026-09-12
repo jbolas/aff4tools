@@ -226,21 +226,28 @@ enum Command {
         // `logical`, `images`, and `device` mutually conflict, and clap treats
         // a `requires` on one member of a conflict set as satisfied once any
         // conflicting member is present — so `requires = "logical"` alone
-        // silently admits `--scan-first --image PATH` with no `--logical` at
+        // silently admits `--no-initial-scan --image PATH` with no `--logical` at
         // all. Naming the conflict directly is what actually rejects it.
         /// Filepath to acquisition log. `--logical` only. Defaults to `<output>_log.txt` beside the container.
         #[arg(long, value_name = "PATH", requires = "logical", conflicts_with_all = ["images", "device"])]
         log: Option<PathBuf>,
 
-        /// Inventory the tree before acquiring, for an exact progress total.
+        /// Skip the inventory pass that precedes a logical acquisition.
         /// `--logical` only.
         ///
-        /// Costs a full metadata traversal before the first byte is written,
-        /// in exchange for a true percentage and time remaining from the
-        /// start. Without it, acquisition begins at once and the total firms
-        /// up while it runs.
+        /// The scan is on by default: it walks the tree's metadata before the
+        /// first byte is written, which buys a true file count, a real
+        /// percentage, and a time remaining from the very first paint. Without
+        /// it, acquisition starts at once and progress can only report what it
+        /// has done so far, with no denominator — the display says
+        /// "scanning..." for the whole run.
+        ///
+        /// Worth turning off when the traversal itself is the expensive part:
+        /// a tree of many millions of files, or one on high-latency storage,
+        /// where an examiner would rather see bytes moving immediately than
+        /// wait for an exact total.
         #[arg(long, requires = "logical", conflicts_with_all = ["images", "device"])]
-        scan_first: bool,
+        no_initial_scan: bool,
 
         /// Deduplicate logical file content (AFF4-L 2019 §4). `--logical` only.
         /// Experimental only!
@@ -661,7 +668,7 @@ fn run() -> ExitCode {
             deduplicate,
             block_hashes,
             log,
-            scan_first,
+            no_initial_scan,
             aff4l_legacy,
             aff4l_v1_0,
             hash,
@@ -724,7 +731,10 @@ fn run() -> ExitCode {
                     deduplicate,
                     block_hashes,
                     multi_part_after: multi_part.map(PartSize::bytes),
-                    scan_first,
+                    // Inverted here, at the one boundary where the flag's
+                    // negative spelling belongs. Inside the code the option
+                    // says what will happen rather than what will not.
+                    scan_first: !no_initial_scan,
                     // Clap enforces the exclusion, so the two flags cannot both be
                     // set. `--aff4l-legacy` is named for symmetry and to let a
                     // script pin today's format across the change of default; it
@@ -1804,21 +1814,18 @@ fn describe_part_layout(container: &mut Container, summary: &ContainerSummary) -
 /// Scope, not duration: which bytes will be read, which digests will be
 /// recomputed, and how the host will be used.
 fn describe_estimate(estimate: &WorkEstimate, logical: bool) -> String {
-    let codecs = if estimate.codecs.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", estimate.codecs.join(", "))
-    };
-
+    // No codec is named here. A container uses several storage forms at once —
+    // a logical acquisition puts most of its bytes in ZIP segments, which a
+    // chunk codec like `lz4` never touches — so one codec name in this line
+    // described part of the work as though it described all of it. The forms
+    // and their codecs are reported per object further down, where each name
+    // sits beside the stream it actually applies to.
+    //
     // The total spans every storage form the container uses, not only the
-    // bevy-backed ones — on a logical container most of it is ZIP segments.
-    // The bevy count is stated as a property of the streams rather than of the
-    // total, because "9.1 GiB across 126 bevies" read as though 126 bevies held
-    // all of it when they held about a third.
-    let mut out = format!(
-        "Reading {} of content{codecs}",
-        human_bytes(estimate.bytes_to_read),
-    );
+    // bevy-backed ones. The bevy count is stated as a property of the streams
+    // rather than of the total, because "9.1 GiB across 126 bevies" read as
+    // though 126 bevies held all of it when they held about a third.
+    let mut out = format!("Reading {} of content", human_bytes(estimate.bytes_to_read),);
     if estimate.bytes_on_disk > 0 && estimate.bytes_on_disk != estimate.bytes_to_read {
         out.push_str(&format!(
             ", stored in {} on disk",
@@ -3140,15 +3147,15 @@ fn run_info(
                         let _ = report::write_text(&mut out, &summary, filter, brief || degraded);
                         if degraded {
                             let _ = writeln!(out);
+                            // No object count. The figure counted every
+                            // described subject — extended attributes and
+                            // block-hash objects included — so beside the file
+                            // and folder totals above it read as a third,
+                            // larger count of the evidence rather than of the
+                            // metadata rows a listing would hold.
                             let _ = writeln!(
                                 out,
-                                "This container describes {} objects, so the \
-                                 per-object listing is not shown here.",
-                                summary.counts.total
-                            );
-                            let _ = writeln!(
-                                out,
-                                "Run with --full-listing <PATH> to write it to a file."
+                                "Run with --full-listing <PATH> to write a full list to file."
                             );
                         }
                         if let Some(path) = full_listing {
@@ -3263,6 +3270,10 @@ struct AcquireOptions {
     multi_part_after: Option<u64>,
     /// Whether a logical acquisition inventories the tree to completion before
     /// acquiring, so the progress total is exact from the start.
+    ///
+    /// On unless `--no-initial-scan` was given. Held positively even though
+    /// the flag is negative: every reader of this struct asks whether the scan
+    /// runs, not whether it was suppressed.
     scan_first: bool,
     /// Which AFF4-L format a logical acquisition writes.
     logical_profile: aff4tools::write::logical::LogicalProfile,
@@ -3533,6 +3544,8 @@ names for this format; writing {}",
         chunk_size,
         chunks_per_bevy
     );
+    // Resolved, not the flag text: see `describe_algorithms`.
+    let _ = writeln!(out, "Hashes:      {}", describe_algorithms(algorithms));
     let _ = writeln!(out);
 
     let locus = aff4tools::Locus::new(output);
@@ -3658,30 +3671,16 @@ names for this format; writing {}",
 
     // Check 1: recompute from the container we just wrote.
     let _ = writeln!(out);
-    let mut worst = verify_after_acquire(out, output, written.size, verify_written_container);
+    let (mut worst, summarized) = verify_after_acquire(
+        out,
+        std::slice::from_ref(&output.to_path_buf()),
+        written.size,
+        verify_written_container,
+    );
 
-    // Check 2: conformance.
-    match summarize(std::slice::from_ref(&output.to_path_buf())) {
-        Ok(summary) => {
-            if summary.deviations.is_empty() {
-                // Named from the container's own generation, not a constant:
-                // what aff4tools wrote decides which document governs it.
-                let spec = acquisition_spec(summary.generation);
-                let _ = writeln!(out, "Conformance: no deviations from {spec}");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "Conformance: {} deviation(s) — run `aff4tools conformance`",
-                    summary.deviations.len()
-                );
-                worst = worst.max(EXIT_STRICT_DEVIATION);
-            }
-        }
-        Err(e) => {
-            let _ = writeln!(out, "Conformance: could not summarize the container");
-            let _ = e;
-        }
-    }
+    // Check 2: conformance, from the summary the verification pass already
+    // built rather than a second parse of the same metadata.
+    worst = worst.max(report_conformance_after_acquire(out, output, summarized));
 
     report_missed_acceleration(out);
     stamp_completed(out);
@@ -3815,6 +3814,8 @@ fn run_acquire_from_aff4(
         chunk_size,
         chunks_per_bevy
     );
+    // Resolved, not the flag text: see `describe_algorithms`.
+    let _ = writeln!(out, "Hashes:      {}", describe_algorithms(algorithms));
     let _ = writeln!(out);
 
     let locus = aff4tools::Locus::new(output);
@@ -3923,29 +3924,15 @@ fn run_acquire_from_aff4(
     stamp_acquisition_complete(out);
 
     let _ = writeln!(out);
-    let mut worst = verify_after_acquire(out, output, written.size, verify_written_container);
+    let (mut worst, summarized) = verify_after_acquire(
+        out,
+        std::slice::from_ref(&output.to_path_buf()),
+        written.size,
+        verify_written_container,
+    );
 
-    match summarize(std::slice::from_ref(&output.to_path_buf())) {
-        Ok(summary) => {
-            if summary.deviations.is_empty() {
-                // Named from the container's own generation, not a constant:
-                // what aff4tools wrote decides which document governs it.
-                let spec = acquisition_spec(summary.generation);
-                let _ = writeln!(out, "Conformance: no deviations from {spec}");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "Conformance: {} deviation(s) — run `aff4tools conformance`",
-                    summary.deviations.len()
-                );
-                worst = worst.max(EXIT_STRICT_DEVIATION);
-            }
-        }
-        Err(e) => {
-            let _ = writeln!(out, "Conformance: could not summarize the container");
-            let _ = e;
-        }
-    }
+    // Conformance, from the summary the verification pass already built.
+    worst = worst.max(report_conformance_after_acquire(out, output, summarized));
 
     report_missed_acceleration(out);
     stamp_completed(out);
@@ -4182,14 +4169,34 @@ fn run_acquire_logical(
     }
     let _ = writeln!(out, "Output:      {}", output.display());
     let _ = writeln!(out, "Log:         {}", log_path.display());
+    // The resolved settings, not the flags. An acquisition log has to account
+    // for the evidence years later, when this build's defaults are not what a
+    // reader would assume — so what actually covered the bytes is stated
+    // outright rather than left to be inferred from the command above.
+    let _ = writeln!(
+        out,
+        "Hashes:      {}",
+        describe_algorithms(options.algorithms())
+    );
+    let _ = writeln!(
+        out,
+        "Format:      {}",
+        match logical_profile {
+            aff4tools::write::logical::LogicalProfile::V1Alpha =>
+                "AFF4-L Standard v1.0-ALPHA (version.txt 2.1)",
+            aff4tools::write::logical::LogicalProfile::Legacy =>
+                "AFF4-L 2019 paper (version.txt 1.1)",
+        }
+    );
     if deduplicate {
         let _ = writeln!(out, "Storage:     deduplicated");
     }
     let _ = writeln!(out);
 
-    // `--scan-first` inventories the tree to completion before the container
-    // is even created: an examiner who chose it wants the exact total from the
-    // very first paint, not one that firms up as writing proceeds.
+    // The default: inventory the tree to completion before the container is
+    // even created, so progress has a real denominator from the very first
+    // paint rather than one that firms up as writing proceeds. Suppressed by
+    // `--no-initial-scan`, for a tree whose traversal is itself expensive.
     let prescan = if scan_first {
         let scanner = aff4tools::write::scan::spawn(
             roots.to_vec(),
@@ -4365,34 +4372,17 @@ fn run_acquire_logical(
     // acquisition is evidence like any other, so it is verified like any
     // other.
     let _ = writeln!(out);
-    worst = worst.max(verify_after_acquire(
+    let (verify_code, summarized) = verify_after_acquire(
         out,
-        output,
+        std::slice::from_ref(&output.to_path_buf()),
         acquired.bytes,
         verify_written_container,
-    ));
+    );
+    worst = worst.max(verify_code);
 
-    // Check 2: conformance.
-    match summarize(std::slice::from_ref(&output.to_path_buf())) {
-        Ok(summary) => {
-            if summary.deviations.is_empty() {
-                // Named from the container's own generation, not a constant:
-                // what aff4tools wrote decides which document governs it.
-                let spec = acquisition_spec(summary.generation);
-                let _ = writeln!(out, "Conformance: no deviations from {spec}");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "Conformance: {} deviation(s) — run `aff4tools conformance`",
-                    summary.deviations.len()
-                );
-                worst = worst.max(EXIT_STRICT_DEVIATION);
-            }
-        }
-        Err(_) => {
-            let _ = writeln!(out, "Conformance: could not summarize the container");
-        }
-    }
+    // Check 2: conformance, from the summary the verification pass already
+    // built rather than a second parse of the same metadata.
+    worst = worst.max(report_conformance_after_acquire(out, output, summarized));
 
     report_missed_acceleration(out);
     stamp_completed(out);
@@ -4472,6 +4462,71 @@ fn setup_log(
     }
 }
 
+/// Name the digest algorithms an acquisition actually recorded.
+///
+/// The resolved set, never the flag text: `--hash` may have been absent, and
+/// the whole point of the line is that the log answers "which digests cover
+/// this evidence" without the reader having to know what this build's default
+/// was on the day it ran. A default that later changes cannot retroactively
+/// make an old log ambiguous.
+fn describe_algorithms(algorithms: &[aff4tools::model::HashAlgorithm]) -> String {
+    if algorithms.is_empty() {
+        // Not reachable through the CLI, which resolves an empty selection to
+        // the default before this point. Stated rather than rendered as an
+        // empty list, because "no digests" would be a serious claim about the
+        // evidence and must never be implied by a formatting accident.
+        return "none".to_owned();
+    }
+    algorithms
+        .iter()
+        .map(|a| a.name().to_owned())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The command the examiner ran, rendered so it can be read back and re-run.
+///
+/// The first thing an acquisition log records. Without it the log states what
+/// was acquired but not what was *asked for*, and the two differ wherever a
+/// default applied: a container holding one SHA-256 digest per file is what
+/// `--hash sha256` produces, and also what a build whose default changed would
+/// produce. The log could not tell those apart.
+///
+/// # Why arguments are quoted
+///
+/// An argument holding a space, a quote, or a shell metacharacter is wrapped in
+/// single quotes, with any embedded single quote escaped the POSIX way. A case
+/// path like `/Volumes/Case 2024-01/ev.aff4` would otherwise read back as two
+/// arguments, which makes the record ambiguous about what was acquired.
+///
+/// # Why lossy text is preferred to no line at all
+///
+/// A path on macOS or Linux is bytes, not necessarily UTF-8, so an argument may
+/// not be representable as text. Such bytes are rendered lossily rather than
+/// dropping the line: a path with one replacement character still identifies
+/// the acquisition, where a missing line records nothing. The container itself
+/// preserves the exact bytes of every name it stores; this line is the
+/// examiner's record of the invocation, not the authority on any path in it.
+fn command_line() -> String {
+    std::env::args_os()
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            let needs_quoting = text.is_empty()
+                || text
+                    .chars()
+                    .any(|c| c.is_whitespace() || "'\"\\$`*?[]|&;<>(){}!#~".contains(c));
+            if needs_quoting {
+                // POSIX single-quote escaping: end the quote, emit an escaped
+                // quote, reopen. `it's` becomes `'it'\''s'`.
+                format!("'{}'", text.replace('\'', r"'\''"))
+            } else {
+                text.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The current time as RFC 3339 UTC, the form the log's `Started:` line uses.
 ///
 /// An acquisition log is a record an examiner may have to account for later,
@@ -4533,7 +4588,8 @@ fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut file = std::fs::File::create_new(path)?;
     writeln!(
         file,
-        "aff4tools {} — acquisition log\nStarted: {}\n",
+        "Running command: {}\n\naff4tools {} — acquisition log\nStarted: {}\n",
+        command_line(),
         env!("CARGO_PKG_VERSION"),
         now_rfc3339_utc()
     )?;
@@ -4640,6 +4696,8 @@ fn run_acquire_device(
         "Compression: {} ({chunk_size} byte chunks, {chunks_per_bevy} per bevy)",
         options.codec.name()
     );
+    // Resolved, not the flag text: see `describe_algorithms`.
+    let _ = writeln!(out, "Hashes:      {}", describe_algorithms(algorithms));
     let _ = writeln!(out);
 
     if let Some(multi_part_after) = multi_part_after {
@@ -4665,7 +4723,15 @@ fn run_acquire_device(
             &algorithms,
             &registry,
             Some(&mut |out: &mut dyn Write, parts: &[PathBuf]| {
-                verify_set_after_acquire(out, parts, total, verify_written_container)
+                // `verify_after_acquire` is generic over its writer, and
+                // `dyn Write` is unsized. Binding the reference gives the
+                // generic a sized type to instantiate: `&mut dyn Write` is
+                // itself a `Write` implementor.
+                let mut sink = out;
+                // Only the code: a multi-part set's conformance is reported by
+                // the split path itself, so the summary has no second reader
+                // here and is dropped rather than threaded through.
+                verify_after_acquire(&mut sink, parts, total, verify_written_container).0
             }),
         ) {
             Ok(floor) => floor,
@@ -4837,12 +4903,17 @@ fn run_acquire_device(
     stamp_acquisition_complete(out);
 
     let _ = writeln!(out);
-    worst = worst.max(verify_after_acquire(
-        out,
-        output,
-        written.size,
-        verify_written_container,
-    ));
+    // `.0`: this path reports no conformance line, so there is no second
+    // reader for the summary the verification pass built.
+    worst = worst.max(
+        verify_after_acquire(
+            out,
+            std::slice::from_ref(&output.to_path_buf()),
+            written.size,
+            verify_written_container,
+        )
+        .0,
+    );
 
     report_missed_acceleration(out);
     stamp_completed(out);
@@ -4908,48 +4979,107 @@ fn write_acquired_digests(
 /// Run the post-acquisition verification pass, or state that it was skipped.
 ///
 /// Every acquisition mode calls this — `--image`, `--logical`, and `--device`
-/// alike. Verification is what turns a written file into evidence, so it runs
-/// by default regardless of what was acquired, and `--no-verify` is the only
-/// thing that skips it.
+/// alike, one part or many. Verification is what turns a written file into
+/// evidence, so it runs by default regardless of what was acquired, and
+/// `--no-verify` is the only thing that skips it.
 ///
 /// This exists because the three modes each grew their own copy of the block
 /// and then drifted: `--logical` verified nothing at all, and `--device`
 /// verified unconditionally, ignoring the flag. One caller-agnostic function
 /// is the only way that stays fixed.
 ///
+/// # Why this renders the same report as `aff4tools verify`
+///
+/// It runs the same work, so it says the same thing. Both paths open the
+/// container through [`verify`] and render through [`write_verification`], so
+/// an examiner reading an acquisition log and an examiner running `verify` by
+/// hand see one format, with the same counts, the same per-algorithm
+/// breakdown, and the same wording.
+///
+/// The acquisition log had its own condensed shape until now — a single
+/// matched-count line, no identity block, no breakdown — which meant the log
+/// could not be compared against a later `verify` run without translating
+/// between two formats. For a document whose purpose is to account for
+/// evidence years later, that was the wrong tradeoff.
+///
+/// `parts` is the whole container: one path normally, several for a multi-part
+/// set. A part opened alone is a partial view of the evidence, so the set is
+/// always opened together, through the path `verify --multi-part` uses.
+///
 /// `size` is the acquired byte count, named in the announcement so a long
 /// re-read is explained while it happens.
 ///
-/// Returns the worst exit code the pass produced.
+/// # The returned summary is the conformance check's input
+///
+/// Returns the worst exit code and, when verification ran, the
+/// [`ContainerSummary`] built while it ran. The caller's conformance check
+/// needs only that summary's deviations and generation, so handing it back
+/// saves opening and streaming `information.turtle` a second time — on a
+/// container of a million objects the metadata segment alone is hundreds of
+/// megabytes, and parsing it twice to answer two questions about one container
+/// is work with no product.
+///
+/// `None` means no summary exists to reuse: either `--no-verify` was given, or
+/// the container could not be re-read. The caller must then summarize the
+/// container itself rather than treating the absence as conformance — a
+/// container nobody could parse has not been shown to conform to anything.
 fn verify_after_acquire(
     out: &mut impl Write,
-    output: &std::path::Path,
+    parts: &[PathBuf],
     size: u64,
     verify: bool,
-) -> u8 {
+) -> (u8, Option<ContainerSummary>) {
     let mut worst = 0u8;
 
     if !verify {
+        // Naming the exact command to run, including `--multi-part` where the
+        // set needs it: an examiner who skipped verification should not have to
+        // work out the invocation that completes the record.
+        let command = if parts.len() > 1 {
+            "`aff4tools verify --multi-part`"
+        } else {
+            "`aff4tools verify`"
+        };
         let _ = writeln!(
             out,
             "Scope:       digests were recorded from the source as it was read, \
              but not checked against the container (--no-verify). Run \
-             `aff4tools verify` to check them."
+             {command} to check them."
         );
-        return worst;
+        return (worst, None);
     }
 
     // Named before it starts, not after it finishes: on a large container this
     // re-read runs for minutes, and an unlabeled pause reads as a hang.
-    let _ = writeln!(
-        out,
-        "Verifying:   re-reading {} from the container just written",
-        human_bytes(size)
-    );
+    if parts.len() > 1 {
+        let _ = writeln!(
+            out,
+            "Verifying:   re-reading {} from the {} part(s) just written",
+            human_bytes(size),
+            parts.len()
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "Verifying:   re-reading {} from the container just written",
+            human_bytes(size)
+        );
+    }
     let _ = out.flush();
 
-    match verify_written(output) {
-        Ok(report) => {
+    // Block hashing on, matching `verify`'s own default (`--no-block-hashing`
+    // is what turns it off there). This checks every block hash the container
+    // actually holds; a container holding none produces no such checks. It is
+    // deliberately not tied to `acquire --block-hashes`, which decides what to
+    // *write*: a physical acquisition and every large logical file record
+    // per-chunk digests whatever that flag said, and skipping the check would
+    // leave the digests this very run just wrote unverified.
+    let options = VerifyOptions { block_hashes: true };
+
+    // `self::` avoids the shadow: the `verify: bool` parameter above hides the
+    // free function `verify` of the same name for the rest of this scope.
+    match self::verify(parts, options, None) {
+        Ok((report, summary)) => {
             if report.has_mismatch() {
                 let _ = writeln!(
                     out,
@@ -4957,120 +5087,80 @@ fn verify_after_acquire(
                      recorded digests. This is a finding about the acquisition."
                 );
                 worst = worst.max(EXIT_MISMATCH);
-            } else {
-                let _ = writeln!(
-                    out,
-                    "Verify:      {} of {} recomputed digest(s) matched",
-                    report.match_count(),
-                    report.checked_count()
-                );
             }
             // An acquisition that wrote evidence it cannot read back is a
             // finding even when everything readable matched.
             if report.has_unreadable() {
-                let _ = writeln!(
-                    out,
-                    "VERIFY:      {} recorded digest(s) span bytes that could not be \
-                     read back from the container.",
-                    report.unreadable_count()
-                );
                 worst = worst.max(EXIT_UNVERIFIABLE);
             }
+
+            // The identity block first, as `verify` prints it, so the log
+            // states which container these results describe. An acquisition
+            // log can outlive the shell history that produced it.
+            let _ = report::write_identity_block(out, &summary);
+            let _ = write_verification(out, &report, false, options.block_hashes, None);
+            return (worst, Some(summary));
         }
-        Err(e) => {
-            let _ = writeln!(out, "VERIFY:      could not re-read the container: {e}");
-            worst = worst.max(e.exit_code());
+        // `OpenError::report` writes its own diagnosis to stderr and yields
+        // the exit code, so the log gets the one-line form and the operator
+        // gets the detail. Printing `{error}` here too would say it twice.
+        Err(error) => {
+            let _ = writeln!(
+                out,
+                "VERIFY:      could not re-read the container; see the error above."
+            );
+            worst = worst.max(error.report());
         }
     }
 
-    worst
+    (worst, None)
 }
 
-/// Verify a multi-part set in place, reading its parts as the one image they form.
+/// Report the written container's conformance, reusing a summary if one exists.
 ///
-/// `verify_after_acquire` cannot serve here: it calls `verify_written`, which
-/// opens a single container. A part opened alone is a partial view of the
-/// evidence, so the whole set is opened together through the same path
-/// `verify --multi-part` uses.
-fn verify_set_after_acquire(out: &mut dyn Write, parts: &[PathBuf], size: u64, verify: bool) -> u8 {
-    let mut worst = 0u8;
+/// `summarized` is what the verification pass already built (see
+/// [`verify_after_acquire`]). When it is present the container is **not**
+/// reopened: streaming `information.turtle` a second time to answer a second
+/// question about the same container is work with no product, and on a
+/// container of a million objects that segment is hundreds of megabytes.
+///
+/// `None` means verification did not run or could not read the container, so
+/// the summary is built here. An unreadable container is reported as such
+/// rather than as conformant: nobody parsed it, so nothing was established.
+///
+/// Returns the exit code this check contributes.
+fn report_conformance_after_acquire(
+    out: &mut impl Write,
+    output: &std::path::Path,
+    summarized: Option<ContainerSummary>,
+) -> u8 {
+    let summary = match summarized {
+        Some(summary) => Ok(summary),
+        None => summarize(std::slice::from_ref(&output.to_path_buf())),
+    };
 
-    if !verify {
-        let _ = writeln!(
-            out,
-            "Scope:       digests were recorded from the source as it was read, \
-             but not checked against the container (--no-verify). Run \
-             `aff4tools verify --multi-part` to check them."
-        );
-        return worst;
-    }
-
-    let _ = writeln!(
-        out,
-        "Verifying:   re-reading {} from the {} part(s) just written",
-        human_bytes(size),
-        parts.len()
-    );
-    let _ = out.flush();
-
-    // `self::` avoids the shadow: the `verify: bool` parameter above hides the
-    // free function `verify` of the same name for the rest of this scope.
-    match self::verify(parts, VerifyOptions { block_hashes: true }, None) {
-        Ok((report, _summary)) => {
-            if report.has_mismatch() {
-                let _ = writeln!(
-                    out,
-                    "VERIFY:      MISMATCH — the container does not match its own \
-                     recorded digests. This is a finding about the acquisition."
-                );
-                worst = worst.max(EXIT_MISMATCH);
+    match summary {
+        Ok(summary) => {
+            if summary.deviations.is_empty() {
+                // Named from the container's own generation, not a constant:
+                // what aff4tools wrote decides which document governs it.
+                let spec = acquisition_spec(summary.generation);
+                let _ = writeln!(out, "Conformance: no deviations from {spec}");
+                0
             } else {
                 let _ = writeln!(
                     out,
-                    "Verify:      {} of {} recomputed digest(s) matched",
-                    report.match_count(),
-                    report.checked_count()
+                    "Conformance: {} deviation(s) — run `aff4tools conformance`",
+                    summary.deviations.len()
                 );
-            }
-            if report.has_unreadable() {
-                let _ = writeln!(
-                    out,
-                    "VERIFY:      {} recorded digest(s) span bytes that could not be \
-                     read back from the container.",
-                    report.unreadable_count()
-                );
-                worst = worst.max(EXIT_UNVERIFIABLE);
+                EXIT_STRICT_DEVIATION
             }
         }
-        Err(error) => worst = worst.max(error.report()),
+        Err(_) => {
+            let _ = writeln!(out, "Conformance: could not summarize the container");
+            0
+        }
     }
-
-    worst
-}
-
-/// Recompute the digests of a container we just wrote.
-///
-/// # Why this reports progress
-///
-/// This re-reads and decompresses **the whole container** — on a 15 GiB device
-/// acquisition it ran for one to two minutes with nothing on screen, which is
-/// indistinguishable from a hang at the very moment the user is waiting to
-/// learn whether their evidence is sound. It uses the same reporter as
-/// `aff4tools verify`, because it is doing the same work.
-fn verify_written(path: &std::path::Path) -> aff4tools::Result<VerificationReport> {
-    let mut container = Container::open(path)?;
-    let expected = aff4tools::estimate_work(&mut container, VerifyOptions { block_hashes: true })
-        .map_or(0, |estimate| estimate.bytes_to_read);
-    let mut reporter = ProgressReporter::new(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .expecting(expected)
-        .across_parts(1);
-    let report = verify_container_with_progress(
-        &mut container,
-        VerifyOptions { block_hashes: true },
-        &mut reporter,
-    );
-    reporter.finish();
-    report
 }
 
 /// Collect a container's deviations without retaining its objects.
@@ -5960,6 +6050,95 @@ use aff4tools::thousands;
 mod tests {
     use super::*;
     use aff4tools::{Feature, Locus, NotAff4Reason};
+
+    /// The conformance check reuses the verification pass's summary rather
+    /// than reopening the container.
+    ///
+    /// Asserted by giving it a summary for a path that does not exist: if the
+    /// helper reopened the container to answer the conformance question, this
+    /// could only report failure. Reporting the summary's own verdict is proof
+    /// that `information.turtle` was not streamed a second time — which on a
+    /// container of a million objects is hundreds of megabytes of parsing to
+    /// answer a question already answered.
+    #[test]
+    fn conformance_reuses_the_verification_summary() {
+        let locus = Locus::new(std::path::PathBuf::from("never-opened.aff4"));
+        let summary = ContainerSummary {
+            source_path: std::path::PathBuf::from("never-opened.aff4"),
+            volume: aff4tools::VolumeInfo {
+                arn: aff4tools::Arn::parse("aff4://11111111-1111-1111-1111-111111111111", &locus)
+                    .expect("volume ARN must parse"),
+                arn_source: aff4tools::ArnSource::ZipComment,
+            },
+            generation: aff4tools::Generation::PyAff4Logical,
+            version: None,
+            objects: Vec::new(),
+            segments: aff4tools::SegmentSummary {
+                count: 0,
+                kinds: Vec::new(),
+            },
+            counts: aff4tools::ObjectCounts::default(),
+            // The point of the test: no deviations, so a reused summary must
+            // report conformance rather than a failure to open anything.
+            deviations: Vec::new(),
+            prefixes: Vec::new(),
+            manifest: Vec::new(),
+            manifest_disagreements: Vec::new(),
+        };
+
+        let mut out = Vec::new();
+        let code = report_conformance_after_acquire(
+            &mut out,
+            std::path::Path::new("/nonexistent/never-opened.aff4"),
+            Some(summary),
+        );
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(code, 0, "a summary with no deviations must not set a code");
+        assert!(
+            text.contains("no deviations"),
+            "the reused summary's verdict must be reported:\n{text}"
+        );
+        assert!(
+            !text.contains("could not summarize"),
+            "reopening the container is what this test exists to rule out:\n{text}"
+        );
+    }
+
+    /// The pre-run scope line names no codec.
+    ///
+    /// It once appended the set of chunk codecs, which described one storage
+    /// form as though it covered the whole read: a logical container keeps most
+    /// of its bytes in ZIP segments, which `lz4` never touches, so `Reading
+    /// 120.3 GiB of content (lz4)` was misleading on exactly the containers
+    /// where the figure is largest. The codecs remain in the serialized
+    /// estimate for a caller that wants them, just not in this summary.
+    #[test]
+    fn the_scope_line_names_no_codec() {
+        let estimate = WorkEstimate {
+            bytes_to_read: 120 * 1024 * 1024 * 1024,
+            bytes_on_disk: 111 * 1024 * 1024 * 1024,
+            bevies: 4096,
+            codecs: vec!["lz4".to_owned(), "zlib".to_owned()],
+            ..Default::default()
+        };
+        for logical in [false, true] {
+            let line = describe_estimate(&estimate, logical);
+            // Codec names only. Not the bare word "stored", which the line uses
+            // as prose for the on-disk figure ("stored in 111.0 GiB on disk")
+            // and which is also a codec name — so the parenthesized form is
+            // what distinguishes a codec listing from that sentence.
+            for codec in ["(lz4", "(zlib", "(snappy", "(stored", "lz4)", "zlib)"] {
+                assert!(
+                    !line.contains(codec),
+                    "the scope line must name no codec, found {codec}:\n{line}"
+                );
+            }
+            // The figures it does report must survive: this is a removal of one
+            // parenthetical, not of the line.
+            assert!(line.contains("120.0 GiB"), "content total missing:\n{line}");
+            assert!(line.contains("111.0 GiB"), "on-disk total missing:\n{line}");
+        }
+    }
 
     /// Writing the report stays linear in the number of files.
     ///

@@ -138,12 +138,13 @@ impl ZipWriter {
         name: &str,
         data: &[u8],
     ) -> Result<()> {
-        let crc = crc32fast::hash(data);
         // Raw deflate (-15 window), which is what ZIP method 8 carries — not
         // zlib-wrapped. Getting this wrong produces an archive that every
         // reader rejects.
-        let mut encoder =
-            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::DeflateEncoder::new(
+            Vec::new(),
+            crate::write::segment_compression::segment_compression(),
+        );
         encoder
             .write_all(data)
             .map_err(|source| Error::io(sink.path().to_path_buf(), source))?;
@@ -151,7 +152,34 @@ impl ZipWriter {
             .finish()
             .map_err(|source| Error::io(sink.path().to_path_buf(), source))?;
 
-        self.add_member(sink, name, data, &compressed, METHOD_DEFLATE, crc)
+        self.add_precompressed_member(sink, name, data, &compressed)
+    }
+
+    /// Append a deflate member whose compressed bytes the caller already has.
+    ///
+    /// The logical writer decides Stored-versus-Deflate by actually deflating
+    /// (see [`crate::write::segment_compression::plan_segment`]), so it arrives
+    /// holding the exact bytes to write. Compressing again here would double
+    /// the cost of every segment in a logical acquisition for an identical
+    /// result.
+    ///
+    /// `compressed` must be `data` deflated with the raw deflate ZIP method 8
+    /// carries; the CRC and the uncompressed length recorded in the header both
+    /// come from `data`, so passing unrelated buffers writes a member no reader
+    /// can inflate.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if a write fails.
+    pub fn add_precompressed_member(
+        &mut self,
+        sink: &mut WriteSink,
+        name: &str,
+        data: &[u8],
+        compressed: &[u8],
+    ) -> Result<()> {
+        let crc = crc32fast::hash(data);
+        self.add_member(sink, name, data, compressed, METHOD_DEFLATE, crc)
     }
 
     /// Write one member's local header and body.

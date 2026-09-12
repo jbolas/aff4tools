@@ -21,12 +21,10 @@ pub(crate) fn write_text(
         return write_brief(out, summary);
     }
 
+    // The member count comes from `write_identity_block` now, in the one
+    // wording both commands use. Printing it here too gave the full report the
+    // same figure twice under two labels.
     write_identity_block(out, summary)?;
-    writeln!(
-        out,
-        "{:<LABEL_WIDTH$}{} members",
-        "Zip segments:", summary.segments.count
-    )?;
     write_segment_kinds(out, summary)?;
 
     write_case_block(out, summary, filter)?;
@@ -50,8 +48,27 @@ pub(crate) fn write_text(
                 summary.objects.len()
             )?;
         }
+        // Whether `stored in` distinguishes anything in this container.
+        //
+        // The line reports `aff4:stored`, which matters for a striped or
+        // multi-part container where a stream legitimately lives in a sibling
+        // file — reading one part alone then gives an incomplete view, and
+        // the line is what says so. In a single-volume container every object
+        // that declares storage declares *this* volume, so the line repeats
+        // one constant once per object: 394,783 identical lines on one 120 GiB
+        // acquisition, saying nothing that the absence of the line would not.
+        let locality_informative = summary
+            .objects
+            .iter()
+            .any(|o| o.locality == Locality::External);
         for object in listed {
-            write_object(out, object, &summary.prefixes, &summary.manifest)?;
+            write_object(
+                out,
+                object,
+                &summary.prefixes,
+                &summary.manifest,
+                locality_informative,
+            )?;
         }
     }
 
@@ -209,7 +226,9 @@ pub(crate) fn write_identity_block(
         content_type(summary)
     )?;
     write_version_lines(out, summary)?;
-    write_storage_accounting(out, summary)
+    write_storage_accounting(out, summary)?;
+    write_logical_populations(out, summary)?;
+    write_zip_member_count(out, summary)
 }
 
 /// Where a logical container's files keep their bytes.
@@ -239,34 +258,104 @@ fn write_storage_accounting(
         "Total files:",
         thousands(storage.total())
     )?;
-    // The breakdown gets its own wider column, so an indented label still
-    // leaves its count aligned with the others in this block. Padding these to
-    // LABEL_WIDTH put "130,441" hard against "  Zip segments:", which is one
-    // character over the width and so was padded to nothing.
-    const BREAKDOWN_WIDTH: usize = LABEL_WIDTH + 4;
-    for (label, count) in [
-        ("  Zip segments:", storage.zip_segment),
-        ("  Map storage:", storage.shared_map),
-        ("  Own streams:", storage.own_stream),
-        ("  In metadata:", storage.in_metadata),
-    ] {
-        if count > 0 {
-            writeln!(out, "{label:<BREAKDOWN_WIDTH$}{}", thousands(count))?;
+
+    // Each label says where the bytes went, not merely what the form is
+    // called. "Zip segments: 345,583" under "Total files: 346,203" read as two
+    // competing totals; "Stored as Zip segments" reads as a part of the one
+    // above it, which is what it is.
+    //
+    // The counts are right-aligned in a column of their own so the parts
+    // visibly sum to the total. Left-aligned after a padded label, 345,583 and
+    // 95 started in the same column and the reader had to check the arithmetic
+    // by eye rather than see it.
+    let rows = [
+        ("  Stored as Zip segments:", storage.zip_segment),
+        ("  Stored as Map:", storage.shared_map),
+        ("  Stored in own ImageStream:", storage.own_stream),
+        ("  Stored in metadata:", storage.in_metadata),
+        // Named, not hidden. These are files an acquisition recorded without
+        // being able to read — the acquisition's own SKIPPED report lists each
+        // one with its reason — and omitting them would leave the parts not
+        // summing to the total.
+        ("  Not read:", storage.no_content),
+    ];
+
+    // Widths from the rows actually printed, so a container using two forms is
+    // not indented for the sake of the four it does not use.
+    let shown: Vec<(&str, usize)> = rows.into_iter().filter(|(_, n)| *n > 0).collect();
+    let label_width = shown.iter().map(|(l, _)| l.len()).max().unwrap_or(0) + 2;
+    let count_width = shown
+        .iter()
+        .map(|(_, n)| thousands(*n).len())
+        .max()
+        .unwrap_or(0);
+
+    for (label, count) in shown {
+        write!(
+            out,
+            "{label:<label_width$}{:>count_width$}",
+            thousands(count)
+        )?;
+        if label.starts_with("  Not read") {
+            write!(out, " (recorded without content; see the acquisition log)")?;
         }
+        writeln!(out)?;
     }
-    // Named, not hidden. These are files an acquisition recorded without being
-    // able to read — the acquisition's own SKIPPED report lists each one with
-    // its reason — and omitting them would leave the parts not summing to the
-    // total.
-    if storage.no_content > 0 {
+    Ok(())
+}
+
+/// The object populations a logical container holds beyond its files.
+///
+/// Folders and extended attributes are counted separately because they are
+/// separate things: a folder holds no bytes, and an attribute belongs to a
+/// file rather than standing on its own. Both were previously folded into one
+/// "images" figure — `is_image` accepts `FolderImage` — which double-counted
+/// against the file and folder counts already stated above it and gave the sum
+/// a name matching neither part.
+///
+/// A population holding nothing is omitted rather than printed as zero.
+fn write_logical_populations(
+    out: &mut impl Write,
+    summary: &ContainerSummary,
+) -> std::io::Result<()> {
+    let counts = &summary.counts;
+    if counts.folders > 0 {
         writeln!(
             out,
-            "{:<BREAKDOWN_WIDTH$}{} (recorded without content; see the acquisition log)",
-            "  Not read:",
-            thousands(storage.no_content)
+            "{:<LABEL_WIDTH$}{}",
+            "Folders:",
+            thousands(counts.folders)
+        )?;
+    }
+    if counts.file_substreams > 0 {
+        writeln!(
+            out,
+            "{:<LABEL_WIDTH$}{} extended attributes on those files",
+            "Attributes:",
+            thousands(counts.file_substreams)
         )?;
     }
     Ok(())
+}
+
+/// The ZIP member count, labeled as the packing figure it is.
+///
+/// **Not evidence.** It counts archive members: every bevy, every bevy index,
+/// every map segment, and the container's own metadata, alongside the file
+/// segments. On a logical container it therefore runs well above the file
+/// count — 353,873 members against 345,583 file segments on one 120 GiB
+/// acquisition — and calling it "Zip segments" collided with the name of the
+/// AFF4-L v1.0-ALPHA §6.1 storage form, which is a count of *files*.
+///
+/// Printed for every container so the two commands agree, and so a physical
+/// image and a logical one describe their packing the same way.
+fn write_zip_member_count(out: &mut impl Write, summary: &ContainerSummary) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{:<LABEL_WIDTH$}{} total # of segments in this ZIP",
+        "ZIP members:",
+        thousands(summary.segments.count)
+    )
 }
 
 /// Write the version and tool lines.
@@ -443,22 +532,18 @@ fn write_brief(out: &mut impl Write, summary: &ContainerSummary) -> std::io::Res
         content_type(summary)
     )?;
     write_version_lines(out, summary)?;
-    writeln!(
-        out,
-        "{:<LABEL_WIDTH$}{} members",
-        "Zip segments:", summary.segments.count
-    )?;
+    // The same accounting `verify` prints. It was the identity block's alone,
+    // which had it backwards: `info` is the command for describing a
+    // container, and it was showing the packing figure instead of the one that
+    // counts evidence.
+    write_storage_accounting(out, summary)?;
+    write_logical_populations(out, summary)?;
 
     if let Some(case_line) = brief_case_line(summary) {
         writeln!(out, "{:<LABEL_WIDTH$}{case_line}", "Case:")?;
     }
 
-    writeln!(
-        out,
-        "{:<LABEL_WIDTH$}{}",
-        "Objects:",
-        brief_object_counts(summary)
-    )?;
+    write_zip_member_count(out, summary)?;
 
     write_brief_bitstream(out, summary)?;
 
@@ -558,16 +643,40 @@ fn write_brief_bitstream(out: &mut impl Write, summary: &ContainerSummary) -> st
         return Ok(());
     }
 
-    writeln!(out)?;
-    writeln!(out, "Bitstream")?;
-
     let shown = candidates.len().min(BRIEF_BITSTREAM_LIMIT);
+    let total = summary.counts.bitstream_candidates.max(shown);
+
+    // Whether these entries are logical files. "Bitstream" is AFF4-L's term
+    // for the linear hash over a file's bytes, and on a physical image it
+    // usefully separates the data streams from the metadata. On a logical
+    // container every one of hundreds of thousands of files has one, so the
+    // heading described the whole container and told the reader nothing —
+    // while leaving three unnamed GUIDs looking like a category of their own.
+    let logical = candidates[..shown]
+        .iter()
+        .all(|o| matches!(o.role, ObjectRole::FileImage));
+
+    writeln!(out)?;
+    if logical {
+        // Says what the excerpt *is*: a sample, its size, and the population
+        // it was drawn from. Three entries under a bare heading read as the
+        // container's contents rather than as the first three of many.
+        writeln!(
+            out,
+            "Sample of {shown} file{}, of {} with a recorded hash",
+            if shown == 1 { "" } else { "s" },
+            thousands(total)
+        )?;
+    } else {
+        writeln!(out, "Bitstream")?;
+    }
+
     // Only the objects actually printed need an identity, and only when the
     // role label on the size line does not already disambiguate them (the
     // `Base-Linear.aff4` shape: one disk image, one image stream — `[disk
     // image]` / `[image stream]` already says which is which, and adding an
     // ARN line there would make the common case noisier for no reason).
-    let needs_identity = {
+    let needs_identity = logical || {
         let mut roles: Vec<&ObjectRole> = candidates[..shown].iter().map(|o| &o.role).collect();
         roles.sort_by_key(|r| r.json_token().into_owned());
         roles.windows(2).any(|w| w[0] == w[1])
@@ -575,12 +684,29 @@ fn write_brief_bitstream(out: &mut impl Write, summary: &ContainerSummary) -> st
 
     for object in &candidates[..shown] {
         if needs_identity {
-            writeln!(out, "  {}", brief_identity(object, &candidates[..shown]))?;
+            // The recorded path, not the ARN. Under AFF4-L v1.0-ALPHA §1.1 an
+            // object is named by a GUID with its path in properties, so the
+            // ARN identifies the entry without saying which file it is — three
+            // GUIDs told an examiner nothing at all. Falls back to the ARN
+            // form where no path is recorded, which is what a physical
+            // image's streams have.
+            match object.recorded_path() {
+                Some(path) => writeln!(out, "  {path}")?,
+                None => writeln!(out, "  {}", brief_identity(object, &candidates[..shown]))?,
+            }
         }
+        // Nested one level under the path line when there is one, so each
+        // entry reads as belonging to that file. A physical image prints no
+        // path line, so its rows keep the original left edge.
+        let indent = if logical { "    " } else { "  " };
         if let Some(size) = object.size {
+            // An empty file is called empty. A 0-byte entry beside a digest
+            // reads as a defect otherwise, when it is an ordinary empty file
+            // whose hash is the digest of no bytes.
+            let empty = if size == 0 { ", empty" } else { "" };
             writeln!(
                 out,
-                "  {:<17} {size} bytes ({})  [{}]",
+                "{indent}{:<17} {size} bytes ({})  [{}{empty}]",
                 size_label(object),
                 human_bytes(size),
                 object.role
@@ -591,15 +717,15 @@ fn write_brief_bitstream(out: &mut impl Write, summary: &ContainerSummary) -> st
             .iter()
             .filter(|h| h.predicate == "hash" || h.predicate == "blockMapHash")
         {
-            write_brief_hash(out, hash)?;
+            write_brief_hash(out, hash, indent)?;
         }
     }
 
     // From `counts`, not `candidates`: `summarize_brief` retains a capped
     // sample, so subtracting from the retained list would report "61 more" on a
     // container holding a million.
-    let remaining = summary.counts.bitstream_candidates.saturating_sub(shown);
-    if remaining > 0 {
+    let remaining = total.saturating_sub(shown);
+    if remaining > 0 && !logical {
         writeln!(
             out,
             "  ... and {remaining} more image object(s) with their own size/hash (see full report)"
@@ -642,7 +768,7 @@ fn brief_identity(object: &Aff4Object, shown: &[&Aff4Object]) -> String {
 /// carrying [`StoredHash::PROVENANCE`] exactly as the full report's
 /// `write_hash` does, and explicitly kinded as `linear` or `tree root` so it
 /// cannot be misread as covering the same extent as the other kind.
-fn write_brief_hash(out: &mut impl Write, hash: &StoredHash) -> std::io::Result<()> {
+fn write_brief_hash(out: &mut impl Write, hash: &StoredHash, indent: &str) -> std::io::Result<()> {
     let kind = if matches!(
         hash.algorithm,
         HashAlgorithm::BlockMapSha512 | HashAlgorithm::BlockMapSha256
@@ -652,53 +778,20 @@ fn write_brief_hash(out: &mut impl Write, hash: &StoredHash) -> std::io::Result<
     } else {
         "linear"
     };
+    // The provenance marker stays on every hash line, as it does in the full
+    // report. Stating it once in a section heading was tidier to read and
+    // strictly weaker: a digest quoted, screenshotted, or scrolled away from
+    // its heading would then carry nothing saying it was read from metadata
+    // rather than recomputed. `info` verifies nothing, and each line has to
+    // say so on its own.
     writeln!(
         out,
-        "    {} ({}, {kind})  {}",
+        "{indent}{} ({}, {kind})  {}",
         hash.predicate,
         hash.algorithm,
         StoredHash::PROVENANCE
     )?;
-    writeln!(out, "      {}", hash.hex)
-}
-
-/// The brief `Objects:` line: a one-line role-count summary in place of the
-/// full per-object listing. Image-bearing roles (disk image, contiguous
-/// image, discontiguous image, plain image, file image, folder) collapse to
-/// a single "images" count, matching how `--objects images` already groups
-/// them; image streams and maps are broken out since they are the two other
-/// roles that filter admits. Every other described object is folded into a
-/// trailing "described" total so the line never implies a role was dropped.
-fn brief_object_counts(summary: &ContainerSummary) -> String {
-    // From `counts`, not from `objects`: `summarize_brief` retains only the
-    // objects it renders, so counting the list would undercount everything.
-    let c = &summary.counts;
-    let total = c.total;
-
-    let mut breakdown = Vec::new();
-    if c.images > 0 {
-        breakdown.push(format!(
-            "{} {}",
-            c.images,
-            plural(c.images, "image", "images")
-        ));
-    }
-    if c.maps > 0 {
-        breakdown.push(format!("{} {}", c.maps, plural(c.maps, "map", "maps")));
-    }
-    if c.image_streams > 0 {
-        breakdown.push(format!(
-            "{} {}",
-            c.image_streams,
-            plural(c.image_streams, "image stream", "image streams")
-        ));
-    }
-
-    if breakdown.is_empty() {
-        format!("{total} described")
-    } else {
-        format!("{total} described; {}", breakdown.join(", "))
-    }
+    writeln!(out, "{indent}  {}", hash.hex)
 }
 
 // --- object ordering -------------------------------------------------------
@@ -1417,6 +1510,7 @@ fn write_object(
     object: &Aff4Object,
     prefixes: &[(String, String)],
     manifest: &[String],
+    locality_informative: bool,
 ) -> std::io::Result<()> {
     writeln!(out)?;
     writeln!(out, "  {}", object.arn)?;
@@ -1431,7 +1525,10 @@ fn write_object(
     if !object.types.is_empty() {
         widest = widest.max("types".len());
     }
-    if object.locality != Locality::Undeclared {
+    // Must match the print below exactly: a label counted here but not
+    // printed would widen every column for a line that never appears.
+    let show_locality = locality_informative && object.locality != Locality::Undeclared;
+    if show_locality {
         widest = widest.max("stored in".len());
     }
     for edge in object.edges.iter().filter(|e| e.kind != EdgeKind::StoredIn) {
@@ -1477,15 +1574,17 @@ fn write_object(
         )?;
     }
 
-    match object.locality {
-        Locality::External => writeln!(
-            out,
-            "    {:<widest$} {} (another volume)",
-            "stored in",
-            object.stored_in.as_deref().unwrap_or("?")
-        )?,
-        Locality::Local => writeln!(out, "    {:<widest$} this volume", "stored in")?,
-        Locality::Undeclared => {}
+    if show_locality {
+        match object.locality {
+            Locality::External => writeln!(
+                out,
+                "    {:<widest$} {} (another volume)",
+                "stored in",
+                object.stored_in.as_deref().unwrap_or("?")
+            )?,
+            Locality::Local => writeln!(out, "    {:<widest$} this volume", "stored in")?,
+            Locality::Undeclared => {}
+        }
     }
 
     for edge in object.edges.iter().filter(|e| e.kind != EdgeKind::StoredIn) {
@@ -1543,12 +1642,7 @@ fn write_object(
         writeln!(out, "    vendor properties ({label})")?;
         for property in &vendor {
             let value = render_value(&property.value, prefixes);
-            writeln!(
-                out,
-                "      {:<vendor_widest$} {}",
-                property.name,
-                truncate(&value, 100)
-            )?;
+            writeln!(out, "      {:<vendor_widest$} {value}", property.name)?;
         }
     }
 
@@ -1582,12 +1676,7 @@ fn write_object(
         } else {
             ""
         };
-        writeln!(
-            out,
-            "    {:<widest$} {}{marker}",
-            property.name,
-            truncate(&value, 100)
-        )?;
+        writeln!(out, "    {:<widest$} {value}{marker}", property.name)?;
     }
 
     Ok(())
@@ -1836,18 +1925,6 @@ fn local_name(iri: &str) -> &str {
     iri.rsplit_once(['#', '/']).map_or(iri, |(_, name)| name)
 }
 
-/// Shorten a long property value for display.
-///
-/// Only ever applied to free-text properties — never to a digest, an ARN, or a
-/// size, all of which must be reported in full.
-fn truncate(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let kept: String = text.chars().take(limit).collect();
-    format!("{kept}… ({} characters)", text.chars().count())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -2052,16 +2129,105 @@ mod tests {
         );
     }
 
-    /// Digests and ARNs must never be shortened; only free text may be.
+    /// `stored in` appears only when it distinguishes something.
+    ///
+    /// It reports `aff4:stored`, which earns its place in a striped or
+    /// multi-part container: a stream living in a sibling file means the part
+    /// being read is an incomplete view, and this line is what says so. In a
+    /// single-volume container every object that declares storage declares
+    /// this one, so the line states a constant once per object — 394,783
+    /// identical lines on one real acquisition.
     #[test]
-    fn truncation_reports_what_it_removed() {
-        let short = "abc";
-        assert_eq!(truncate(short, 10), "abc");
+    fn locality_is_printed_only_when_it_distinguishes_something() {
+        let render = |objects: Vec<Aff4Object>| {
+            let summary = summary_of(objects);
+            let mut out = Vec::new();
+            write_text(&mut out, &summary, ObjectFilter::All, false).expect("render");
+            String::from_utf8_lossy(&out).to_string()
+        };
 
-        let long = "x".repeat(50);
-        let out = truncate(&long, 10);
-        assert!(out.starts_with("xxxxxxxxxx"), "{out}");
-        assert!(out.contains("50 characters"), "{out}");
+        // Single volume: every object is local, so the line says nothing.
+        let mut a = typed(
+            "aff4://11111111-1111-1111-1111-111111111111/a",
+            &["ImageStream"],
+        );
+        a.locality = Locality::Local;
+        let mut b = typed(
+            "aff4://11111111-1111-1111-1111-111111111111/b",
+            &["ImageStream"],
+        );
+        b.locality = Locality::Local;
+        let local_only = render(vec![a, b]);
+        assert!(
+            !local_only.contains("stored in"),
+            "a single-volume container must not repeat one constant:\n{local_only}"
+        );
+
+        // One object elsewhere: the line now carries real information, and
+        // every object's locality is worth stating for the contrast.
+        let mut here = typed(
+            "aff4://11111111-1111-1111-1111-111111111111/a",
+            &["ImageStream"],
+        );
+        here.locality = Locality::Local;
+        let mut away = typed(
+            "aff4://11111111-1111-1111-1111-111111111111/b",
+            &["ImageStream"],
+        );
+        away.locality = Locality::External;
+        away.stored_in = Some("aff4://22222222-2222-2222-2222-222222222222".to_owned());
+        let striped = render(vec![here, away]);
+        assert!(
+            striped.contains("another volume"),
+            "an object in a sibling volume must still be reported:\n{striped}"
+        );
+        assert!(
+            striped.contains("this volume"),
+            "the contrast needs both sides stated:\n{striped}"
+        );
+    }
+
+    /// No property value is ever shortened, however long.
+    ///
+    /// Values were once cut at 100 characters with an ellipsis and a character
+    /// count. On one 120 GiB acquisition that truncated 171,997 of 394,983
+    /// `originalPathName` values — 43.5% of the paths — including in the file
+    /// `--full-listing` writes, whose whole purpose is completeness. A path is
+    /// the identity of an evidence item, not free text, and the container held
+    /// it in full the whole time.
+    #[test]
+    fn long_property_values_are_never_shortened() {
+        let deep = format!("/Users/jgb/{}/file.txt", "nested-directory/".repeat(30));
+        assert!(deep.len() > 400, "the fixture must exceed any old limit");
+
+        let mut object = typed(
+            "aff4://11111111-1111-1111-1111-111111111111/f",
+            &["FileImage", "Image"],
+        );
+        object.properties = vec![aff4tools::Property {
+            name: std::sync::Arc::from("originalPathName"),
+            iri: std::sync::Arc::from("http://aff4.org/Schema#originalPathName"),
+            value: aff4tools::Value::Literal {
+                lexical: deep.clone(),
+                datatype: None,
+            },
+            prefix: None,
+            namespace: None,
+        }];
+
+        let summary = summary_of(vec![object]);
+        let mut out = Vec::new();
+        write_text(&mut out, &summary, ObjectFilter::All, false).expect("render");
+        let text = String::from_utf8_lossy(&out).to_string();
+
+        assert!(
+            text.contains(&deep),
+            "the path must appear in full:\n{text}"
+        );
+        assert!(
+            !text.contains('…') && !text.contains("characters)"),
+            "no ellipsis and no character count may remain:\n{text}"
+        );
     }
 
     #[test]

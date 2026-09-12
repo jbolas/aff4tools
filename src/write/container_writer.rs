@@ -298,6 +298,25 @@ impl ContainerWriter {
         self.zip.add_deflated_member(&mut self.sink, name, data)
     }
 
+    /// Write a deflate member whose compressed bytes the caller already holds.
+    ///
+    /// See [`crate::write::zip_writer::ZipWriter::add_precompressed_member`]:
+    /// `compressed` must be `data` deflated, since the header's CRC and
+    /// uncompressed length are taken from `data`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the write fails.
+    pub fn add_precompressed_segment(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        compressed: &[u8],
+    ) -> Result<()> {
+        self.zip
+            .add_precompressed_member(&mut self.sink, name, data, compressed)
+    }
+
     /// Bytes written to the container so far.
     #[must_use]
     pub fn bytes_written(&self) -> u64 {

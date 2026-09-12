@@ -814,8 +814,11 @@ fn split_device_verifies_the_set_in_place() {
         stdout.contains("Verifying:"),
         "the set was not verified in place: {stdout}"
     );
+    // The wording is `write_verification`'s, shared with the `verify` command:
+    // the acquisition report and a later `verify` run state the result the
+    // same way, so an examiner compares them without translating.
     assert!(
-        stdout.contains("recomputed digest(s) matched"),
+        stdout.contains("Verification results:") && stdout.contains(" matched ("),
         "no digest comparison was reported: {stdout}"
     );
     assert!(

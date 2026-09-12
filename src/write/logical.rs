@@ -938,55 +938,30 @@ fn v1_alpha_iri(local_name: &str, https: bool) -> String {
 /// evidence.
 ///
 /// Returns how many attributes were written.
-/// Whether deflating `data` in full actually produces fewer bytes than the
-/// input. The never-grow guard: a segment must never be stored in a form larger
-/// than verbatim, so a completed deflate that did not shrink is discarded.
-fn deflate_actually_smaller(data: &[u8]) -> bool {
-    use std::io::Write;
-
-    use flate2::Compression;
-    use flate2::write::DeflateEncoder;
-
-    // `Compression::default()` and `DeflateEncoder` (raw deflate) exactly match
-    // what `ZipWriter::add_deflated_member` (src/write/zip_writer.rs) will do
-    // when the Deflate branch is taken, so this guard measures the real output
-    // size, not an approximation. Getting the level wrong here would let the
-    // guard predict a saving the real write does not deliver, or vice versa.
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-    if encoder.write_all(data).is_err() {
-        return false;
-    }
-    match encoder.finish() {
-        Ok(compressed) => compressed.len() < data.len(),
-        Err(_) => false,
-    }
-}
-
 /// Write one segment's bytes with the compression the policy selects.
 ///
-/// The probe ([`crate::write::segment_compression::decide_segment_placement`])
-/// or a forced codec decides Stored vs Deflate. When Deflate is chosen, the
-/// never-grow guard re-checks the real compressed size and falls back to Stored
-/// if it did not shrink, so a compression attempt can never enlarge the
-/// container. A forced Deflate is still guarded: honoring "compress this" must
-/// not mean "store it larger".
+/// [`crate::write::segment_compression::plan_segment`] decides Stored versus
+/// Deflate and, when it chooses Deflate, hands back the compressed bytes it
+/// produced. Those are written directly: deflating again here would double the
+/// cost of every segment for a byte-identical result, which is what the
+/// three-pass version of this function did.
+///
+/// The never-grow guard lives in `plan_segment`, measured against the real
+/// output, so a segment is never written in a form larger than verbatim — not
+/// even when `forced` asked for Deflate.
 fn write_segment_bytes(
     writer: &mut crate::write::container_writer::ContainerWriter,
     name: &str,
     data: &[u8],
     forced: Option<crate::write::segment_compression::SegmentCodec>,
 ) -> crate::error::Result<()> {
-    use crate::write::segment_compression::{SegmentPlacement, decide_segment_placement};
+    use crate::write::segment_compression::{SegmentPlan, plan_segment};
 
-    let placement = decide_segment_placement(data, forced);
-    let store = match placement {
-        SegmentPlacement::Stored => true,
-        SegmentPlacement::Deflate => !deflate_actually_smaller(data),
-    };
-    if store {
-        writer.add_stored_segment(name, data)
-    } else {
-        writer.add_deflated_segment(name, data)
+    match plan_segment(data, forced) {
+        SegmentPlan::Stored => writer.add_stored_segment(name, data),
+        SegmentPlan::Deflate(compressed) => {
+            writer.add_precompressed_segment(name, data, &compressed)
+        }
     }
 }
 
@@ -1135,7 +1110,7 @@ pub struct LogicalAcquisition {
     /// These files **were** acquired, at their actual length — this is not a
     /// completeness finding, and it must never be reported as one. The walk's
     /// figure is an estimate by the time the bytes are read, and under
-    /// `--scan-first` the entire tree is inventoried before the container
+    /// the default initial scan the entire tree is inventoried before the container
     /// exists, so a file on a live system has minutes in which to change.
     pub changed: Vec<(std::path::PathBuf, u64, u64)>,
     /// What deduplication saved, when it was used.
@@ -1418,7 +1393,7 @@ pub fn acquire_logical_scanned(
 /// As [`acquire_logical`], driven by an item stream the caller already
 /// collected to completion, rather than one this call discovers itself.
 ///
-/// For `--scan-first`: the caller has already run [`crate::write::scan::spawn`]
+/// For the default initial scan: the caller has already run [`crate::write::scan::spawn`]
 /// to completion and drained its queue, so the total is exact before the first
 /// byte is written. This drives that finished stream through the same
 /// `acquire_from_items` the concurrent and inline paths use, so the container
@@ -2592,15 +2567,21 @@ mod tests {
 
     const VOLUME: &str = "aff4://e6bae91b-14d231833e18";
 
-    /// The never-grow guard: when the decision is Deflate but the compressed
-    /// bytes are not smaller than the input, the segment must be stored
-    /// verbatim, so the container never grows from a compression attempt. This
-    /// asserts the decision+guard contract at the unit level; it is also
-    /// exercised end-to-end in `tests/logical_acquire.rs`.
+    /// The never-grow guard: when Deflate is asked for but its real output is
+    /// not smaller than the input, the segment must be stored verbatim, so the
+    /// container never grows from a compression attempt. This asserts the
+    /// contract at the unit level; it is also exercised end-to-end in
+    /// `tests/logical_acquire.rs`.
+    ///
+    /// The guard is inside the planner rather than a step after it, because the
+    /// planner is what runs the deflate: one pass now decides *and* produces
+    /// the bytes. So a forced Deflate on incompressible input resolves to
+    /// Stored here, where the earlier split version reported Deflate and left
+    /// the fallback to its caller.
     #[test]
     fn deflate_that_would_grow_falls_back_to_stored() {
         use crate::write::segment_compression::{
-            SegmentCodec, SegmentPlacement, decide_segment_placement,
+            SegmentCodec, SegmentPlacement, SegmentPlan, decide_segment_placement, plan_segment,
         };
         // Incompressible input: a deterministic LCG, top byte taken via
         // `to_le_bytes` so no truncating cast is needed.
@@ -2612,18 +2593,17 @@ mod tests {
                 .wrapping_add(1);
             *b = (state >> 56).to_le_bytes()[0];
         }
-        // Even when the caller forces Deflate, write_segment_bytes must not let
-        // the container grow: the guard measures the real deflate and falls
-        // back. Verify the decision and the guard's helper directly.
-        let placement = decide_segment_placement(&data, Some(SegmentCodec::Deflate));
-        assert_eq!(
-            placement,
-            SegmentPlacement::Deflate,
-            "forced Deflate is the requested placement"
-        );
         assert!(
-            !deflate_actually_smaller(&data),
-            "incompressible data must not be judged smaller after deflate"
+            matches!(
+                plan_segment(&data, Some(SegmentCodec::Deflate)),
+                SegmentPlan::Stored
+            ),
+            "a forced Deflate that would not shrink must plan as Stored"
+        );
+        assert_eq!(
+            decide_segment_placement(&data, Some(SegmentCodec::Deflate)),
+            SegmentPlacement::Stored,
+            "the placement reported must be the one actually written"
         );
     }
 
