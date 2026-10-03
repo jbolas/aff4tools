@@ -25,21 +25,7 @@ corpus = []
 
 # Capabilities that exist to build proposed Canonical Reference Images for
 # AFF4-L Standard v1.0-ALPHA, and are not offered to users. Some of them write
-# output this tool's own `conformance` would fault, which is why the feature is
-# named for what it provides rather than for its use case.
-#
-# What the feature gates is the **command-line interface**: off by default, no
-# shipped binary offers these flags, so no shipped binary writes such a
-# container in response to anything a user can type. That is what matters for a
-# tool whose output supports evidentiary claims, and is why this is a feature
-# rather than a hidden flag.
-#
-# It does not gate the library. The corresponding `LogicalOptions` fields stay
-# public and ungated in every build, so a program linking this crate can ask for
-# them deliberately. Gating them would fracture the library's API for downstream
-# crates, `aff4tools-ffi` among them, and `StorageForm::OwnMap` is in any case a
-# conforming AFF4-L v1.0-ALPHA §6.3 form — the only one able to carry the
-# §6.3.1 block map hash — so it must remain reachable.
+# output this tool's own `conformance` would fault.
 nonconforming = []
 
 # Compiles the hardware SHA-2 paths, by enabling `sha2`'s `asm` feature.
@@ -60,10 +46,7 @@ nonconforming = []
 hash-asm = ["sha2/asm"]
 
 # An Header, Dictionary, Triples measurement harness.
-# Off by default and deliberately inert — enabling it adds one `examples/`
-# binary and changes no library or CLI behavior whatsoever. `Graph` remains the
-# only metadata representation the tool uses. This exists to produce numbers
-# that decide whether phase H2 (an interchangeable backend) is worth building.
+# Off by default.
 hdt-experiment = ["dep:hdt"]
 
 [dependencies]
@@ -71,14 +54,8 @@ blake2 = "0.10"
 # BLAKE3. Named by no AFF4 document; written as aff4:BLAKE3 in the base
 # namespace, following v1.0a's own precedent of carrying aff4:blake2b there.
 #
-# Licensed CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception. Any of the
-# three suits this project; cargo-deny elects the LLVM-exception option, which
-# the allow list already carries. No NOTICE entry is needed: that file lists
-# only crates offering no MIT-or-equivalent option, and CC0 is public domain.
+# Licensed CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception.
 #
-# Brings arrayvec (MIT OR Apache-2.0) and constant_time_eq (CC0-1.0 OR MIT-0 OR
-# Apache-2.0), and compiles blake3_neon.c on aarch64, so a C compiler is already
-# a build requirement here.
 blake3 = "1.5"
 clap = { version = "4.6", features = ["derive"] }
 crc32fast = "1.5"
@@ -118,19 +95,9 @@ thiserror = "2"
 # Apache-2.0 OR LGPL-2.1-or-later; the Apache option is the one taken.
 #
 # None of this reaches a default build, which is wholly MIT/Apache/BSD/Zlib.
-# Settle the licensing before phase H2 makes an HDT backend real.
 hdt = { version = "0.7", features = ["nt"], optional = true }
 
-# Extended attribute enumeration for AFF4-L v1.0-ALPHA §4.3's
-# `extendedAttribute`, read by `src/write/xattr.rs` during a logical
-# acquisition.
-#
-# **A crate rather than the syscalls directly, and that is the point.**
-# `src/lib.rs` denies `unsafe_code` with exactly one audited exception, which
-# `tests/read_only_guard.rs` enforces by counting the annotations as text.
-# Binding `listxattr` and `getxattr` here would need a second exception and
-# weaken that audit for two read-only calls. This crate does the same job behind
-# a safe API.
+# Extended attribute enumeration for AFF4-L v1.0-ALPHA §4.3.
 #
 # Its only dependency is `libc`, already in the tree. Licensed MIT OR
 # Apache-2.0.
@@ -138,11 +105,12 @@ xattr = "1.6"
 
 # ZIP archive access. AFF4 containers are ZIP files.
 #
-# NOTE ON READ-ONLY: `zip::ZipWriter` is NOT feature-gated and compiles
-# regardless of the settings here — writing cannot be disabled at the
-# dependency level. Read-only is enforced by clippy.toml's
-# disallowed-methods list, the crate-root lints in src/lib.rs, a CI grep guard,
-# and the single File::open chokepoint in src/zip.rs. **Do not use ZipWriter.**
+# Note on read-only enforcement: `zip::ZipWriter` compiles regardless 
+# of the features selected here — writing cannot be disabled at the 
+# dependency level. It is denied instead by clippy.
+#
+# **Library code must never use ZipWriter**. Test
+# modules may, to build synthetic archives.
 #
 # `default-features = false` trims unused codecs (bzip2, zstd, lzma, aes) 
 # from the build.

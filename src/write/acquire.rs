@@ -1,9 +1,7 @@
 //! Acquisition sources and the re-imaging path.
 //!
-//! Phase 2 accepts inputs that are, or trivially yield, a flat bytestream:
-//! raw/`dd` images and split-raw sets. They share the property that makes the
-//! accuracy claim provable — the source is a stable file that can be re-read
-//! as many times as verification needs.
+//! Accepts inputs that are, or trivially yield, a flat bytestream:
+//! raw/`dd` images and split-raw sets.
 //!
 //! # Split raw carries a gap
 //!

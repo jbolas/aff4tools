@@ -1121,8 +1121,6 @@ pub struct LogicalAcquisition {
 
 /// Acquire `roots` into `writer` as an AFF4-L logical image.
 ///
-/// Implements AFF4-L 2019 §3.8's ordered recipe and §3.6's enumeration model in full.
-///
 /// # Errors
 ///
 /// [`Error::Io`](crate::error::Error::Io) if a container write fails. A source
