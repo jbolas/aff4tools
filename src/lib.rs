@@ -39,6 +39,7 @@ pub mod arn;
 pub mod codec;
 pub mod container;
 pub mod cpu;
+pub mod disk_image;
 pub mod error;
 pub mod export;
 pub mod hash;
@@ -77,7 +78,8 @@ pub use hash::{Digest, MultiHasher};
 pub use image::Image;
 pub use lexicon::{Generation, Lexicon};
 pub use map::{
-    GapFill, GapPolicy, GapSummary, Map, MapEntry, PartLayout, ReadAccounting, StreamSource, Target,
+    GapFill, GapPolicy, GapSummary, Map, MapEntry, PartLayout, ReadAccounting, StreamSource,
+    Target, UnknownKind, UnknownRegions,
 };
 pub use model::{
     Aff4Object, BlockHashesInfo, ContainerSummary, EdgeKind, GraphEdge, HashAlgorithm, Locality,

@@ -22,7 +22,9 @@
 use crate::arn::{Arn, NameMapping};
 use crate::error::{Deviation, DeviationKind, Error, Locus, Result};
 use crate::lexicon::Lexicon;
-use crate::map::{GapPolicy, IDX_SEGMENT, MAP_SEGMENT, Map, ReadAccounting, StreamSource};
+use crate::map::{
+    GapPolicy, IDX_SEGMENT, MAP_SEGMENT, Map, ReadAccounting, StreamSource, UnknownRegions,
+};
 use crate::rdf::Graph;
 use crate::stream::{ChunkReader, ImageStream, Residency};
 use crate::zip::Volume;
@@ -441,9 +443,36 @@ impl Image {
         locus: &Locus,
         resident: &mut Option<(Arn, Residency)>,
     ) -> Result<usize> {
+        self.read_at_in_set_cached_with(volumes, offset, buf, locus, resident, UnknownRegions::Fill)
+    }
+
+    /// [`Image::read_at_in_set_cached`], choosing what happens at an unknown
+    /// region.
+    ///
+    /// Under [`UnknownRegions::Report`], an `aff4:UnknownData` or
+    /// `aff4:UnreadableData` region yields no bytes: the read stops short
+    /// where one begins, and fails with
+    /// [`Error::UnknownRegion`](crate::Error::UnknownRegion) when it starts
+    /// inside one. A consumer that must never present placeholder content as
+    /// data reads this way.
+    ///
+    /// # Errors
+    ///
+    /// As [`Map::read_at_with`].
+    pub fn read_at_in_set_cached_with(
+        &self,
+        volumes: &mut ZipVolumeSet,
+        offset: u64,
+        buf: &mut [u8],
+        locus: &Locus,
+        resident: &mut Option<(Arn, Residency)>,
+        unknown: UnknownRegions,
+    ) -> Result<usize> {
         let mut source = SetStreams::new(&self.streams, volumes, self.mapping);
         source.resident = resident.take();
-        let result = self.map.read_at(&mut source, offset, buf, locus);
+        let result = self
+            .map
+            .read_at_with(&mut source, offset, buf, locus, unknown);
         *resident = source.resident.take();
         result
     }

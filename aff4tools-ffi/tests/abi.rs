@@ -6,16 +6,25 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::ffi::{CString, c_void};
+use std::ffi::CString;
+#[cfg(feature = "corpus")]
+use std::ffi::c_void;
+#[cfg(feature = "corpus")]
 use std::path::PathBuf;
 
 use aff4::{
-    AFF4_Binary_Result, AFF4_Handle, AFF4_Message, AFF4_close, AFF4_free_messages,
-    AFF4_free_property, AFF4_get_binary_property, AFF4_get_boolean_property,
-    AFF4_get_integer_property, AFF4_get_string_property, AFF4_object_size, AFF4_open, AFF4_read,
+    AFF4_Handle, AFF4_Message, AFF4_close, AFF4_free_messages, AFF4_free_property,
+    AFF4_object_size, AFF4_open, AFF4_read,
+};
+// Used only by the tests that read the reference corpus.
+#[cfg(feature = "corpus")]
+use aff4::{
+    AFF4_Binary_Result, AFF4_get_binary_property, AFF4_get_boolean_property,
+    AFF4_get_integer_property, AFF4_get_string_property,
 };
 
 /// The corpus root, or a clear failure explaining how to point at it.
+#[cfg(feature = "corpus")]
 fn corpus_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("AFF4_TEST_IMAGES") {
         return PathBuf::from(dir);
@@ -24,6 +33,7 @@ fn corpus_root() -> PathBuf {
     PathBuf::from(home).join(".cache/aff4tools/corpus")
 }
 
+#[cfg(feature = "corpus")]
 fn base_linear() -> PathBuf {
     corpus_root().join("pyaff4/test_images/AFF4Std/Base-Linear.aff4")
 }
@@ -99,9 +109,15 @@ fn read_matches_the_safe_api() {
         .map(|o| o.arn.clone())
         .unwrap();
     let lexicon = container.lexicon();
-    let image =
-        aff4tools::image::Image::open_in_set(&arn, container.volumes_mut(), lexicon, &locus)
-            .unwrap();
+    let mapping = container.name_mapping();
+    let image = aff4tools::image::Image::open_in_set(
+        &arn,
+        container.volumes_mut(),
+        lexicon,
+        mapping,
+        &locus,
+    )
+    .unwrap();
     let mut expected = vec![0u8; 65536];
     image
         .read_at_in_set(container.volumes_mut(), 0, &mut expected, &locus)

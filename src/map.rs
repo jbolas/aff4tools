@@ -140,6 +140,32 @@ impl UnknownKind {
     }
 }
 
+impl std::fmt::Display for UnknownKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotAcquired => "not acquired (aff4:UnknownData)",
+            Self::Unreadable => "unreadable when acquired (aff4:UnreadableData)",
+        })
+    }
+}
+
+/// What a random-access read does on reaching an unknown region.
+///
+/// An unknown region, `aff4:UnknownData` or `aff4:UnreadableData`, has defined
+/// placeholder content so that linear digests over the image stay
+/// reproducible. That content is not recovered data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnknownRegions {
+    /// Serve the placeholder bytes. What digest computation and export need,
+    /// since the recorded digests cover those bytes.
+    #[default]
+    Fill,
+    /// Serve no bytes for the region. A read that reaches one after writing
+    /// bytes stops there, short. A read that starts inside one returns
+    /// [`Error::UnknownRegion`] naming the map entry's range.
+    Report,
+}
+
 impl Target {
     /// Resolve a target from its `idx` entry.
     ///
@@ -777,9 +803,10 @@ impl Map {
     /// Fill `buf` from the map starting at `offset`, returning bytes written.
     ///
     /// The random-access counterpart to [`Map::read_all`], and short **only**
-    /// at the end of the image. Works against any [`StreamSource`], so one
-    /// implementation serves a single volume, a striped set, and a multi-part set
-    /// alike.
+    /// at the end of the image. Unknown regions are served as their
+    /// placeholder bytes; [`Map::read_at_with`] can report them instead.
+    /// Works against any [`StreamSource`], so one implementation serves a
+    /// single volume, a striped set, and a multi-part set alike.
     ///
     /// # Errors
     ///
@@ -793,7 +820,28 @@ impl Map {
         buf: &mut [u8],
         locus: &Locus,
     ) -> Result<usize> {
-        read_at_impl(self, source, offset, buf, locus)
+        read_at_impl(self, source, offset, buf, locus, UnknownRegions::Fill)
+    }
+
+    /// [`Map::read_at`], choosing what happens at an unknown region.
+    ///
+    /// Under [`UnknownRegions::Report`] the read is also short where an
+    /// unknown region begins, and fails with [`Error::UnknownRegion`] when it
+    /// starts inside one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Map::read_at`], plus [`Error::UnknownRegion`] under
+    /// [`UnknownRegions::Report`].
+    pub fn read_at_with(
+        &self,
+        source: &mut dyn StreamSource,
+        offset: u64,
+        buf: &mut [u8],
+        locus: &Locus,
+        unknown: UnknownRegions,
+    ) -> Result<usize> {
+        read_at_impl(self, source, offset, buf, locus, unknown)
     }
 
     /// The resolved target list, indexed by [`MapEntry::target_id`].
@@ -1324,8 +1372,9 @@ fn emit_unknown(
 
 /// Fill `buf` from the map starting at `offset`, returning bytes written.
 ///
-/// Short **only** at the end of the image: a read that stops early anywhere
-/// else has silently truncated the caller's data. Entries are walked from the
+/// Short **only** at the end of the image, or, under
+/// [`UnknownRegions::Report`], where an unknown region begins: a read that
+/// stops early anywhere else has silently truncated the caller's data. Entries are walked from the
 /// one covering `offset` until the buffer is full, so a read crossing any
 /// number of entry boundaries is served completely.
 ///
@@ -1344,6 +1393,7 @@ fn read_at_impl(
     offset: u64,
     buf: &mut [u8],
     locus: &Locus,
+    unknown: UnknownRegions,
 ) -> Result<usize> {
     let locus = locus.clone().subject(map.arn.as_str());
     let mut written = 0usize;
@@ -1368,6 +1418,20 @@ fn read_at_impl(
                 ),
             ));
         };
+
+        // Reported, not filled: the placeholder is not recovered data, and a
+        // caller that asked to be told must never receive it as bytes.
+        if let (UnknownRegions::Report, Target::Unknown(kind)) = (unknown, target) {
+            if written > 0 {
+                break;
+            }
+            return Err(Error::UnknownRegion {
+                locus: Box::new(entry_locus),
+                offset: entry.offset,
+                length: entry.length,
+                kind: *kind,
+            });
+        }
 
         // How far into this entry the read starts, and how much of it is left.
         let into_entry = position - entry.offset;
@@ -2265,6 +2329,135 @@ mod tests {
         );
         assert_eq!(accounting.unknown_placeholder, 90);
         assert_eq!(accounting.total(), 100);
+    }
+
+    /// Target 0 is a stored stream, 1 is `UnreadableData`, 2 is `UnknownData`.
+    const UNKNOWN_IDX: &str = "aff4://c215ba20-5648-4209-a793-1f918c723610\n\
+                               http://aff4.org/Schema#UnreadableData\n\
+                               http://aff4.org/Schema#UnknownData\n";
+
+    /// Bytes 0..100 stored, 100..150 unreadable, 150..200 stored, 200..260 not
+    /// acquired, 260..300 stored.
+    fn map_with_unknown_regions() -> Map {
+        let mut bytes = entry(0, 100, 0, 0);
+        bytes.extend(entry(100, 50, 0, 1));
+        bytes.extend(entry(150, 50, 150, 0));
+        bytes.extend(entry(200, 60, 0, 2));
+        bytes.extend(entry(260, 40, 260, 0));
+        Map::parse(
+            &arn("aff4://m"),
+            &bytes,
+            UNKNOWN_IDX.as_bytes(),
+            300,
+            &locus(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn report_mode_stops_short_at_an_unknown_region() {
+        let map = map_with_unknown_regions();
+        let mut buf = [0u8; 80];
+        let n = map
+            .read_at_with(&mut fake(), 60, &mut buf, &locus(), UnknownRegions::Report)
+            .unwrap();
+        assert_eq!(
+            n, 40,
+            "a short read ending where the unreadable region begins"
+        );
+        let expected: Vec<u8> = (60..100u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(&buf[..40], expected.as_slice());
+    }
+
+    #[test]
+    fn report_mode_names_the_unreadable_entry() {
+        let map = map_with_unknown_regions();
+        let mut buf = [0u8; 8];
+        let err = map
+            .read_at_with(&mut fake(), 120, &mut buf, &locus(), UnknownRegions::Report)
+            .unwrap_err();
+        match err {
+            Error::UnknownRegion {
+                offset,
+                length,
+                kind,
+                ..
+            } => {
+                assert_eq!((offset, length), (100, 50));
+                assert_eq!(kind, UnknownKind::Unreadable);
+            }
+            other => panic!("expected UnknownRegion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_mode_names_the_not_acquired_entry() {
+        let map = map_with_unknown_regions();
+        let mut buf = [0u8; 8];
+        let err = map
+            .read_at_with(&mut fake(), 200, &mut buf, &locus(), UnknownRegions::Report)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::UnknownRegion {
+                    offset: 200,
+                    length: 60,
+                    kind: UnknownKind::NotAcquired,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            !err.is_integrity_finding(),
+            "a recorded region is not damage"
+        );
+    }
+
+    #[test]
+    fn report_mode_reads_stored_bytes_between_unknown_regions() {
+        let map = map_with_unknown_regions();
+        let mut buf = [0u8; 50];
+        let n = map
+            .read_at_with(&mut fake(), 150, &mut buf, &locus(), UnknownRegions::Report)
+            .unwrap();
+        assert_eq!(n, 50);
+        let expected: Vec<u8> = (150..200u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(buf.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn fill_mode_is_unchanged_and_serves_the_placeholder() {
+        let map = map_with_unknown_regions();
+        let mut via_read_at = [0u8; 300];
+        let mut via_fill = [0u8; 300];
+        let n = map
+            .read_at(&mut fake(), 0, &mut via_read_at, &locus())
+            .unwrap();
+        let m = map
+            .read_at_with(
+                &mut fake(),
+                0,
+                &mut via_fill,
+                &locus(),
+                UnknownRegions::Fill,
+            )
+            .unwrap();
+        assert_eq!((n, m), (300, 300));
+        assert_eq!(via_read_at, via_fill);
+        assert!(via_fill[100..].starts_with(b"UNREADABLEDATA"));
+        assert!(via_fill[200..].starts_with(b"UNKNOWN"));
+    }
+
+    #[test]
+    fn unknown_kinds_display_their_meaning() {
+        assert!(
+            UnknownKind::NotAcquired
+                .to_string()
+                .contains("not acquired")
+        );
+        assert!(UnknownKind::Unreadable.to_string().contains("unreadable"));
     }
 
     /// A sink failure must propagate rather than being counted as success.

@@ -44,7 +44,6 @@ use std::sync::Mutex;
 
 use aff4tools::arn::Arn;
 use aff4tools::image::Image;
-use aff4tools::model::ObjectRole;
 use aff4tools::stream::Residency;
 use aff4tools::{Container, Locus};
 
@@ -156,146 +155,23 @@ fn report(out: *mut *mut AFF4_Message, level: AFF4_LOG_LEVEL, text: &str) {
     unsafe { *out = node };
 }
 
-/// Every part of a multi-part set the named path belongs to, in read order.
-///
-/// A consumer names one file; a container may be many. Scanning the directory
-/// is what makes the shape invisible, which is the point — see the module
-/// documentation.
-///
-/// Returns just `path` when it is not part of a numbered set, so a single-file
-/// container costs nothing and a lone part that legitimately is the whole
-/// container still opens.
-fn parts_of(path: &Path) -> Vec<PathBuf> {
-    let Some(dir) = path.parent() else {
-        return vec![path.to_path_buf()];
-    };
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return vec![path.to_path_buf()];
-    };
-    // Deliberately **not** gated on the name carrying an ordinal. Under
-    // AFF4-L v1.0-ALPHA §8 the first part of a set is `evidence.aff4`, with no
-    // ordinal at all -- indistinguishable by name from a lone container. So a
-    // name without a number is exactly the case that must still look for
-    // siblings, and `discover` below is what settles which it is.
-    let _ = &name;
-
-    let dir = if dir.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        dir
-    };
-
-    match aff4tools::multi_part::discover(dir) {
-        Ok(set) if set.kind == aff4tools::multi_part::PartKind::Aff4 => {
-            // `discover` refuses a set with a gap in its numbering, so reaching
-            // here means the set is complete. A short image would be worse than
-            // an error: it verifies clean and describes evidence that was never
-            // read.
-            if set.parts.iter().any(|p| p == path) {
-                set.parts
-            } else {
-                vec![path.to_path_buf()]
-            }
-        }
-        // A folder that holds no coherent AFF4 set, or a gap: fall back to the
-        // named file alone rather than guessing. If it really was one part of a
-        // broken set, opening it will fail on its own terms with a better
-        // message than this function could give.
-        _ => vec![path.to_path_buf()],
-    }
-}
-
 /// Open a container and resolve the image the ABI should expose.
+///
+/// Naming any part of a multi-part set opens the whole set, so the container's
+/// shape stays invisible to the ABI's caller. When the container holds several
+/// disk images, the first is taken, as c-aff4's header documents ("access the
+/// first aff4:Image in the container"); TSK was written against that.
 fn open_image(path: &Path) -> Result<(Container, Image, Locus, u64, Arn), String> {
-    let parts = parts_of(path);
-
-    // The **first** part is the primary, whatever part the caller named.
-    //
-    // In a multi-part set only part 001 carries the Map and the full metadata; the
-    // rest declare their own streams and little else. Opening the named part as
-    // primary therefore worked for part 001 and failed for every other part
-    // with "image names no data stream" — the map was simply not in that file.
-    // Since the whole point of this ABI is that the container's shape is
-    // invisible, naming any part must behave identically.
-    let primary = parts.first().map_or(path, PathBuf::as_path);
-    let locus = Locus::new(primary);
-
-    let mut container =
-        Container::open(primary).map_err(|e| format!("opening {}: {e}", primary.display()))?;
-
-    for sibling in &parts {
-        if sibling == primary {
-            continue;
+    let handle = aff4tools::disk_image::open_first(path).map_err(|e| match &e {
+        aff4tools::Error::NoDiskImage { logical: true, .. } => {
+            "No disk image found; this appears to be an AFF4-L logical image.".to_owned()
         }
-        let (volume, graph) = aff4tools::zip_volume_set::open_with_graph(sibling)
-            .map_err(|e| format!("opening part {}: {e}", sibling.display()))?;
-        container.add_volume(
-            volume,
-            graph,
-            aff4tools::zip_volume_set::VolumeOrigin::Named,
-        );
-    }
-
-    let summary = container
-        .summarize()
-        .map_err(|e| format!("reading metadata from {}: {e}", primary.display()))?;
-
-    // c-aff4 keys on aff4:DiskImage, but that type is not the only way a disk
-    // image is declared in the wild. An APFS acquisition written by
-    // MacQuisition/BlackBag types its image `aff4:DiscontiguousImage,
-    // aff4:Image` with no `aff4:DiskImage` at all, and `ObjectRole` classifies
-    // most-specific-first, so such an image lands on `DiscontiguousImage` and a
-    // DiskImage-only filter finds nothing in a container that plainly holds a
-    // disk. `Image::open_in_set` reads all three the same way -- the gap was in
-    // discovery, not in the read path.
-    //
-    // DiskImage still wins when present: the roles are collected in preference
-    // order rather than by first appearance, so a container declaring both is
-    // opened on its DiskImage exactly as before.
-    let images = summary.images();
-    let disk_images: Vec<_> = [
-        ObjectRole::DiskImage,
-        ObjectRole::DiscontiguousImage,
-        ObjectRole::ContiguousImage,
-    ]
-    .iter()
-    .flat_map(|role| {
-        images
-            .iter()
-            .filter(move |o| o.role == *role)
-            .map(|o| o.arn.clone())
-    })
-    .collect();
-
-    // c-aff4's header says "access the first aff4:Image in the container", and
-    // TSK was written against that. Following it matters more than being
-    // stricter.
-    let arn = if let Some(first) = disk_images.first() {
-        first.clone()
-    } else {
-        {
-            // An AFF4-L is not a damaged container, and saying so is more
-            // useful than "no image found". A caller pointed at the wrong kind
-            // of evidence should be told which kind they have.
-            let logical = summary
-                .objects
-                .iter()
-                .any(|o| matches!(o.role, ObjectRole::FileImage | ObjectRole::FolderImage));
-            return Err(if logical {
-                "No disk image found; this appears to be an AFF4-L logical image.".to_owned()
-            } else {
-                format!("No disk image found in {}", primary.display())
-            });
-        }
-    };
-
-    let lexicon = container.lexicon();
-    let mapping = container.name_mapping();
-    let image = Image::open_in_set(&arn, container.volumes_mut(), lexicon, mapping, &locus)
-        .map_err(|e| format!("opening image {arn}: {e}"))?;
-    let size = image.size();
-
-    Ok((container, image, locus, size, arn))
+        _ => e.to_string(),
+    })?;
+    let locus = Locus::new(&handle.primary);
+    let size = handle.image.size();
+    let arn = handle.image.arn().clone();
+    Ok((handle.container, handle.image, locus, size, arn))
 }
 
 /// The library's version string.
@@ -531,10 +407,10 @@ fn property_value(open: &mut Open, property: &str) -> Option<String> {
 
     // `aff4:size` is modelled rather than left in `properties`, so it would be
     // missed by the generic scan below.
-    if wanted == "size" {
-        if let Some(size) = object.size {
-            return Some(size.to_string());
-        }
+    if wanted == "size"
+        && let Some(size) = object.size
+    {
+        return Some(size.to_string());
     }
 
     // Digests are modelled too, and are the values a binary accessor is for.
@@ -652,20 +528,17 @@ pub unsafe extern "C" fn AFF4_get_integer_property(
     let Some(text) = (unsafe { lookup(handle, property, msg) }) else {
         return -1;
     };
-    match text.trim().parse::<i64>() {
-        Ok(value) => {
-            // SAFETY: checked non-null above.
-            unsafe { *result = value };
-            0
-        }
-        Err(_) => {
-            report(
-                msg,
-                AFF4_LOG_LEVEL::WARNING,
-                &format!("value {text:?} is not an integer"),
-            );
-            -1
-        }
+    if let Ok(value) = text.trim().parse::<i64>() {
+        // SAFETY: checked non-null above.
+        unsafe { *result = value };
+        0
+    } else {
+        report(
+            msg,
+            AFF4_LOG_LEVEL::WARNING,
+            &format!("value {text:?} is not an integer"),
+        );
+        -1
     }
 }
 
@@ -875,7 +748,7 @@ pub const MAX_BINARY_PROPERTY_BYTES: usize = 10 * 1024 * 1024;
 /// refusal. Values decoding to more than [`MAX_BINARY_PROPERTY_BYTES`] are
 /// refused before anything is allocated.
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     // Checked before allocating, so an absurd literal costs nothing.
@@ -884,7 +757,7 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
     }
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         out.push(u8::try_from(hi * 16 + lo).ok()?);
@@ -941,7 +814,7 @@ mod tests {
     #[test]
     fn the_cap_leaves_room_for_real_values() {
         // A SHA-512 is 64 bytes; the cap is five orders of magnitude above it.
-        assert!(MAX_BINARY_PROPERTY_BYTES > 64 * 100_000);
+        const { assert!(MAX_BINARY_PROPERTY_BYTES > 64 * 100_000) };
         assert_eq!(MAX_BINARY_PROPERTY_BYTES, 10 * 1024 * 1024);
     }
 }

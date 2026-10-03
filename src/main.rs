@@ -836,102 +836,21 @@ fn run_export(
     run_export_image(path, output)
 }
 
-/// Every part of the multi-part set `path` belongs to, or just `path`.
-///
-/// Mirrors `aff4tools-ffi`'s `parts_of`: naming any part opens the whole set.
-fn parts_of(path: &std::path::Path) -> Vec<PathBuf> {
-    let alone = || vec![path.to_path_buf()];
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return alone();
-    };
-    // Deliberately **not** gated on the name carrying an ordinal. Under
-    // AFF4-L v1.0-ALPHA §8 the first part of a set is `evidence.aff4`, with no
-    // ordinal at all -- indistinguishable by name from a lone container. So a
-    // name without a number is exactly the case that must still look for
-    // siblings, and `discover` below is what settles which it is.
-    //
-    // The cost is a directory listing per open. That was measured against the
-    // alternative: skipping the scan for an unsuffixed name made `export` read
-    // only part 1 of an AFF4-L v1.0-ALPHA §8 set and fail on a stub stream.
-    let _ = &name;
-    let dir = match path.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => std::path::Path::new("."),
-    };
-    match aff4tools::multi_part::discover(dir) {
-        Ok(set)
-            if set.kind == aff4tools::multi_part::PartKind::Aff4
-                && set.parts.iter().any(|p| p == path) =>
-        {
-            set.parts
-        }
-        _ => alone(),
-    }
-}
-
 /// Open a container and the disk image it holds, following parts.
 ///
-/// The first part is the primary whatever part was named: in a multi-part set only
-/// part 001 carries the Map, so opening the named part as primary fails for
-/// every other part.
+/// The library decides which files form the set and which image is the disk;
+/// this only adds the command-line hint for a logical container.
 fn open_disk_image(
     path: &std::path::Path,
 ) -> Result<(aff4tools::Container, aff4tools::image::Image, PathBuf), String> {
-    let parts = parts_of(path);
-    let primary = parts.first().cloned().unwrap_or_else(|| path.to_path_buf());
-    let locus = aff4tools::Locus::new(&primary);
-
-    let mut container = aff4tools::Container::open(&primary)
-        .map_err(|e| format!("opening {}: {e}", primary.display()))?;
-    for sibling in parts.iter().skip(1) {
-        let (volume, graph) = aff4tools::zip_volume_set::open_with_graph(sibling)
-            .map_err(|e| format!("opening part {}: {e}", sibling.display()))?;
-        container.add_volume(
-            volume,
-            graph,
-            aff4tools::zip_volume_set::VolumeOrigin::Named,
-        );
-    }
-
-    let summary = container
-        .summarize()
-        .map_err(|e| format!("reading metadata: {e}"))?;
-    let disk = summary
-        .images()
-        .iter()
-        .find(|o| o.role == aff4tools::ObjectRole::DiskImage)
-        .map(|o| o.arn.clone());
-
-    let Some(arn) = disk else {
-        let is_logical = summary.objects.iter().any(|o| {
-            matches!(
-                o.role,
-                aff4tools::ObjectRole::FileImage | aff4tools::ObjectRole::FolderImage
-            )
-        });
-        return Err(if is_logical {
-            format!(
-                "{} stores no disk image; this appears to be an AFF4-L logical image.\n       \
-                 Use `aff4tools export {} --logical <DIR>` to write its files.",
-                path.display(),
-                path.display()
-            )
-        } else {
-            format!("{} stores no disk image", path.display())
-        });
-    };
-
-    let lexicon = container.lexicon();
-    let mapping = container.name_mapping();
-    let image = aff4tools::image::Image::open_in_set(
-        &arn,
-        container.volumes_mut(),
-        lexicon,
-        mapping,
-        &locus,
-    )
-    .map_err(|e| format!("opening image {arn}: {e}"))?;
-    Ok((container, image, primary))
+    let handle = aff4tools::disk_image::open(path).map_err(|e| match &e {
+        aff4tools::Error::NoDiskImage { logical: true, .. } => format!(
+            "{e}.\n       Use `aff4tools export {} --logical <DIR>` to write its files.",
+            path.display()
+        ),
+        _ => e.to_string(),
+    })?;
+    Ok((handle.container, handle.image, handle.primary))
 }
 
 /// Write a `DiskImage` out as raw bytes.
@@ -5706,6 +5625,9 @@ fn error_kind(error: &Error) -> &'static str {
         Error::NotAff4 { .. } => "not_aff4",
         Error::Malformed { .. } => "malformed",
         Error::Unsupported { .. } => "unsupported",
+        Error::NoDiskImage { .. } => "no_disk_image",
+        Error::AmbiguousImage { .. } => "ambiguous_image",
+        Error::UnknownRegion { .. } => "unknown_region",
     }
 }
 

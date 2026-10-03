@@ -249,6 +249,56 @@ pub enum Error {
         /// Where it was encountered, and any detail worth reporting.
         context: String,
     },
+
+    /// The container holds no disk image.
+    ///
+    /// Not an integrity finding: an AFF4-L logical container is well formed
+    /// and simply holds files, which `logical` says.
+    #[error(
+        "{path} stores no disk image{}",
+        if *logical { "; it appears to be an AFF4-L logical image" } else { "" }
+    )]
+    NoDiskImage {
+        /// The container's first part.
+        path: PathBuf,
+        /// Whether it holds logical file or folder images instead.
+        logical: bool,
+    },
+
+    /// The container holds several disk images of the same kind, and none was
+    /// named.
+    ///
+    /// Not an integrity finding: v1.0a allows a volume to hold several images.
+    #[error(
+        "{path} holds {} disk images; name one of: {}",
+        candidates.len(),
+        candidates.join(", ")
+    )]
+    AmbiguousImage {
+        /// The container's first part.
+        path: PathBuf,
+        /// The candidates' ARNs, in the order the container lists them.
+        candidates: Vec<String>,
+    },
+
+    /// A read reached a region whose content the container records as
+    /// unknown: `aff4:UnknownData` or `aff4:UnreadableData`.
+    ///
+    /// Returned only by reads that ask for it with
+    /// [`UnknownRegions::Report`](crate::map::UnknownRegions::Report). Not an
+    /// integrity finding: the region is honestly recorded. `offset` and
+    /// `length` are the map entry's range in the image's address space.
+    #[error("content of bytes {offset}..{} at {locus} is unknown: {kind}", offset.saturating_add(*length))]
+    UnknownRegion {
+        /// Where the read reached the region.
+        locus: Box<Locus>,
+        /// Where the region begins.
+        offset: u64,
+        /// How long it is.
+        length: u64,
+        /// Which kind of unknown region the map names.
+        kind: crate::map::UnknownKind,
+    },
 }
 
 impl Error {
@@ -298,10 +348,12 @@ impl Error {
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
         match self {
-            Self::Io { path, .. } | Self::Zip { path, .. } | Self::NotAff4 { path, .. } => {
-                Some(path)
-            }
-            Self::Malformed { locus, .. } => Some(&locus.path),
+            Self::Io { path, .. }
+            | Self::Zip { path, .. }
+            | Self::NotAff4 { path, .. }
+            | Self::NoDiskImage { path, .. }
+            | Self::AmbiguousImage { path, .. } => Some(path),
+            Self::Malformed { locus, .. } | Self::UnknownRegion { locus, .. } => Some(&locus.path),
             Self::Unsupported { .. } => None,
         }
     }
@@ -326,11 +378,18 @@ impl Error {
     /// convention), so library codes start at `3` and no library failure can be
     /// confused with a mistyped command line. `1` is left unused rather than
     /// assigned, since a bare `1` is what a panicking process would produce.
+    ///
+    /// `4` covers every case of a container that is not what was asked for: not
+    /// AFF4 at all, holding no disk image, or holding several.
+    ///
+    /// [`Error::UnknownRegion`] shares `3` with a failed read: the bytes asked
+    /// for could not be returned. The command line never requests the
+    /// reporting mode, so it never exits with this variant.
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::Io { .. } | Self::Zip { .. } => 3,
-            Self::NotAff4 { .. } => 4,
+            Self::Io { .. } | Self::Zip { .. } | Self::UnknownRegion { .. } => 3,
+            Self::NotAff4 { .. } | Self::NoDiskImage { .. } | Self::AmbiguousImage { .. } => 4,
             Self::Malformed { .. } => 5,
             Self::Unsupported { .. } => 6,
         }
