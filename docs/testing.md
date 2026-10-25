@@ -8,35 +8,65 @@ conventions that keep it honest.
 ## Running
 
 ```sh
-cargo test                          # nothing to download
-./utilities/fetch-corpus.sh         # get the reference containers, once
-cargo test --features corpus        # against real evidence
+./utilities/fetch-corpus.sh         # get the corpus, once
+cargo test                          # the library and CLI
+cargo test --features corpus        # plus the gated corpus tests
+cargo test -p aff4tools-ffi         # the C library (add --features corpus)
 ```
 
-That is the whole setup. The fetch script downloads the reference containers
-into `~/.cache/aff4tools/corpus`, which is where the tests look by default —
-no environment variable needed. It is safe to re-run: already-fetched
-containers at the pinned commit are left alone.
+The fetch script needs `git` and `python3`. It downloads the reference
+containers at pinned commits and generates the v2.1 containers (see
+[Fixtures](#fixtures)), all into `~/.cache/aff4tools/corpus`, where the tests
+look by default. Re-running it leaves containers already at the pinned commit
+alone.
 
-Pass a different directory to put them elsewhere, then point the tests at it:
+To use another directory, pass it to the script and point the tests at it:
 
 ```sh
 ./utilities/fetch-corpus.sh /data/aff4-corpus
 export AFF4_TEST_IMAGES=/data/aff4-corpus
 ```
 
-`tests/cross_tool.rs` additionally runs pyaff4 as an independent implementation
-and needs its source tree plus a Python that can import it:
+A plain `cargo test` runs only the main crate. The workspace sets no
+`default-members`, so the C library's tests in `aff4tools-ffi/tests/abi.rs`
+run only under `-p aff4tools-ffi` or `--workspace`.
+
+### What needs the corpus
+
+**Most corpus tests are gated, not skipped.** `tests/corpus.rs`,
+`tests/coverage.rs`, `tests/independent_digest_agreement.rs`, the corpus tests
+in `tests/cli.rs`, and those in `abi.rs` compile only under `--features corpus`.
+A runtime skip would let CI report success having checked nothing; a
+compile-time feature cannot.
+
+Two groups break that rule:
+
+- **Ungated, and fail without the corpus.** `tests/storage_forms.rs`,
+  `tests/storage_malformed.rs`, and `tests/zip_segment_conformance.rs` read the
+  generated v2.1 containers. Without them, a plain `cargo test` fails 20 tests.
+- **Ungated, and pass without the corpus.** Six tests in `tests/malformed.rs`
+  and one in `tests/storage_malformed.rs` return early when their container is
+  absent. They report success having checked nothing.
+
+### Tests that need pyaff4
+
+Two files compare against pyaff4, the only other implementation that
+recomputes AFF4 digests. Each checks for its environment variables at run time
+and, if any is missing, prints a skip notice and passes:
+
+| File | Checks | Variables |
+|---|---|---|
+| `tests/cross_tool.rs` | pyaff4 accepts what aff4tools writes | `AFF4_PYAFF4_PYTHON`, `AFF4_PYAFF4_ROOT` |
+| `tests/independent_digest_agreement.rs` | both compute the same digests on the corpus | `AFF4_PYAFF4_PYTHON`, `AFF4_PYAFF4_PATCHED` |
+
+`AFF4_PYAFF4_PYTHON` names an interpreter that can import pyaff4. Each file's
+header explains how to set pyaff4 up; the second needs a one-line patch to
+pyaff4.
 
 ```sh
-AFF4_PYAFF4_ROOT=/path/to/pyaff4 AFF4_PYAFF4_PYTHON=python3 \
+AFF4_PYAFF4_ROOT=/path/to/pyaff4 AFF4_PYAFF4_PYTHON=/path/to/venv/bin/python \
     cargo test --test cross_tool
 ```
-
-**Corpus tests are gated, not skipped.** A green `cargo test` without fixtures
-means the default suite passed — not that any real container was verified. A
-runtime skip would let CI report success having checked nothing, so the gate
-is a compile-time feature instead.
 
 ### The `nonconforming` suite
 
@@ -95,24 +125,44 @@ invisible from `tests/`. Integration tests see only the public API, as a
 downstream consumer would; `tests/cli.rs` launches the real binary through
 `assert_cmd`, which is what proves the library/binary seam.
 
-| Location | Sees | Purpose |
-|---|---|---|
-| `src/**/*.rs` in `#[cfg(test)] mod tests` | private items | Unit |
-| `tests/cli.rs` | the built binary | End-to-end CLI |
-| `tests/corpus.rs` | public API | Real containers |
-| `tests/malformed.rs` | public API | Damaged input |
-| `tests/split_acquire.rs` | public API | Split-set writing |
-| `tests/logical_acquire.rs` | public API | AFF4-L writing |
-| `tests/dedupe_acquire.rs` | public API | AFF4-L §4 dedupe |
-| `tests/striped_generated.rs` | public API | Striped volumes |
-| `tests/acquire_verify.rs` | public API | Acquisition + proof |
-| `tests/write_roundtrip.rs` | public API | Write gates 1–3 |
-| `tests/discontiguous.rs` | the built binary | Maps with holes |
-| `tests/read_only_guard.rs` | `src/*.rs` as text | Write-blocking |
-| `tests/codecs.rs` | public API | Codec coverage |
-| `tests/independent_digest_agreement.rs` | public API + pyaff4 | Digest agreement |
-| `tests/parallel_pipeline.rs` | public API | Ordering, deadlock |
-| `tests/cross_tool.rs` | public API + pyaff4 | Gate 4, env-gated |
+Unit tests are in `#[cfg(test)] mod tests` blocks under `src/`. The
+integration tests in `tests/`:
+
+| File | Covers |
+|---|---|
+| `acquire_verify.rs` | Acquisition, then verification of the result |
+| `aff4l_v1_alpha_acquire.rs` | Writing AFF4-L v1.0-ALPHA containers |
+| `citation_style.rs` | Every specification citation names its document |
+| `cli.rs` | The built binary, end to end |
+| `codecs.rs` | Codec coverage |
+| `corpus.rs` | Values read from the reference containers |
+| `coverage.rs` | Rules `conformance` cannot evaluate, and `--strict` |
+| `cross_tool.rs` | Gate 4: pyaff4 accepts what aff4tools writes |
+| `dedupe_acquire.rs` | AFF4-L 2019 §4 deduplication |
+| `discontiguous.rs` | Maps with holes |
+| `disk_image.rs` | Finding a set's parts, choosing its image, reading it |
+| `hash_algorithms.rs` | AFF4-L v1.0-ALPHA §4.4 digests, plus BLAKE3 |
+| `hdt_backend.rs` | The HDT backend answers as `Graph` does (`hdt-experiment`) |
+| `independent_digest_agreement.rs` | Gate 5: aff4tools and pyaff4 compute the same digests |
+| `logical_acquire.rs` | AFF4-L writing |
+| `logical_scan.rs` | The metadata scanner's queue, cost model, and degradation |
+| `malformed.rs` | Damaged input |
+| `metadata_integrity.rs` | AFF4-L v1.0-ALPHA §10.1 metadata integrity hash |
+| `multi_part_acquire.rs` | Writing one image across several parts |
+| `nonconforming.rs` | The `nonconforming` feature |
+| `parallel_pipeline.rs` | Ordering and deadlock in the parallel reader |
+| `progress.rs` | Progress rendering |
+| `read_only_guard.rs` | Write-blocking, by scanning `src/` as text |
+| `rule_registry.rs` | `docs/conformance-rules.md` matches the registry |
+| `shared_map_storage.rs` | AFF4-L v1.0-ALPHA §6.3 shared map storage |
+| `storage_forms.rs` | Reading every AFF4-L v1.0-ALPHA §6 storage form |
+| `storage_malformed.rs` | Strict AFF4-L v1.0-ALPHA §6 dispatch |
+| `striped_generated.rs` | Striped volumes |
+| `write_roundtrip.rs` | Write gates 1–3 |
+| `xattr_acquire.rs` | Extended attributes (Unix only) |
+| `zip_segment_conformance.rs` | AFF4-L v1.0-ALPHA §6.1 and §8 |
+
+The C library's tests are in `aff4tools-ffi/tests/abi.rs`.
 
 Test names are the index. `cargo test <name>` runs one; the doc comment above
 it says what it asserts and what makes it fail. That is deliberately not
@@ -129,8 +179,16 @@ this project redistributes neither:
 | [`aff4/pyaff4`](https://github.com/aff4/pyaff4) | Apache-2.0 | 12 |
 | [`aff4/aff4-cpp-lite`](https://github.com/aff4/aff4-cpp-lite) | LGPL-3.0 | 8 |
 
-`utilities/fetch-corpus.sh` downloads them at pinned commits. They are treated
-as read-only evidence: a test needing mutated bytes copies the original into a
+`utilities/fetch-corpus.sh` downloads them at pinned commits.
+
+No AFF4-L v1.0-ALPHA reference images exist yet, so the script also runs
+`utilities/make_v21_container.py`, which writes 34 small v2.1 containers into
+`aff4tools-v2.1/`. The generator is independent of the aff4tools writer. Its
+output is test input, not canonical reference images. Without `python3` the
+script skips this step and warns, and the tests that read these containers
+fail.
+
+All of these are treated as read-only evidence: a test needing mutated bytes copies the original into a
 `tempfile::TempDir` and mutates the copy, and `tests/malformed.rs` asserts the
 source's length and mtime are unchanged afterwards.
 
@@ -265,7 +323,7 @@ mean the checksum was never consulted.
 
 Reference containers hold **one bevy per stream**, so the parallel read path's
 reorder window never fills on any of them. Three deadlocks in `src/parallel.rs`
-reached a real 236 GB container with the whole suite green. None was a subtle
+reached a real 237 GB container with the whole suite green. None was a subtle
 race: each parked every thread at 0% CPU. The tests simply could not construct
 the state.
 
@@ -327,7 +385,7 @@ Filename order is the rule that survives.
 - **Scudette pre-Standard dialect**: zero fixtures. The detect-and-refuse path is tested
   only with a synthetic archive.
 - **Encrypted containers**: no fixture; detection is unimplemented.
-- **Directory-backed volumes** (spec §5): not implemented.
+- **Directory-backed volumes** (v1.0a §5): not implemented.
 - **Zlib and LZ4 against real containers**: see the codec warning above.
 - **Raw deflate and Rekall snappy codecs**: declined by decision, not implemented.
 

@@ -1,187 +1,143 @@
-# Compiling aff4tools for Mac or Linux
+# Compiling aff4tools
 
-These instructions will help you compile `aff4tools` (the command-line binary) and `libaff4` (the C ABI shared or static library). 
-The project is developed and tested on macOS. Linux support is theoretically in place but untested.
+This repository builds two things:
+
+- `aff4tools`, the command-line tool.
+- `libaff4`, a C library for reading AFF4 disk images.
+
+Both are written in Rust. Neither depends on an external C library.
+
+Development and testing have been done on macOS. Linux builds but is less tested.
+Windows is unsupported; building and running on Windows Subsystem for Linux (WSL2) works.
 
 ## Prerequisites
 
-You need Rust 1.85 or newer. Both crates declare `edition = "2024"`, which older compilers reject outright. Check with:
-
-```sh
-cargo --version
-```
-
-Install from [rustup.rs](https://rustup.rs) if the command is missing. On
-Linux, a distribution `rustc` is often too old — prefer rustup over the
-package manager.
-
-You also need a working C compiler and your platform's linker and SDK to produce a binary.
-
-- For **macOS** — the Xcode Command Line Tools. Run `xcode-select --install` once, or
-  check with `xcode-select -p`. The full Xcode app is not required.
-- For **Linux** — you need `build-essential` (Debian, Ubuntu) or `gcc` (Fedora, Arch) which should already be there.
+- **Rust 1.85 or newer.** Install it with [rustup](https://rustup.rs). Linux
+  distribution packages are often too old.
+- **A C compiler and linker.** You need this to build the C library, and also for two hashing dependencies.
+  - On macOS: `xcode-select --install`
+  - On Linux: `build-essential` (Debian, Ubuntu) or `gcc` (Fedora, Arch)
 
 ---
 
-## 1. Compile `aff4tools`, the CLI
-
-The build is identical on macOS and Linux. Expect a lot of Rust crate downloads the first time you build.
+## 1. Build the `aff4tools` command
 
 ```sh
-git clone https://github.com/jbolas/aff4tools aff4tools
+git clone https://github.com/jbolas/aff4tools
 cd aff4tools
 cargo build --release
-```
-
-The binary lands at `target/release/aff4tools`. Without changing directories, confirm it runs:
-
-```sh
 ./target/release/aff4tools --version
-./target/release/aff4tools info <container.aff4>
 ```
 
-Install onto `PATH` which places it in `~/.cargo/bin`:
+To install it into `~/.cargo/bin`:
+
 ```sh
 cargo install --path .
 ```
 
-If you're on Linux, for good measure, run the tests. Just get ready for a lot more crates to be downloaded and compiled.
-
-```sh
-cargo test
-```
-
-There are more tests that use reference images. To run these tests, get the images and run again with the `--features corpus` flag:
-
-```sh
-./utilities/fetch-corpus.sh
-cargo test --features corpus
-```
-
-The script downloads them at pinned commits into `~/.cache/aff4tools/corpus`,
-which is where the tests look by default. Pass a directory to put them
-elsewhere, then set `AFF4_TEST_IMAGES` to match. See [testing.md](testing.md).
+To run the tests, see [testing.md](testing.md).
 
 ---
 
-## 2: Compile `libaff4`, the C library
+## 2. Build the `libaff4` library
 
-`aff4tools-ffi` exposes the C ABI. Its `[lib]` section renames the artifact to
-`aff4` and requests three crate types, so one build produces both a shared and
-a static library:
+`libaff4` gives C and C++ programs read access to AFF4 disk images. It
+implements the C interface of [c-aff4](https://github.com/Velocidex/c-aff4):
+the same header, `libaff4-c.h`, and the same thirteen functions. It adds one
+function, `AFF4_free_property`.
+
+It is built from this repository and doesn'tuse c-aff4 or
+aff4-cpp-lite.
+
+### Why use the same library name as `c-aff4`
+
+Programs like The Sleuth Kit look for a library named `libaff4`. Giving
+this library the same name lets those programs use it without changes. The
+Sleuth Kit is one: its build searches for `-laff4`.
+
+This makes it possible to run one tool with two different AFF4 implementations
+and compare their output and performance.
+
+`AFF4_version()` tells the two libraries apart. It returns `aff4tools <version>`
+for this library and `libaff4 version <version>` for c-aff4.
+
+### Limits
+
+- **Disk images only.** It refuses AFF4-L logical containers. Use the `aff4tools` CLI command to work with AFF4-Ls.
+- **C only.** c-aff4's library also exports C++ classes, but that's not currently implemented here.
+
+### Build
 
 ```sh
 cargo build --release -p aff4tools-ffi
 ```
 
-| Platform | Shared | Static |
+| | Shared | Static |
 |---|---|---|
-| Linux | `target/release/libaff4.so` | `target/release/libaff4.a` |
 | macOS | `target/release/libaff4.dylib` | `target/release/libaff4.a` |
+| Linux | `target/release/libaff4.so` | `target/release/libaff4.a` |
 
-The public header is `aff4tools-ffi/include/libaff4-c.h`. It declares fourteen
-functions — `AFF4_open`, `AFF4_read`, `AFF4_close`, the property getters, and
-the message helpers — and is already wrapped in `extern "C"` for C++ callers.
-
-### Linking a C consumer
-
-The compile line is the same on both systems; only the runtime-path flag
-differs, because each platform resolves shared libraries its own way.
-
-**macOS**, against the shared library:
-
-```sh
-cc -o consumer consumer.c \
-   -I aff4tools-ffi/include \
-   -L target/release -laff4 \
-   -Wl,-rpath,@loader_path
-```
-
-**Linux**, against the shared library:
-
-```sh
-cc -o consumer consumer.c \
-   -I aff4tools-ffi/include \
-   -L target/release -laff4 \
-   -Wl,-rpath,'$ORIGIN'
-```
-
-`@loader_path` and `$ORIGIN` mean the same thing — "look beside the
-executable" — so the library needs to sit next to the binary you just built.
-Without the flag, set `DYLD_LIBRARY_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux)
-to `target/release` at run time.
-
-Against the static library, Linux needs the platform libraries Rust's runtime
-depends on; macOS needs nothing extra:
-
-```sh
-# macOS
-cc -o consumer consumer.c -I aff4tools-ffi/include target/release/libaff4.a
-
-# Linux
-cc -o consumer consumer.c -I aff4tools-ffi/include target/release/libaff4.a \
-   -lpthread -ldl -lm
-```
-
-`aff4tools-ffi/tests/consumer.c` is a working example. It uses
-`<CommonCrypto/CommonDigest.h>` for its SHA-256, which is macOS-only —
-substitute OpenSSL (`-lcrypto`) or any other digest to build it on Linux.
-Nothing in `libaff4-c.h` itself requires CommonCrypto.
-
-### Verifying the ABI
-
-```sh
-cargo test -p aff4tools-ffi
-```
-
-These are gated the same way the library's are, and resolve the corpus the
-same way: `AFF4_TEST_IMAGES` if set, otherwise `~/.cache/aff4tools/corpus`
-where `fetch-corpus.sh` puts it.
+The header is `aff4tools-ffi/include/libaff4-c.h`.
+`aff4tools-ffi/tests/consumer.c` is an example C program.
 
 ---
 
-## Join the cause! Test on Linux!
+## 3. Using `libaff4` with The Sleuth Kit
 
-**Block-device sizing works on macOS and Linux, but Linux is insufficiently tested.**
-`src/write/device.rs` asks the driver for the device's size. macOS multiplies
-`DKIOCGETBLOCKCOUNT` by `DKIOCGETBLOCKSIZE`; Linux asks for `BLKGETSIZE64`.
+The Sleuth Kit's AFF4 support exists only on its `develop` branch. Building from that branch requires some extra steps.
+This has been tested on macOS with Homebrew.
 
-On Linux, before relying on `acquire --device`, check the device block size manually:
+**1. Install autotools.** The `develop` branch includes no generated
+`configure` script.
+
 ```sh
-sudo blockdev --getsize64 /dev/sdX     # what the kernel says
-```
-and confirm the container's `size` matches. 
-
-**Symlink and permission handling is tuned to macOS.** The special cases in
-`logical.rs` around unreadable directories were derived from macOS behavior.
-Linux will present different permission issues with `acquire --logical`.
-
-## What about Windows?
-
-Windows is not supported. But I would think something like this would build the CLI tool:
-
-```powershell
-cargo build --release
-.\target\release\aff4tools.exe --version
+brew install autoconf automake libtool              # macOS
+<or>
+sudo apt install autoconf automake libtool          # Debian, Ubuntu
 ```
 
-Claude says: Use the MSVC toolchain (`stable-x86_64-pc-windows-msvc`, rustup's
-default), which needs the Visual Studio Build Tools with the "Desktop
-development with C++" workload for its linker. The GNU toolchain also
-compiles the CLI if you prefer it.
+**2. Stage `libaff4`.** The Sleuth Kit expects the header under an `aff4/`
+directory. Staging only the static library builds `libaff4` into The Sleuth
+Kit, so no library search path needs setting.
 
-Windows is untested against real containers. Don't submit issues about it, please.
-I would guess the read commands (`info`, `verify`, `conformance`) might work ok, 
-but anything that writes  will encounter all the usual path syntax and POSIX incompatibility problems.
+```sh
+PREFIX=$HOME/aff4-prefix
+mkdir -p "$PREFIX/include/aff4" "$PREFIX/lib"
+cp aff4tools-ffi/include/libaff4-c.h "$PREFIX/include/aff4/"
+cp target/release/libaff4.a "$PREFIX/lib/"
+```
 
-## If the build fails
+**3. Build The Sleuth Kit.**
 
-If you get `feature edition2024 is required`, the toolchain predates 1.85. Run `rustup update stable`.
+```sh
+git clone --depth 1 --branch develop https://github.com/sleuthkit/sleuthkit.git
+cd sleuthkit
+./bootstrap
+./configure --with-libaff4="$PREFIX"
+make -j8
+```
 
-The error `linker 'cc' not found` on Linux means you must  install `build-essential` (Debian,
-Ubuntu) or `gcc` (Fedora, Arch). Rust needs a system linker even though it compiles no C here.
+`configure` must report `libaff4 support: yes`. On Linux, if it reports `no`,
+the static library may need extra system libraries:
+`LIBS="-lpthread -ldl -lm" ./configure --with-libaff4="$PREFIX"`. That fix has
+not been tested.
 
-On macOS, `invalid active developer path` means that the Command Line Tools are missing or 
-unselected, so `/usr/bin/cc` has nothing to forward to. Run `xcode-select --install`.
+**4. Confirm AFF4 support.**
 
-Other build failures? I have faith you can solve them.
+```sh
+tools/imgtools/img_stat -i list
+```
+
+If successful, this list will include `aff4 (Advanced Forensic Format 4 (AFF4))`.
+
+**5. Read a container.** Pass `-i aff4` to any tool. For a split container,
+name any part; the library finds the others.
+
+```sh
+tools/vstools/mmls  -i aff4 evidence.aff4               # partitions
+tools/fstools/fls   -i aff4 -o 128 evidence.aff4        # files at sector 128
+tools/fstools/icat  -i aff4 -o 128 evidence.aff4 35 > file.out
+```
+
+The tools run from the build tree. `make install` installs them into
+`/usr/local`.
