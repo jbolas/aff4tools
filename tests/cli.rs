@@ -653,7 +653,7 @@ fn help_lists_the_info_command() {
 fn info_help_lists_every_flag() {
     let assert = aff4tools().args(["info", "--help"]).assert().success();
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    for flag in ["--format", "--strict", "--objects", "--brief"] {
+    for flag in ["--format", "--objects", "--brief"] {
         assert!(out.contains(flag), "{flag} missing from help:\n{out}");
     }
 }
@@ -671,7 +671,7 @@ fn help_describes_the_new_defaults() {
     let assert = aff4tools().args(["info", "--help"]).assert().success();
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(!out.contains("--verbose"), "-v was removed:\n{out}");
-    for flag in ["--format", "--strict", "--objects"] {
+    for flag in ["--format", "--objects"] {
         assert!(out.contains(flag), "{flag} missing from help:\n{out}");
     }
     // An earlier assertion was that `--format json`'s help named the
@@ -990,7 +990,7 @@ fn help_lists_the_verify_command() {
 fn verify_help_lists_every_flag() {
     let assert = aff4tools().args(["verify", "--help"]).assert().success();
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    for flag in ["--format", "--no-block-hashing", "--strict", "--verbose"] {
+    for flag in ["--format", "--no-block-hashing", "--verbose"] {
         assert!(out.contains(flag), "{flag} missing from help:\n{out}");
     }
 }
@@ -1908,97 +1908,38 @@ mod corpus {
         assert!(saw_an_edge, "fixture must exercise at least one edge");
     }
 
-    /// Deviations are always reported by `conformance`; `--strict` decides
-    /// whether they matter to the exit code, and routine ones deliberately do
-    /// not.
+    /// `conformance` reports every deviation and sets no exit code for any.
     ///
-    /// `Base-Linear` has exactly one deviation — the NUL-padded ZIP comment —
-    /// which one writer produces for every container it writes. It is reported
-    /// either way and fails neither, because an exit code that fires on a
-    /// well-formed container carries no information. This test asserted the
-    /// opposite previously; see
-    /// `DeviationKind::is_routine`.
+    /// `Base-Linear` carries a routine deviation, the NUL-padded ZIP comment;
+    /// `unicode.aff4` carries nonstandard datatype IRIs, which are not routine.
+    /// Both are reported and both exit 0: the report is the product, and a
+    /// script reads `--format json` for the findings themselves.
     #[test]
-    fn strict_ignores_routine_deviations_but_still_reports_them() {
-        // Reported either way, which is the claim under test.
-        for args in [vec!["conformance"], vec!["conformance", "--strict"]] {
+    fn conformance_reports_deviations_without_an_exit_code() {
+        for (name, finding) in [
+            (BASE_LINEAR, "NUL-padded ZIP comment"),
+            (UNICODE, "Deviations"),
+        ] {
             aff4tools()
-                .args(&args)
-                .arg(fixture(BASE_LINEAR))
+                .args(["conformance"])
+                .arg(fixture(name))
                 .assert()
-                .stdout(predicate::str::contains("NUL-padded ZIP comment"));
+                .success()
+                .stdout(predicate::str::contains(finding));
         }
-
-        // Without `--strict` the routine deviation sets no exit code.
-        aff4tools()
-            .args(["conformance"])
-            .arg(fixture(BASE_LINEAR))
-            .assert()
-            .success();
-
-        // **`--strict` no longer exits 0 here, and that is not this deviation's
-        // doing.** Phase 10 declared the AFF4 Standard v1.0a §6.2 block map
-        // hashing requirements, three of which have no checker yet, and
-        // `--strict` fires on an unevaluated binding rule — the project's rule
-        // that an unchecked requirement is never folded into a clean result.
-        //
-        // So the routine deviation is still ignored by `--strict`; something
-        // else now raises the code. Asserted by reading the report rather than
-        // the exit status, since the status can no longer distinguish them.
-        let assert = aff4tools()
-            .args(["conformance", "--strict"])
-            .arg(fixture(BASE_LINEAR))
-            .assert();
-        let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-        assert!(
-            out.contains("Not evaluated"),
-            "the strict exit code must come from unevaluated rules:\n{out}"
-        );
-        assert!(
-            out.contains("Deviations (1)"),
-            "the routine deviation is the only one reported:\n{out}"
-        );
     }
 
-    /// `--strict` still sets the exit code on `info` and `verify`, even though
-    /// neither lists deviations any more.
-    ///
-    /// The listing moved to `conformance`; the exit-code contract did not. A
-    /// script gating on `info --strict` keeps working, which is why the flag
-    /// stayed on both commands.
+    /// `--strict` is gone from every reading command; passing it is a usage
+    /// error rather than a silently ignored flag.
     #[test]
-    fn strict_still_sets_the_exit_code_on_info() {
-        aff4tools()
-            .args(["info"])
-            .arg(fixture(UNICODE))
-            .assert()
-            .success();
-
-        aff4tools()
-            .args(["info", "--strict"])
-            .arg(fixture(UNICODE))
-            .assert()
-            .code(7);
-    }
-
-    /// The other half of the contract: a noteworthy deviation does fail.
-    ///
-    /// `unicode.aff4` carries nonstandard datatype IRIs, which can change how a
-    /// value is interpreted and so are never routine.
-    #[test]
-    fn strict_promotes_noteworthy_deviations_to_a_failure() {
-        aff4tools()
-            .args(["conformance"])
-            .arg(fixture(UNICODE))
-            .assert()
-            .success();
-
-        aff4tools()
-            .args(["conformance", "--strict"])
-            .arg(fixture(UNICODE))
-            .assert()
-            .code(7)
-            .stdout(predicate::str::contains("Deviations"));
+    fn strict_is_not_accepted() {
+        for command in ["info", "conformance", "verify"] {
+            aff4tools()
+                .args([command, "--strict"])
+                .arg(fixture(UNICODE))
+                .assert()
+                .code(2);
+        }
     }
 
     #[test]

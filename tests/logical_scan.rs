@@ -287,7 +287,7 @@ fn the_callback_sees_the_scan_complete() {
 /// `acquire_from_items` drains any directory left open when the item stream
 /// ends and reports each one. That drain exists for a truncated stream; a
 /// balanced one must never reach it, or every clean run would report a
-/// skipped path and exit non-zero under `--strict`.
+/// skipped path and exit 7.
 #[test]
 fn a_complete_scanned_acquisition_skips_nothing() {
     use aff4tools::Locus;

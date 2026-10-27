@@ -195,11 +195,11 @@ fn an_own_map_container_verifies_and_reports_no_deviation() {
     // permanent reference set, so an unmet requirement here would be an unmet
     // requirement in a proposed reference image.
     //
-    // Read from the JSON report's deviation list rather than from `--strict`'s
-    // exit code or the report's own `conformant` flag. Both of those also fail
-    // on a MUST the rule registry has not yet been taught to evaluate, and this
-    // build carries several of those, so every container aff4tools writes fails
-    // them whatever it holds. An empty deviation list is the narrower question
+    // Read from the JSON report's deviation list rather than from the report's
+    // own `conformant` flag. That flag is also false for a MUST the rule
+    // registry has not yet been taught to evaluate, and this build carries
+    // several of those, so it is false for every container aff4tools writes,
+    // whatever it holds. An empty deviation list is the narrower question
     // this form has to answer: nothing observed departs from the standard.
     let report = aff4tools()
         .arg("conformance")
@@ -383,10 +383,8 @@ fn a_forced_resident_stream_still_refuses_to_exceed_the_ceiling() {
 fn the_alternative_namespace_is_written_when_asked() {
     let (_src, root) = source_tree();
 
-    // Not the shared `acquire` helper: that asserts success, but this
-    // container is now expected to carry deviations (see below), and
-    // `acquire` itself exits non-zero — `EXIT_STRICT_DEVIATION` — whenever
-    // the container it just wrote has any, independent of `--strict`.
+    // This container is expected to carry deviations (see below). `acquire`
+    // prints their count and still exits 0: conformance sets no exit code.
     let out = tempfile::tempdir().expect("a temp dir");
     let path = out.path().join("evidence.aff4l");
     aff4tools()
@@ -397,7 +395,7 @@ fn the_alternative_namespace_is_written_when_asked() {
         .arg("--aff4l-v1.0")
         .arg("--namespace-https")
         .assert()
-        .code(7);
+        .success();
     let body = turtle(&path);
 
     assert!(

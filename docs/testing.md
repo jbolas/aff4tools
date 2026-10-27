@@ -136,7 +136,7 @@ integration tests in `tests/`:
 | `cli.rs` | The built binary, end to end |
 | `codecs.rs` | Codec coverage |
 | `corpus.rs` | Values read from the reference containers |
-| `coverage.rs` | Rules `conformance` cannot evaluate, and `--strict` |
+| `coverage.rs` | Rules `conformance` cannot evaluate |
 | `cross_tool.rs` | Gate 4: pyaff4 accepts what aff4tools writes |
 | `dedupe_acquire.rs` | AFF4-L 2019 §4 deduplication |
 | `discontiguous.rs` | Maps with holes |

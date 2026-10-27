@@ -242,9 +242,8 @@ fn a_shared_map_container_conforms() {
     let (_src, root) = source_tree();
     let (_out, container) = acquire(&root);
 
-    // Not `--strict`: that also raises the exit code for unevaluated rules,
-    // of which this project still has many by design. What is asserted here is
-    // that the map band contributes no *deviation*.
+    // What is asserted here is that the map band contributes no *deviation*;
+    // unevaluated rules are listed separately and are not at issue.
     let assert = aff4tools().arg("conformance").arg(&container).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(

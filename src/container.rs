@@ -2832,7 +2832,7 @@ fn report_v21_storage_form(
     //
     // **This is a completeness finding, not a conformance one, and the
     // acquisition already makes it.** Every such path is listed individually
-    // with its reason in the SKIPPED report, which also raises the strict exit
+    // with its reason in the SKIPPED report, which also sets `acquire`'s exit
     // code. Reporting it a second time as a self-contradicting container would
     // describe an honest record of an unreadable file as a malformed one.
     //

@@ -213,8 +213,8 @@ impl ContainerSummary {
 
     /// Whether anything departed from the standard.
     ///
-    /// Every deviation counts, routine or not. For the narrower question
-    /// `--strict` asks, use [`ContainerSummary::has_noteworthy_deviation`].
+    /// Every deviation counts, routine or not. To exclude routine ones, use
+    /// [`ContainerSummary::has_noteworthy_deviation`].
     #[must_use]
     pub fn is_conformant(&self) -> bool {
         self.deviations.is_empty()
@@ -222,10 +222,8 @@ impl ContainerSummary {
 
     /// Whether any deviation is one the format does not routinely produce.
     ///
-    /// This is what `--strict` tests. It is deliberately not the negation of
-    /// [`ContainerSummary::is_conformant`]: a lone stripe of a striped set
-    /// always carries an `ExternalReference`, so failing on it would make the
-    /// exit code fire on well-formed containers and stay silent about nothing.
+    /// Deliberately not the negation of [`ContainerSummary::is_conformant`]: a
+    /// lone stripe of a striped set always carries an `ExternalReference`.
     /// See [`crate::DeviationKind::is_routine`].
     #[must_use]
     pub fn has_noteworthy_deviation(&self) -> bool {
@@ -233,11 +231,11 @@ impl ContainerSummary {
     }
 }
 
-/// Whether any deviation in `deviations` is one `--strict` should fail on.
+/// Whether any deviation in `deviations` is one the format does not routinely
+/// produce.
 ///
-/// Free-standing as well as a method, so `conformance` — which collects
-/// deviations without building a summary — asks the identical question rather
-/// than a copy of it.
+/// Free-standing as well as a method, so a caller holding deviations without a
+/// summary asks the identical question rather than a copy of it.
 #[must_use]
 pub fn has_noteworthy_deviation(deviations: &[Deviation]) -> bool {
     deviations.iter().any(|d| !d.kind.is_routine())

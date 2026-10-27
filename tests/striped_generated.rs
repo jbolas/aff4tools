@@ -342,14 +342,10 @@ fn info_reports_a_dangling_data_path_edge() {
     );
 }
 
-/// Routine deviations exist and are excluded from the strict verdict.
-///
-/// A lone stripe legitimately carries an `ExternalReference`. Once that was the
-/// only thing standing between exit 0 and exit 7, `--strict` carried no
-/// information — it fired on well-formed containers while the real conflict
-/// went unreported.
+/// A lone stripe legitimately carries an `ExternalReference`, which is
+/// reported and classed as routine.
 #[test]
-fn a_lone_stripe_is_not_a_strict_failure() {
+fn a_lone_stripe_reports_a_routine_external_reference() {
     let temp = tempfile::tempdir().unwrap();
     let Some(paths) = generate(temp.path(), 2, "matching", "none") else {
         eprintln!("python3 unavailable; skipping");
@@ -368,7 +364,7 @@ fn a_lone_stripe_is_not_a_strict_failure() {
     );
     assert!(
         !summary.has_noteworthy_deviation(),
-        "but it must not fail --strict: {:?}",
+        "and every deviation it carries must be routine: {:?}",
         summary.deviations
     );
 }

@@ -55,18 +55,6 @@ fn deviation_kinds(name: &str) -> Vec<String> {
     kinds
 }
 
-/// `--strict` exit code for one fixture.
-fn strict_exit(name: &str) -> i32 {
-    aff4tools()
-        .args(["conformance", "--strict"])
-        .arg(v21(name))
-        .output()
-        .expect("conformance runs")
-        .status
-        .code()
-        .unwrap_or(-1)
-}
-
 // ---------------------------------------------------------------------------
 // A declared form that holds no bytes.
 // ---------------------------------------------------------------------------
@@ -126,23 +114,6 @@ fn an_ambiguous_stream_is_not_read() {
 }
 
 // ---------------------------------------------------------------------------
-// Exit codes.
-// ---------------------------------------------------------------------------
-
-/// Each of the three sets the strict exit code, so a script cannot mistake a
-/// container whose bytes could not be located for a clean one.
-#[test]
-fn every_storage_departure_fails_strict() {
-    for name in [
-        "bad-missing-member.aff4l",
-        "bad-undecodable-base64.aff4l",
-        "bad-two-storage-types.aff4l",
-    ] {
-        assert_eq!(strict_exit(name), 7, "{name} must fail --strict");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // What stays lenient.
 // ---------------------------------------------------------------------------
 
@@ -192,7 +163,7 @@ fn a_conforming_storage_form_reports_no_deviation() {
 ///
 /// **The omission is a completeness finding, and the acquisition already makes
 /// it**: every unreadable path is listed individually with its reason in the
-/// SKIPPED report, which raises the strict exit code. Reporting it again here
+/// SKIPPED report, which sets `acquire`'s exit code. Reporting it again here
 /// would describe an honest record of an unreadable file as a malformed one.
 ///
 /// Not hypothetical: acquiring `/Library` on a stock macOS system produced 23

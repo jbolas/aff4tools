@@ -52,11 +52,13 @@ const EXIT_USAGE: u8 = 2;
 /// this marks the file as missing rather than the reading as unsound.
 const EXIT_LISTING_IO: u8 = 3;
 
-/// Exit code when `--strict` promotes a deviation to a failure.
+/// Exit code when an acquisition completed but did not capture its source
+/// whole: paths skipped, source files that changed while being read, or device
+/// sectors that could not be read.
 ///
-/// Above every [`Error::exit_code`] value: a strict-mode failure means the
-/// container was read successfully but does not conform.
-const EXIT_STRICT_DEVIATION: u8 = 7;
+/// Above every [`Error::exit_code`] value: the container was written and
+/// verified, and the finding is about the source, not about a failure to write.
+const EXIT_ACQUISITION_FINDING: u8 = 7;
 
 /// Exit code when a recomputed digest does not match what the container
 /// recorded.
@@ -75,8 +77,8 @@ const EXIT_MISMATCH: u8 = 8;
 /// it.
 ///
 /// Below [`EXIT_MISMATCH`] because a mismatch is the stronger finding.
-/// Above the strict-deviation code because unverifiable evidence
-/// outranks a metadata departure.
+/// Above [`EXIT_ACQUISITION_FINDING`] because unverifiable evidence outranks
+/// an incomplete capture that was recorded as such.
 const EXIT_UNVERIFIABLE: u8 = 9;
 
 #[derive(Parser)]
@@ -110,10 +112,6 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
-
-        /// Treat departures from the standard as failure.
-        #[arg(long)]
-        strict: bool,
 
         /// Which objects to list.
         #[arg(long, value_enum, default_value_t = ObjectFilter::Images)]
@@ -160,10 +158,6 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
-
-        /// Treat departures from the standard as failure.
-        #[arg(long)]
-        strict: bool,
     },
 
     /// Write source data into a new AFF4 container.
@@ -393,10 +387,6 @@ enum Command {
         #[arg(long)]
         no_block_hashing: bool,
 
-        /// Treat departures from the standard as failure.
-        #[arg(long)]
-        strict: bool,
-
         /// Print every check in full rather than only the failures.
         #[arg(short, long)]
         verbose: bool,
@@ -621,7 +611,6 @@ fn run() -> ExitCode {
             paths,
             multi_part,
             format,
-            strict,
             objects,
             brief,
             full_listing,
@@ -630,14 +619,7 @@ fn run() -> ExitCode {
                 if let Some(line) = line {
                     println!("{line}");
                 }
-                run_info(
-                    &sets,
-                    format,
-                    strict,
-                    objects,
-                    brief,
-                    full_listing.as_deref(),
-                )
+                run_info(&sets, format, objects, brief, full_listing.as_deref())
             }
             Err(e) => ExitCode::from(report_error(&e)),
         },
@@ -645,13 +627,12 @@ fn run() -> ExitCode {
             paths,
             multi_part,
             format,
-            strict,
         } => match into_sets(paths, multi_part) {
             Ok((sets, line)) => {
                 if let Some(line) = line {
                     println!("{line}");
                 }
-                run_conformance(&sets, format, strict)
+                run_conformance(&sets, format)
             }
             Err(e) => ExitCode::from(report_error(&e)),
         },
@@ -766,7 +747,6 @@ fn run() -> ExitCode {
             multi_part,
             format,
             no_block_hashing,
-            strict,
             verbose,
             full_listing,
         } => match into_sets(paths, multi_part) {
@@ -778,7 +758,6 @@ fn run() -> ExitCode {
                     &sets,
                     format,
                     !no_block_hashing,
-                    strict,
                     verbose,
                     full_listing.as_deref(),
                 )
@@ -1558,7 +1537,6 @@ fn run_verify(
     sets: &[Vec<PathBuf>],
     format: Format,
     block_hashes: bool,
-    strict: bool,
     verbose: bool,
     full_listing: Option<&Path>,
 ) -> ExitCode {
@@ -1583,7 +1561,7 @@ fn run_verify(
             Format::Json => None,
         };
         match verify(set, options, header) {
-            Ok((report, summary)) => {
+            Ok((report, _)) => {
                 // A mismatch is a successful verification with a negative
                 // result, so it gets its own code rather than being reported as
                 // a damaged container.
@@ -1596,9 +1574,6 @@ fn run_verify(
                 // decompress pass a scripted check.
                 if report.has_unreadable() {
                     worst = worst.max(EXIT_UNVERIFIABLE);
-                }
-                if strict && !summary.is_conformant() {
-                    worst = worst.max(EXIT_STRICT_DEVIATION);
                 }
                 match format {
                     Format::Text => {
@@ -3042,7 +3017,6 @@ fn write_full_listing(
 fn run_info(
     sets: &[Vec<PathBuf>],
     format: Format,
-    strict: bool,
     filter: ObjectFilter,
     brief: bool,
     full_listing: Option<&Path>,
@@ -3066,14 +3040,6 @@ fn run_info(
         // pass on containers under the threshold, where a pass is ~0.1 s.
         match summarize_sized(set, brief, format, full_listing.is_some()) {
             Ok(mut summary) => {
-                if strict && summary.has_noteworthy_deviation() {
-                    // Deviations are always reported; --strict makes them count.
-                    // Routine ones are excluded: a lone stripe always carries an
-                    // ExternalReference, and failing on that made the exit code
-                    // fire on well-formed containers while staying silent about
-                    // real faults. See DeviationKind::is_routine.
-                    worst = worst.max(EXIT_STRICT_DEVIATION);
-                }
                 match format {
                     Format::Text => {
                         if index > 0 {
@@ -3611,7 +3577,7 @@ names for this format; writing {}",
 
     // Check 1: recompute from the container we just wrote.
     let _ = writeln!(out);
-    let (mut worst, summarized) = verify_after_acquire(
+    let (worst, summarized) = verify_after_acquire(
         out,
         std::slice::from_ref(&output.to_path_buf()),
         written.size,
@@ -3620,7 +3586,7 @@ names for this format; writing {}",
 
     // Check 2: conformance, from the summary the verification pass already
     // built rather than a second parse of the same metadata.
-    worst = worst.max(report_conformance_after_acquire(out, output, summarized));
+    report_conformance_after_acquire(out, output, summarized);
 
     report_missed_acceleration(out);
     stamp_completed(out);
@@ -3864,7 +3830,7 @@ fn run_acquire_from_aff4(
     stamp_acquisition_complete(out);
 
     let _ = writeln!(out);
-    let (mut worst, summarized) = verify_after_acquire(
+    let (worst, summarized) = verify_after_acquire(
         out,
         std::slice::from_ref(&output.to_path_buf()),
         written.size,
@@ -3872,7 +3838,7 @@ fn run_acquire_from_aff4(
     );
 
     // Conformance, from the summary the verification pass already built.
-    worst = worst.max(report_conformance_after_acquire(out, output, summarized));
+    report_conformance_after_acquire(out, output, summarized);
 
     report_missed_acceleration(out);
     stamp_completed(out);
@@ -4278,7 +4244,7 @@ fn run_acquire_logical(
         for (path, reason) in &acquired.skipped {
             let _ = writeln!(out, "  {}: {reason}", path.display());
         }
-        worst = worst.max(EXIT_STRICT_DEVIATION);
+        worst = worst.max(EXIT_ACQUISITION_FINDING);
     }
 
     // Reported apart from SKIPPED, and never merged into it: these files were
@@ -4301,7 +4267,7 @@ fn run_acquire_logical(
                 path.display()
             );
         }
-        worst = worst.max(EXIT_STRICT_DEVIATION);
+        worst = worst.max(EXIT_ACQUISITION_FINDING);
     }
 
     // The same split the other modes draw: every file has been read and
@@ -4322,7 +4288,7 @@ fn run_acquire_logical(
 
     // Check 2: conformance, from the summary the verification pass already
     // built rather than a second parse of the same metadata.
-    worst = worst.max(report_conformance_after_acquire(out, output, summarized));
+    report_conformance_after_acquire(out, output, summarized);
 
     report_missed_acceleration(out);
     stamp_completed(out);
@@ -4705,7 +4671,7 @@ fn run_acquire_device(
                     region.reason
                 );
             }
-            worst = worst.max(EXIT_STRICT_DEVIATION);
+            worst = worst.max(EXIT_ACQUISITION_FINDING);
         }
         report_missed_acceleration(out);
         stamp_completed(out);
@@ -4714,7 +4680,7 @@ fn run_acquire_device(
         // carries the floor from unreadable device sectors. Neither may be
         // discarded in favor of the other — a device with both bad sectors
         // and a verification mismatch must report the mismatch, since
-        // EXIT_MISMATCH outranks EXIT_STRICT_DEVIATION (see the ordering
+        // EXIT_MISMATCH outranks EXIT_ACQUISITION_FINDING (see the ordering
         // documented at EXIT_UNVERIFIABLE above). Combined with `.max()` so
         // the stronger finding always wins, exactly as the single-file device
         // path does.
@@ -4825,7 +4791,7 @@ fn run_acquire_device(
                 region.reason
             );
         }
-        worst = worst.max(EXIT_STRICT_DEVIATION);
+        worst = worst.max(EXIT_ACQUISITION_FINDING);
     }
 
     // Closes the acquisition proper: everything above concerns reading the
@@ -5068,12 +5034,13 @@ fn verify_after_acquire(
 /// the summary is built here. An unreadable container is reported as such
 /// rather than as conformant: nobody parsed it, so nothing was established.
 ///
-/// Returns the exit code this check contributes.
+/// Sets no exit code. The count is a pointer to `conformance`, which reports
+/// what the deviations are; `--deduplicate` output always carries two.
 fn report_conformance_after_acquire(
     out: &mut impl Write,
     output: &std::path::Path,
     summarized: Option<ContainerSummary>,
-) -> u8 {
+) {
     let summary = match summarized {
         Some(summary) => Ok(summary),
         None => summarize(std::slice::from_ref(&output.to_path_buf())),
@@ -5086,19 +5053,16 @@ fn report_conformance_after_acquire(
                 // what aff4tools wrote decides which document governs it.
                 let spec = acquisition_spec(summary.generation);
                 let _ = writeln!(out, "Conformance: no deviations from {spec}");
-                0
             } else {
                 let _ = writeln!(
                     out,
                     "Conformance: {} deviation(s) — run `aff4tools conformance`",
                     summary.deviations.len()
                 );
-                EXIT_STRICT_DEVIATION
             }
         }
         Err(_) => {
             let _ = writeln!(out, "Conformance: could not summarize the container");
-            0
         }
     }
 }
@@ -5123,7 +5087,7 @@ fn conformance_findings(
 /// across while reading a metadata dump; keeping it a command of its own means
 /// asking the conformance question is a deliberate act with an answer of its
 /// own.
-fn run_conformance(sets: &[Vec<PathBuf>], format: Format, strict: bool) -> ExitCode {
+fn run_conformance(sets: &[Vec<PathBuf>], format: Format) -> ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut worst = 0u8;
@@ -5132,36 +5096,17 @@ fn run_conformance(sets: &[Vec<PathBuf>], format: Format, strict: bool) -> ExitC
 
     for (index, set) in sets.iter().enumerate() {
         match conformance_findings(set) {
-            Ok(scan) => {
-                let deviations = &scan.deviations;
-                // Two ways a container fails --strict, and they share an exit
-                // code because they answer the same question the same way: the
-                // container was not shown to conform. One is an observed
-                // departure; the other is a binding rule nobody checked.
-                //
-                // Same rule --strict follows everywhere else: routine
-                // conditions are reported but do not set the exit code. An
-                // unevaluated SHOULD, SHOULD NOT, or MAY is likewise reported
-                // and likewise ignored here — it says aff4tools is
-                // incomplete, not that the container is questionable.
-                if strict
-                    && (aff4tools::model::has_noteworthy_deviation(deviations)
-                        || scan.coverage.has_unevaluated_must())
-                {
-                    worst = worst.max(EXIT_STRICT_DEVIATION);
-                }
-                match format {
-                    Format::Text => {
-                        if index > 0 {
-                            let _ = writeln!(out);
-                        }
-                        let _ = write_conformance(&mut out, &scan);
+            Ok(scan) => match format {
+                Format::Text => {
+                    if index > 0 {
+                        let _ = writeln!(out);
                     }
-                    Format::Json => {
-                        reports.push(ConformanceReport::from(&scan));
-                    }
+                    let _ = write_conformance(&mut out, &scan);
                 }
-            }
+                Format::Json => {
+                    reports.push(ConformanceReport::from(&scan));
+                }
+            },
             Err(error) => match format {
                 Format::Text => worst = worst.max(error.report()),
                 Format::Json => {
@@ -5201,10 +5146,9 @@ fn run_conformance(sets: &[Vec<PathBuf>], format: Format, strict: bool) -> ExitC
 /// it was checked against, and every way it departs from that. Nothing else —
 /// no object listing, no digests. A reader who wants those runs `info`.
 ///
-/// Every recorded deviation is printed, routine or not. `--strict` decides
-/// which ones affect the exit code; it never decides which ones are shown. A
-/// conformance report that silently dropped a recorded departure would be
-/// exactly the lossy conversion this project refuses to make.
+/// Every recorded deviation is printed, routine or not. A conformance report
+/// that silently dropped a recorded departure would be exactly the lossy
+/// conversion this project refuses to make.
 fn write_conformance(
     out: &mut impl Write,
     scan: &aff4tools::ConformanceScan,
@@ -5390,9 +5334,8 @@ struct ConformanceReport {
     /// Whether the container was *shown* to conform: nothing departed from the
     /// standard, and every rule in scope was actually evaluated.
     ///
-    /// Both halves are required. Routine conditions count as departures here —
-    /// this is the broad question [`ContainerSummary::is_conformant`] asks, not
-    /// the narrower one `--strict` asks. But an empty deviation list from a
+    /// Both halves are required. Routine conditions count as departures here,
+    /// as they do for [`ContainerSummary::is_conformant`]. But an empty deviation list from a
     /// scan that checked only a dozen of a container's rules is not evidence of
     /// conformance, and a script reading this field is asking whether the
     /// container was shown to conform, not whether the checks that happened to
@@ -5421,8 +5364,7 @@ impl ConformanceReport {
             tool: scan.version.as_ref().and_then(|v| v.tool.clone()),
             specification: base_spec.name(),
             logical_specification: logical_spec.map(aff4tools::rules::Document::name),
-            // "No deviation at all", routine ones included — deliberately not
-            // the narrower question `--strict` asks — *and* a scan that
+            // "No deviation at all", routine ones included, *and* a scan that
             // evaluated every rule in scope. Deviations alone would report
             // `true` for a container whose rules were never checked, which is
             // the reading this field exists to prevent.
@@ -5449,8 +5391,7 @@ struct ConformanceCoverage {
     /// The rule's stable identifier, e.g. `"AFF4L_V1_ALPHA/6.1/1"`. Assigned
     /// once and never reused, so it keeps its meaning in an archived report.
     rule: String,
-    /// How binding the rule is, as [`Requirement`] serializes it. Only `must`
-    /// and `must_not` affect the `--strict` exit code when unevaluated.
+    /// How binding the rule is, as [`Requirement`] serializes it.
     requirement: aff4tools::rules::Requirement,
     /// Why it went unchecked, as [`RuleState`] serializes it:
     /// `not_implemented` is work this project has not done, `not_checkable` a
@@ -6035,13 +5976,12 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        let code = report_conformance_after_acquire(
+        report_conformance_after_acquire(
             &mut out,
             std::path::Path::new("/nonexistent/never-opened.aff4"),
             Some(summary),
         );
         let text = String::from_utf8_lossy(&out);
-        assert_eq!(code, 0, "a summary with no deviations must not set a code");
         assert!(
             text.contains("no deviations"),
             "the reused summary's verdict must be reported:\n{text}"
@@ -6216,14 +6156,14 @@ mod tests {
 
     /// A device split acquisition with unreadable sectors AND a failed write
     /// must report the failure, not the higher-numbered
-    /// `EXIT_STRICT_DEVIATION`.
+    /// `EXIT_ACQUISITION_FINDING`.
     ///
     /// Regression for the bug where `run_acquire_split`'s `u8` collapsed "the
     /// write failed" and "verification found something" into one value, so
     /// `worst.max(code)` in the device branch always preferred
-    /// `EXIT_STRICT_DEVIATION` (7) over a library error code (3..=6) whenever
+    /// `EXIT_ACQUISITION_FINDING` (7) over a library error code (3..=6) whenever
     /// bad sectors were present — masking a failed acquisition as a completed
-    /// one with a strict-mode deviation.
+    /// one with unreadable sectors.
     ///
     /// `FaultyReader` (`src/write/device.rs`) injects a read failure over a
     /// byte range, which `DeviceReader` converts into a recorded unreadable
@@ -6289,7 +6229,7 @@ mod tests {
         let code = match result {
             Ok(floor) => panic!(
                 "write failure must surface as Err, not a floor of {floor}; a caller \
-                 combining this with EXIT_STRICT_DEVIATION via .max() would report 7 \
+                 combining this with EXIT_ACQUISITION_FINDING via .max() would report 7 \
                  instead of the failure"
             ),
             Err(code) => code,
@@ -6299,8 +6239,8 @@ mod tests {
             "expected a library error code (3..=6), got {code}"
         );
         assert_ne!(
-            code, EXIT_STRICT_DEVIATION,
-            "a failed write must never be reported as EXIT_STRICT_DEVIATION"
+            code, EXIT_ACQUISITION_FINDING,
+            "a failed write must never be reported as EXIT_ACQUISITION_FINDING"
         );
 
         // The bad sector was in part 1's range and part 1 was written before

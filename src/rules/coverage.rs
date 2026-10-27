@@ -50,10 +50,9 @@ impl Coverage {
 
     /// Whether any unevaluated rule is binding — a MUST or a MUST NOT.
     ///
-    /// This is what `--strict` acts on. A SHOULD or MAY left unchecked means
-    /// the tool is incomplete; an unchecked binding rule means the container
-    /// was not shown to conform, which is what a strict caller is asking
-    /// about. A prohibition binds as tightly as a requirement: doing what the
+    /// A SHOULD or MAY left unchecked means the tool is incomplete; an
+    /// unchecked binding rule means the container was not shown to conform. A
+    /// prohibition binds as tightly as a requirement: doing what the
     /// standard forbids is as non-conformant as omitting what it demands, so
     /// [`Requirement::MustNot`] counts here alongside [`Requirement::Must`].
     #[must_use]
@@ -116,12 +115,12 @@ mod tests {
         assert!(coverage.unevaluated().count() >= 20);
         assert!(
             coverage.has_unevaluated_must(),
-            "unevaluated MUST requirements cause --strict to fail on a v2.1 container"
+            "a v2.1 container carries unevaluated MUST requirements"
         );
     }
 
     /// A SHOULD or MAY left unevaluated says the tool is incomplete, not that
-    /// the container is questionable, so it drives no exit code.
+    /// the container is questionable, so it is not a binding gap.
     ///
     /// Stated against the requirement levels themselves rather than against
     /// whatever the v1.0 catalog happens to leave unevaluated. It was written
@@ -129,22 +128,21 @@ mod tests {
     /// of the rule it names: declaring the AFF4 Standard v1.0a §6.2
     /// requirements broke it although the logic under test never changed.
     #[test]
-    fn only_binding_rules_drive_the_exit_code() {
+    fn only_binding_rules_count_as_binding_gaps() {
         let coverage = Coverage::for_generation(Generation::Standard10);
 
         // `has_unevaluated_must` reports exactly the binding levels, and
-        // nothing else — this is the property the exit code rests on.
+        // nothing else.
         let binding_present = coverage
             .unevaluated()
             .any(|rule| matches!(rule.requirement, Requirement::Must | Requirement::MustNot));
         assert_eq!(
             coverage.has_unevaluated_must(),
             binding_present,
-            "the exit code must follow the binding rules and only those"
+            "binding gaps must follow the binding rules and only those"
         );
 
-        // A catalog whose unevaluated rules are all recommendations raises no
-        // exit code, whatever else it contains.
+        // Unevaluated recommendations are not binding gaps.
         let advisory_only = Coverage::for_generation(Generation::Standard10)
             .unevaluated()
             .filter(|rule| matches!(rule.requirement, Requirement::Should | Requirement::May))
@@ -155,9 +153,8 @@ mod tests {
         );
     }
 
-    /// A prohibition is mandatory like a requirement, so `MustNot` binds
-    /// `--strict` as tightly as `Must`. Were it left out of that set, a
-    /// container doing what the standard forbids would go unreported.
+    /// A prohibition is mandatory like a requirement, so `MustNot` counts as
+    /// binding exactly as `Must` does.
     ///
     /// The standard declares exactly one `MustNot` — the AFF4-L v1.0-ALPHA §6.2
     /// size cap — and Phase 9c implemented it. So this asserts the

@@ -2600,8 +2600,8 @@ fn verify_image(
     // An acquisition that could not read a file still records that it existed,
     // with its name, times, and mode, and stores no bytes. **The completeness
     // finding is already made, and made better**, by the acquisition's own
-    // SKIPPED report, which names every such path with its reason and raises
-    // the strict exit code. Repeating it here as an unresolvable image
+    // SKIPPED report, which names every such path with its reason and sets
+    // `acquire`'s exit code. Repeating it here as an unresolvable image
     // describes an honest record as a broken one.
     //
     // `conformance` has exempted this shape since Phase 9c

@@ -289,7 +289,7 @@ pub struct RuleInfo {
     /// Whether this condition is one the format routinely produces.
     ///
     /// A routine deviation is worth recording but does not by itself mean the
-    /// container is questionable, so `--strict` ignores it. Frequency alone
+    /// container is questionable. Frequency alone
     /// does not make a condition routine: the test is whether it can affect
     /// interpretation.
     pub routine: bool,

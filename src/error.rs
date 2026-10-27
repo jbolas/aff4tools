@@ -695,10 +695,7 @@ impl DeviationKind {
     /// A *routine* deviation is worth recording but does not by itself mean the
     /// container is questionable: inspecting one stripe of a striped set always
     /// yields [`Self::ExternalReference`], and one writer NUL-pads every ZIP
-    /// comment it produces. `--strict` ignores these, because an exit code that
-    /// fires on every striped container carries no information — see the
-    /// A case where `--strict` returned 7 on a container whose real
-    /// defect went unreported, from an unrelated routine note.
+    /// comment it produces.
     ///
     /// Frequency alone does not make a condition routine. Three of the four
     /// corpus writers violate v1.0a §5.4's `container.description` ordering and
@@ -1134,7 +1131,7 @@ mod tests {
         );
     }
 
-    /// Exactly two conditions are routine today, and `--strict` depends on it.
+    /// Exactly two conditions are routine today.
     #[test]
     fn routine_kinds_are_unchanged() {
         assert!(DeviationKind::ExternalReference.is_routine());
