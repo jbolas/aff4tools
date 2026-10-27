@@ -62,19 +62,35 @@ fn chunk_bytes(index: u64) -> Vec<u8> {
 }
 
 /// Build the fixture: a valid AFF4 volume with [`BEVIES`] bevies.
+fn fixture() -> (tempfile::TempDir, PathBuf) {
+    let bevies: Vec<Vec<Vec<u8>>> = (0..BEVIES).map(|b| vec![chunk_bytes(b)]).collect();
+    volume("many-bevies.aff4", &bevies, 1, CHUNK as u64 * BEVIES, None)
+}
+
+/// A valid AFF4 volume whose one stored stream holds `bevies`, each a list of
+/// stored chunks, declaring `size` bytes in `CHUNK`-byte chunks. `image_md5`,
+/// when given, is recorded on the image as a whole-image digest.
 ///
 /// The one sanctioned use of a ZIP writer in this project — it creates a fresh
 /// throwaway archive to read back, and never touches evidence.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-fn fixture() -> (tempfile::TempDir, PathBuf) {
+fn volume(
+    name: &str,
+    bevies: &[Vec<Vec<u8>>],
+    chunks_in_segment: usize,
+    size: u64,
+    image_md5: Option<&str>,
+) -> (tempfile::TempDir, PathBuf) {
+    let image_hash = image_md5
+        .map(|md5| format!("\x20   aff4:hash       \"{md5}\"^^aff4:MD5 ;\n"))
+        .unwrap_or_default();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("many-bevies.aff4");
+    let path = dir.path().join(name);
     let file = std::fs::File::create(&path).unwrap();
     let mut writer = zip::ZipWriter::new(file);
     let options =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-    let size = CHUNK as u64 * BEVIES;
     let stream_dir = escaped(STREAM);
     let map_dir = escaped(MAP);
 
@@ -85,17 +101,19 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
         .write_all(b"major=1\nminor=0\ntool=aff4tools-test\n")
         .unwrap();
 
-    for bevy in 0..BEVIES {
-        let data = chunk_bytes(bevy);
+    for (bevy, chunks) in bevies.iter().enumerate() {
+        // Chunks back to back; one index entry per chunk: <QI> offset, length.
+        let mut data = Vec::new();
+        let mut index = Vec::with_capacity(12 * chunks.len());
+        for chunk in chunks {
+            index.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            index.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+            data.extend_from_slice(chunk);
+        }
         writer
             .start_file(format!("{stream_dir}/{bevy:08}"), options)
             .unwrap();
         writer.write_all(&data).unwrap();
-
-        // Bevy index entry: <QI> offset, length.
-        let mut index = Vec::with_capacity(12);
-        index.extend_from_slice(&0u64.to_le_bytes());
-        index.extend_from_slice(&(data.len() as u32).to_le_bytes());
         writer
             .start_file(format!("{stream_dir}/{bevy:08}.index"), options)
             .unwrap();
@@ -123,7 +141,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
          <{STREAM}>\n\
          \x20   a                       aff4:ImageStream ;\n\
          \x20   aff4:chunkSize          \"{CHUNK}\"^^xsd:int ;\n\
-         \x20   aff4:chunksInSegment    \"1\"^^xsd:int ;\n\
+         \x20   aff4:chunksInSegment    \"{chunks_in_segment}\"^^xsd:int ;\n\
          \x20   aff4:compressionMethod  <http://aff4.org/Schema#compression/stored> ;\n\
          \x20   aff4:size               \"{size}\"^^xsd:long ;\n\
          \x20   aff4:stored             <{VOLUME}> ;\n\
@@ -137,12 +155,13 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
          <{IMAGE}>\n\
          \x20   a               aff4:Image , aff4:ContiguousImage ;\n\
          \x20   aff4:dataStream <{MAP}> ;\n\
+         {image_hash}\
          \x20   aff4:size       \"{size}\"^^xsd:long ;\n\
          \x20   aff4:stored     <{VOLUME}> .\n\n\
          <{VOLUME}>\n\
          \x20   a             aff4:ZipVolume ;\n\
          \x20   aff4:contains <{IMAGE}> , <{STREAM}> , <{MAP}> ;\n\
-         \x20   aff4:stored   \"many-bevies.aff4\" .\n"
+         \x20   aff4:stored   \"{name}\" .\n"
     );
     writer.start_file("information.turtle", options).unwrap();
     writer.write_all(turtle.as_bytes()).unwrap();
@@ -342,4 +361,159 @@ fn an_early_stop_unwinds_every_thread() {
             .expect("an abandoned read deadlocked: no result within 60s");
         assert!(errored, "abandoning the read must surface as an error");
     });
+}
+
+/// A chunk that decompresses short of `aff4:chunkSize` before the end of its
+/// stream is refused, by the serial and the parallel reader alike.
+///
+/// The fixture is the case that would otherwise pass unnoticed: chunk 2 is 12
+/// bytes short and an extra 12-byte chunk at the end makes the total match the
+/// declared size, so the length check alone is satisfied while every byte
+/// after chunk 2 sits 12 bytes early.
+#[test]
+fn a_short_chunk_before_the_end_of_a_stream_is_malformed() {
+    let full = |n: u64| chunk_bytes(n);
+    let mut short = chunk_bytes(2);
+    short.truncate(CHUNK - 12);
+    let bevies = vec![
+        vec![full(0), full(1)],
+        vec![short, full(3)],
+        vec![full(4), full(5)],
+        vec![full(6), vec![0x55; 12]],
+    ];
+    // Seven chunks' worth: the last bevy declares one chunk and lists two.
+    let (_dir, path) = volume("short-chunk.aff4", &bevies, 2, 7 * CHUNK as u64, None);
+    let (mut container, stream, locus) = open_stream(&path);
+
+    let err = stream
+        .read_all_observed(
+            container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
+            &mut |_| Ok(()),
+            &mut |_| {},
+            &locus,
+        )
+        .unwrap_err();
+    assert!(err.is_integrity_finding(), "serial: {err}");
+    assert!(err.to_string().contains("chunk 2 "), "serial: {err}");
+
+    for (readers, workers) in [(1, 1), (2, 3)] {
+        let plan = ThreadPlan {
+            readers,
+            workers,
+            digesters: 0,
+            available: readers + workers,
+            budget: readers + workers,
+        };
+        let err = read_all_parallel(
+            &stream,
+            container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
+            plan,
+            &mut |_| Ok(()),
+            &mut |_| {},
+            &locus,
+        )
+        .unwrap_err();
+        assert!(err.is_integrity_finding(), "{plan:?}: {err}");
+        assert!(err.to_string().contains("chunk 2 "), "{plan:?}: {err}");
+    }
+}
+
+/// A short final chunk is the one v1.0a §3.2 allows, and still reads.
+#[test]
+fn a_short_final_chunk_is_accepted() {
+    let mut last = chunk_bytes(2);
+    last.truncate(100);
+    let bevies = vec![vec![chunk_bytes(0), chunk_bytes(1)], vec![last.clone()]];
+    let size = 2 * CHUNK as u64 + 100;
+    let (_dir, path) = volume("short-final.aff4", &bevies, 2, size, None);
+    let (mut container, stream, locus) = open_stream(&path);
+
+    let mut out = Vec::new();
+    stream
+        .read_all_observed(
+            container.volume_mut(),
+            aff4tools::arn::NameMapping::Escaped,
+            &mut |b| {
+                out.extend_from_slice(b);
+                Ok(())
+            },
+            &mut |_| {},
+            &locus,
+        )
+        .unwrap();
+    assert_eq!(out.len() as u64, size);
+    assert_eq!(&out[2 * CHUNK..], &last[..]);
+}
+
+/// `verify` recomputes a whole-image digest through the parallel read path,
+/// and a damaged bevy is caught on that pass.
+///
+/// `AFF4TOOLS_THREADS` forces a parallel plan whatever the host, and 64 bevies
+/// are well past the size below which a stream is read serially.
+#[test]
+fn verify_recomputes_a_whole_image_digest_in_parallel_and_catches_damage() {
+    use md5::{Digest as _, Md5};
+
+    let bevies: Vec<Vec<Vec<u8>>> = (0..64u64)
+        .map(|b| vec![chunk_bytes(2 * b), chunk_bytes(2 * b + 1)])
+        .collect();
+    let image: Vec<u8> = bevies.iter().flatten().flatten().copied().collect();
+    let md5 = format!("{:x}", Md5::digest(&image));
+    let (dir, path) = volume(
+        "image-digest.aff4",
+        &bevies,
+        2,
+        image.len() as u64,
+        Some(&md5),
+    );
+
+    let verify = |path: &std::path::Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_aff4tools"))
+            .env("AFF4TOOLS_THREADS", "4")
+            .args(["verify", "--format", "json"])
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    let whole_image = |out: &std::process::Output| -> Vec<serde_json::Value> {
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["coverage"] == "WholeImage")
+            .cloned()
+            .collect()
+    };
+
+    let clean = verify(&path);
+    assert!(clean.status.success(), "{clean:?}");
+    let checks = whole_image(&clean);
+    assert_eq!(checks.len(), 1, "{checks:#?}");
+    assert_eq!(checks[0]["outcome"], "Match", "{checks:#?}");
+
+    // Flip one byte inside chunk 77's data, in a copy; the fixture is unchanged.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let marker = b"[chunk 00000077] ";
+    let at = bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("stored chunk data appears verbatim in the container");
+    bytes[at + marker.len() + 3] ^= 0x01;
+    let damaged = dir.path().join("damaged.aff4");
+    #[allow(clippy::disallowed_methods)]
+    std::fs::write(&damaged, &bytes).unwrap();
+
+    let result = verify(&damaged);
+    assert!(
+        !result.status.success(),
+        "a damaged bevy verified clean: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(
+        whole_image(&result).iter().all(|c| c["outcome"] != "Match"),
+        "the whole-image digest must not match over damaged data"
+    );
 }

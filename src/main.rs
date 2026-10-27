@@ -881,8 +881,15 @@ fn run_export_image(path: &std::path::Path, output: &std::path::Path) -> ExitCod
         eprintln!("Output:      {}", output.display());
     }
 
+    // Chunks arrive 32 KiB at a time. The default 8 KiB buffer passes writes
+    // that large straight through, costing a write call per chunk; and stdout
+    // is line-buffered, which splits binary data at every newline byte.
+    const EXPORT_BUFFER_BYTES: usize = 8 * 1024 * 1024;
     let sink: Result<Box<dyn Write>, String> = if to_stdout {
-        Ok(Box::new(std::io::stdout().lock()))
+        Ok(Box::new(std::io::BufWriter::with_capacity(
+            EXPORT_BUFFER_BYTES,
+            std::io::stdout().lock(),
+        )))
     } else {
         // The one file this command creates. `create_new` so an existing file
         // is never truncated, matching `acquire`.
@@ -891,7 +898,10 @@ fn run_export_image(path: &std::path::Path, output: &std::path::Path) -> ExitCod
             .write(true)
             .create_new(true)
             .open(output)
-            .map(|f| Box::new(std::io::BufWriter::new(f)) as Box<dyn Write>)
+            .map(|f| {
+                Box::new(std::io::BufWriter::with_capacity(EXPORT_BUFFER_BYTES, f))
+                    as Box<dyn Write>
+            })
             .map_err(|e| format!("creating {}: {e}", output.display()))
     };
     let mut sink = match sink {
@@ -902,16 +912,27 @@ fn run_export_image(path: &std::path::Path, output: &std::path::Path) -> ExitCod
         }
     };
 
+    let mut painter =
+        painter::ProgressPainter::new(std::io::IsTerminal::is_terminal(&std::io::stderr()));
+    let mut reporter = aff4tools::progress::BlockProgress::bytes_only(size);
     let mut written = 0u64;
-    let result = image.read_from_set(
+    let result = image.read_from_set_parallel(
         container.volumes_mut(),
+        aff4tools::ThreadPlan::for_host(),
         &mut |bytes| {
             written += bytes.len() as u64;
+            reporter.update(written, 0);
+            if painter.would_paint() {
+                let line =
+                    aff4tools::progress::AcquisitionProgress::line(&reporter, painter.elapsed());
+                painter.paint(&line);
+            }
             sink.write_all(bytes)
                 .map_err(|e| aff4tools::Error::io(output.to_path_buf(), e))
         },
         &locus,
     );
+    painter.finish();
 
     if let Err(e) = result {
         return ExitCode::from(report_error(&e));

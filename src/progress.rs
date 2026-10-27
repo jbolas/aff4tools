@@ -25,6 +25,9 @@ pub struct BlockProgress {
     total: u64,
     done: u64,
     bevies: u64,
+    /// Whether the line reports bevies. A reader that only sees bytes, such as
+    /// `export`, has no count to report.
+    counts_bevies: bool,
 }
 
 impl BlockProgress {
@@ -35,6 +38,16 @@ impl BlockProgress {
             total,
             done: 0,
             bevies: 0,
+            counts_bevies: true,
+        }
+    }
+
+    /// Create a tracker for a source of `total` bytes whose line omits bevies.
+    #[must_use]
+    pub fn bytes_only(total: u64) -> Self {
+        Self {
+            counts_bevies: false,
+            ..Self::new(total)
         }
     }
 
@@ -81,11 +94,15 @@ impl AcquisitionProgress for BlockProgress {
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let rate_bytes = rate as u64;
+        let bevies = if self.counts_bevies {
+            format!(" | {} bevies", self.bevies)
+        } else {
+            String::new()
+        };
         format!(
-            "{done_gib:.1}/{:.1} GiB | {percent:.0}% | {}/s | {} bevies{remaining}",
+            "{done_gib:.1}/{:.1} GiB | {percent:.0}% | {}/s{bevies}{remaining}",
             total_f / GIB,
             crate::human_bytes(rate_bytes),
-            self.bevies,
         )
     }
 }

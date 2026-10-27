@@ -889,6 +889,15 @@ fn consume_in_order(
             if delivered >= size {
                 break;
             }
+            if let Err(error) = crate::stream::refuse_short_chunk(
+                shared.stream,
+                chunk.len(),
+                delivered,
+                &shared.locus,
+            ) {
+                result = Err(error);
+                break 'outer;
+            }
             // The last chunk of the stream is truncated to the declared size,
             // exactly as the serial reader does it.
             let remaining = size - delivered;
@@ -1097,6 +1106,28 @@ pub fn read_all_parallel(
     }
 
     Ok(())
+}
+
+/// Read a stream in full, in order. Parallelize when the plan and the stream
+/// allow it; otherwise read it serially through the same whole-bevy path.
+///
+/// # Errors
+///
+/// As [`read_all_parallel`].
+pub(crate) fn read_stream(
+    stream: &ImageStream,
+    volume: &mut crate::zip::ZipVolume,
+    mapping: crate::arn::NameMapping,
+    plan: ThreadPlan,
+    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+    on_bevy: &mut dyn FnMut(u64),
+    locus: &Locus,
+) -> Result<()> {
+    if plan.is_parallel() && !too_small_to_parallelise(stream.bevy_count()) {
+        read_all_parallel(stream, volume, mapping, plan, sink, on_bevy, locus)
+    } else {
+        stream.read_all_observed(volume, mapping, sink, on_bevy, locus)
+    }
 }
 
 #[cfg(test)]

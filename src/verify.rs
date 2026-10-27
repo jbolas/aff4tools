@@ -1092,7 +1092,7 @@ fn verify_object(
             } else {
                 verify_image(
                     object,
-                    container.volume_mut(),
+                    container.volumes_mut(),
                     graph,
                     dialect,
                     locus,
@@ -1359,23 +1359,6 @@ fn estimate_segment_stored(
     }
 }
 
-/// Read a stream in full. Parallelize when possible.
-fn read_stream(
-    stream: &ImageStream,
-    volume: &mut crate::zip::ZipVolume,
-    mapping: NameMapping,
-    plan: crate::parallel::ThreadPlan,
-    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
-    on_bevy: &mut dyn FnMut(u64),
-    locus: &Locus,
-) -> Result<()> {
-    if plan.is_parallel() && !crate::parallel::too_small_to_parallelise(stream.bevy_count()) {
-        crate::parallel::read_all_parallel(stream, volume, mapping, plan, sink, on_bevy, locus)
-    } else {
-        stream.read_all_observed(volume, mapping, sink, on_bevy, locus)
-    }
-}
-
 /// A hasher whose threads are inside the run's reported budget.
 ///
 /// `MultiHasher` starts one thread per algorithm once there is more than one.
@@ -1448,57 +1431,12 @@ impl FusedImage {
         hashes: &[&StoredHash],
         locus: &Locus,
     ) -> Option<Self> {
-        // Striped sets interleave streams through the address space, so part
-        // order is not image order and feeding bytes as the parts arrive would
-        // produce a confidently wrong digest. Out of scope by design.
-        if matches!(image.map().part_layout(), crate::map::PartLayout::Striped) {
+        // Feeding bytes as the parts arrive is only sound when part order is
+        // image order; otherwise the digest would be confidently wrong.
+        if !image.is_sequential() {
             return None;
         }
-
         let runs = image.map().runs(locus).ok()?;
-
-        // Each stored stream must appear in exactly one contiguous run of
-        // entries, and that run must cover the stream from 0 to its declared
-        // size in ascending order. That is what makes "the next chunk of this
-        // stream" the same thing as "the next stored bytes the image wants".
-        let mut seen: Vec<&Arn> = Vec::new();
-        let mut expected: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
-        for run in &runs {
-            let crate::map::ImageRun::Stored {
-                stream,
-                target_offset,
-                length,
-            } = run
-            else {
-                continue;
-            };
-            if seen.last().map(|a: &&Arn| a.as_str()) != Some(stream.as_str()) {
-                // A stream reappearing after another intervened is striping the
-                // layout check did not catch.
-                if seen.iter().any(|a| a.as_str() == stream.as_str()) {
-                    return None;
-                }
-                seen.push(stream);
-            }
-            let next = expected.entry(stream.as_str()).or_insert(0);
-            if *next != *target_offset {
-                return None;
-            }
-            *next = next.checked_add(*length)?;
-        }
-
-        // Every run must end exactly at its stream's declared size: a map
-        // covering only part of a stream would leave the pass feeding bytes the
-        // image never asked for.
-        for stream in image.streams() {
-            match expected.get(stream.arn().as_str()) {
-                Some(covered) if *covered == stream.size() => {}
-                // A stream the map never names contributes nothing, which is
-                // fine; one it covers only partly is not.
-                None => {}
-                Some(_) => return None,
-            }
-        }
 
         let algorithms: Vec<HashAlgorithm> = hashes.iter().map(|h| h.algorithm.clone()).collect();
         let (image_hasher, _) = budgeted_hasher(&algorithms);
@@ -1793,7 +1731,7 @@ fn verify_stream(
         });
     };
 
-    let read = read_stream(
+    let read = crate::parallel::read_stream(
         &stream,
         volume,
         dialect.mapping,
@@ -2598,13 +2536,16 @@ fn verify_block_hash_segment(
 /// Verify an image's `blockMapHash`, the root of the tree.
 fn verify_image(
     object: &crate::model::Aff4Object,
-    volume: &mut crate::zip::ZipVolume,
+    volumes: &mut crate::zip_volume_set::ZipVolumeSet,
     graph: &Graph,
     dialect: Dialect,
     locus: &Locus,
     options: VerifyOptions,
     session: &mut Session,
 ) {
+    // The primary holds a single container's segments; the whole-image
+    // traversal takes the set, which for a single container is just this one.
+    let volume = volumes.primary_mut();
     let Dialect { lexicon, mapping } = dialect;
 
     if refused_for_ambiguous_storage(object, mapping, locus, session) {
@@ -2780,7 +2721,7 @@ fn verify_image(
         }
     }
     if !whole.is_empty() {
-        verify_whole_image_digests(object, &image, volume, &whole, locus, session);
+        verify_whole_image_digests(object, &image, volumes, &whole, locus, session);
     }
 }
 
@@ -2907,7 +2848,7 @@ fn verify_image_in_set(
         }
     }
     if !whole.is_empty() {
-        verify_whole_image_digests_in_set(object, &image, volumes, &whole, locus, session);
+        verify_whole_image_digests(object, &image, volumes, &whole, locus, session);
     }
 }
 
@@ -3261,12 +3202,16 @@ fn verify_striped_block_map_hash(
     });
 }
 
-/// Every plain digest over a striped image's bytes, in one traversal.
+/// Every plain digest over an image's bytes, in one traversal.
 ///
 /// One read, many consumers: decompressing the image is what this costs, and
 /// the algorithms riding along are nearly free. Each digest once drove its own
 /// full pass, so a 14.9 GiB set recording SHA-256 and MD5 read all of it twice.
-fn verify_whole_image_digests_in_set(
+///
+/// Reads through [`Image::read_from_set_parallel`], the path `export` writes
+/// from, so a digest that matches here vouches for the bytes `export` writes.
+/// A single container is a set of one.
+fn verify_whole_image_digests(
     object: &crate::model::Aff4Object,
     image: &Image,
     volumes: &mut crate::zip_volume_set::ZipVolumeSet,
@@ -3275,15 +3220,16 @@ fn verify_whole_image_digests_in_set(
     session: &mut Session,
 ) {
     let algorithms: Vec<HashAlgorithm> = hashes.iter().map(|h| h.algorithm.clone()).collect();
-    let (mut digest_hasher, _plan) = budgeted_hasher(&algorithms);
+    let (mut digest_hasher, plan) = budgeted_hasher(&algorithms);
 
     let progress = &mut *session.progress;
     let arn = object.arn.clone();
     let total = Some(image.size());
     let mut done: u64 = 0;
 
-    let read = image.read_from_set(
+    let read = image.read_from_set_parallel(
         volumes,
+        plan,
         &mut |bytes| {
             digest_hasher.update(bytes);
             done += bytes.len() as u64;
@@ -3586,86 +3532,6 @@ fn verify_resident_image(object: &crate::model::Aff4Object, locus: &Locus, sessi
             &bytes,
             session,
         );
-    }
-}
-
-/// Recompute a digest over every byte of the image.
-fn verify_whole_image_digests(
-    object: &crate::model::Aff4Object,
-    image: &Image,
-    volume: &mut dyn Volume,
-    hashes: &[&StoredHash],
-    locus: &Locus,
-    session: &mut Session,
-) {
-    let algorithms: Vec<HashAlgorithm> = hashes.iter().map(|h| h.algorithm.clone()).collect();
-    let (mut digest_hasher, _plan) = budgeted_hasher(&algorithms);
-
-    let progress = &mut *session.progress;
-    let arn = object.arn.clone();
-    let total = Some(image.size());
-    let mut done: u64 = 0;
-
-    let read = image.read(
-        volume,
-        &mut |bytes| {
-            digest_hasher.update(bytes);
-            done += bytes.len() as u64;
-            progress.on(Progress::Bytes {
-                arn: &arn,
-                done,
-                total,
-            });
-            Ok(())
-        },
-        locus,
-    );
-
-    match read {
-        Ok(accounting) => {
-            // Replaces the map-derived figures with measured ones.
-            session
-                .report
-                .read_accounting
-                .retain(|e| e.image.as_str() != object.arn.as_str());
-            session.report.read_accounting.push(ImageAccounting {
-                image: object.arn.clone(),
-                accounting,
-                traversed: true,
-            });
-            let digests = digest_hasher.finish();
-            for hash in hashes {
-                match digests.iter().find(|d| d.algorithm() == &hash.algorithm) {
-                    Some(computed) => session.push(HashCheck::compared(
-                        &object.arn,
-                        object.role.clone(),
-                        hash,
-                        Coverage::WholeImage,
-                        computed,
-                    )),
-                    None => session.push(HashCheck::declined(
-                        &object.arn,
-                        object.role.clone(),
-                        hash,
-                        Coverage::WholeImage,
-                        format!("this build cannot compute {}", hash.algorithm),
-                    )),
-                }
-            }
-        }
-        // One failed read covers every digest that traversal served.
-        Err(error) => {
-            for hash in hashes {
-                session.push(HashCheck::from_read_error(
-                    &object.arn,
-                    object.role.clone(),
-                    hash,
-                    Coverage::WholeImage,
-                    format!("the image could not be read: {error}"),
-                    &error,
-                ));
-            }
-        }
     }
 }
 

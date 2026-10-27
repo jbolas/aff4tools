@@ -19,15 +19,19 @@
 //! costs one bevy plus one chunk plus a 64 KiB run buffer, and real evidence
 //! reaches terabytes, so this is not an optimisation.
 
+use std::collections::HashMap;
+
 use crate::arn::{Arn, NameMapping};
 use crate::error::{Deviation, DeviationKind, Error, Locus, Result};
 use crate::lexicon::Lexicon;
 use crate::map::{
-    GapPolicy, IDX_SEGMENT, MAP_SEGMENT, Map, ReadAccounting, StreamSource, UnknownRegions,
+    GapPolicy, IDX_SEGMENT, MAP_SEGMENT, Map, PartLayout, ReadAccounting, StreamSource, Target,
+    UnknownRegions,
 };
+use crate::parallel::ThreadPlan;
 use crate::rdf::Graph;
 use crate::stream::{ChunkReader, ImageStream, Residency};
-use crate::zip::Volume;
+use crate::zip::{Volume, ZipVolume};
 use crate::zip_volume_set::{PRIMARY, ZipVolumeSet};
 
 /// An image, resolved to the map and streams that produce its bytes.
@@ -281,6 +285,217 @@ impl Image {
     ) -> Result<ReadAccounting> {
         let mut source = SetStreams::new(&self.streams, volumes, self.mapping);
         self.map.read_all(&mut source, sink, locus)
+    }
+
+    /// Read the whole image across a volume set, reading each stored stream
+    /// whole under `plan`.
+    ///
+    /// [`Image::read_from_set`] serves every chunk through a [`ChunkReader`],
+    /// which is built for random access: one range read and one decompression
+    /// per chunk, on one thread, with reading and decompressing taking turns.
+    /// For a full pass this instead reads each stored stream's bevies whole,
+    /// decompresses them on `plan`'s workers, and reconstructs the described
+    /// runs between them. `sink` receives the same bytes, in the same order,
+    /// as [`Image::read_from_set`] delivers, on the calling thread.
+    ///
+    /// Reading bevies whole also checks each member's ZIP CRC, which a range
+    /// read cannot.
+    ///
+    /// Falls back to [`Image::read_from_set`] whenever the map's order cannot be
+    /// trusted to be its streams' own order; see [`Image::is_sequential`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Image::read_from_set`].
+    pub fn read_from_set_parallel(
+        &self,
+        volumes: &mut ZipVolumeSet,
+        plan: ThreadPlan,
+        sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+        locus: &Locus,
+    ) -> Result<ReadAccounting> {
+        if !self.is_sequential() {
+            return self.read_from_set(volumes, sink, locus);
+        }
+        let entries = self.map.entries();
+        let map_locus = locus.clone().subject(self.map.arn().as_str());
+        let mut accounting = ReadAccounting {
+            gap_fill: self.map.gaps().fill.clone(),
+            ..ReadAccounting::default()
+        };
+        // The map entry being delivered. Entries are walked in place, never
+        // copied: a fragmented terabyte image can carry tens of millions.
+        let mut position = 0usize;
+
+        emit_described_entries(&self.map, &mut position, sink, &mut accounting, locus)?;
+
+        while let Some(stream) = stored_stream(&self.map, position) {
+            let (found, volume) = self.stream_in_set(volumes, stream, &map_locus, locus)?;
+
+            // Bytes still owed to the stored entry at `position`. The stream
+            // arrives whole and in order, so it is cut at each entry's end and
+            // the described entries that follow are emitted before the next
+            // stored entry of the same stream resumes.
+            let mut left = entries.get(position).map_or(0, |e| e.length);
+            let mut feed = |mut bytes: &[u8]| -> Result<()> {
+                while !bytes.is_empty() {
+                    if left == 0 {
+                        return Err(Error::malformed(
+                            map_locus.clone(),
+                            format!(
+                                "stream {stream} delivered bytes past the last map \
+                                 entry that names it"
+                            ),
+                        ));
+                    }
+                    let take = usize::try_from(left).map_or(bytes.len(), |l| l.min(bytes.len()));
+                    sink(&bytes[..take])?;
+                    accounting.stored = accounting.stored.saturating_add(take as u64);
+                    left -= take as u64;
+                    bytes = &bytes[take..];
+
+                    if left == 0 {
+                        position += 1;
+                        emit_described_entries(
+                            &self.map,
+                            &mut position,
+                            &mut *sink,
+                            &mut accounting,
+                            locus,
+                        )?;
+                        if stored_stream(&self.map, position)
+                            .is_some_and(|next| next.as_str() == stream.as_str())
+                        {
+                            left = entries.get(position).map_or(0, |e| e.length);
+                        }
+                    }
+                }
+                Ok(())
+            };
+            crate::parallel::read_stream(
+                found,
+                volume,
+                self.mapping,
+                plan,
+                &mut feed,
+                &mut |_| {},
+                locus,
+            )?;
+
+            if left != 0 {
+                return Err(Error::malformed(
+                    map_locus.clone(),
+                    format!(
+                        "stream {stream} ended {left} bytes short of the map entries \
+                         that name it"
+                    ),
+                ));
+            }
+        }
+
+        if position != entries.len() || accounting.total() != self.map.size() {
+            return Err(Error::malformed(
+                map_locus,
+                format!(
+                    "reading map {} delivered {} bytes but it declares {}",
+                    self.map.arn(),
+                    accounting.total(),
+                    self.map.size()
+                ),
+            ));
+        }
+
+        Ok(accounting)
+    }
+
+    /// The stream `arn` names, and the volume of the set holding its data.
+    fn stream_in_set<'v>(
+        &self,
+        volumes: &'v mut ZipVolumeSet,
+        arn: &Arn,
+        map_locus: &Locus,
+        locus: &Locus,
+    ) -> Result<(&ImageStream, &'v mut ZipVolume)> {
+        let found = self
+            .streams
+            .iter()
+            .find(|s| s.arn().as_str() == arn.as_str())
+            .ok_or_else(|| {
+                Error::malformed(
+                    map_locus.clone(),
+                    format!(
+                        "the map depends on stream {arn}, which the metadata does \
+                         not describe; its regions cannot be read"
+                    ),
+                )
+            })?;
+        let volume = volumes.holding_mut(arn, self.mapping).ok_or_else(|| {
+            Error::malformed(
+                locus.clone().subject(arn.as_str()),
+                format!(
+                    "no volume given holds this stream's data; pass the folder \
+                     holding {arn} with --multi-part <dir>"
+                ),
+            )
+        })?;
+        Ok((found, volume))
+    }
+
+    /// Whether image order is each stored stream's own order.
+    ///
+    /// Each stored stream must appear in one group of map entries, interrupted
+    /// only by described entries, and that group must cover the stream from 0
+    /// to its declared size, ascending, with no gap. Then "the next bytes of
+    /// this stream" and "the next stored bytes the image wants" are the same
+    /// thing, so a whole-stream read can be cut back into the map's entries.
+    /// Striped sets never qualify.
+    ///
+    /// False whenever that would have to be guessed, including an entry whose
+    /// target cannot be resolved; the entry-by-entry read then reports it.
+    /// Walks the entries in place and allocates per stream, not per entry.
+    pub(crate) fn is_sequential(&self) -> bool {
+        // Striped sets interleave streams through the address space, so part
+        // order is not image order.
+        if matches!(self.map.part_layout(), PartLayout::Striped) {
+            return false;
+        }
+
+        let mut seen: Vec<&Arn> = Vec::new();
+        let mut expected: HashMap<&str, u64> = HashMap::new();
+        for entry in self.map.entries() {
+            let stream = match self.map.target_of(entry) {
+                Some(Target::Stored(stream)) => stream,
+                Some(Target::RepeatedByte(_) | Target::Unknown(_)) => continue,
+                _ => return false,
+            };
+            if seen.last().map(|a: &&Arn| a.as_str()) != Some(stream.as_str()) {
+                // A stream reappearing after another intervened is striping the
+                // layout check did not catch.
+                if seen.iter().any(|a| a.as_str() == stream.as_str()) {
+                    return false;
+                }
+                seen.push(stream);
+            }
+            let next = expected.entry(stream.as_str()).or_insert(0);
+            if *next != entry.target_offset {
+                return false;
+            }
+            let Some(advanced) = next.checked_add(entry.length) else {
+                return false;
+            };
+            *next = advanced;
+        }
+
+        // Every group must end exactly at its stream's declared size: a map
+        // covering only part of a stream would leave a whole-stream read
+        // delivering bytes the image never asked for.
+        self.streams.iter().all(|stream| {
+            // A stream the map never names contributes nothing, which is fine;
+            // one it covers only partly is not.
+            expected
+                .get(stream.arn().as_str())
+                .is_none_or(|covered| *covered == stream.size())
+        })
     }
 
     /// The image's ARN.
@@ -712,6 +927,35 @@ impl StreamSource for SetStreams<'_> {
         self.resident = Some((stream.clone(), reader.into_residency()));
         result
     }
+}
+
+/// The stream a map entry reads from, if it is a stored entry.
+fn stored_stream(map: &Map, position: usize) -> Option<&Arn> {
+    match map.entries().get(position).and_then(|e| map.target_of(e)) {
+        Some(Target::Stored(arn)) => Some(arn),
+        _ => None,
+    }
+}
+
+/// Reconstruct the described entries from `position` up to the next stored
+/// entry, or the end, advancing `position` past them.
+fn emit_described_entries(
+    map: &Map,
+    position: &mut usize,
+    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+    accounting: &mut ReadAccounting,
+    locus: &Locus,
+) -> Result<()> {
+    while *position < map.entries().len() && stored_stream(map, *position).is_none() {
+        let emitted = map.emit_described(*position, sink, locus)?;
+        accounting.described = accounting.described.saturating_add(emitted.described);
+        accounting.gap_filled = accounting.gap_filled.saturating_add(emitted.gap_filled);
+        accounting.unknown_placeholder = accounting
+            .unknown_placeholder
+            .saturating_add(emitted.unknown_placeholder);
+        *position += 1;
+    }
+    Ok(())
 }
 
 /// Whether this subject declares itself an `aff4:Map`.

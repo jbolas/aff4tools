@@ -35,9 +35,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::arn::Arn;
 use crate::error::{Deviation, DeviationKind, Error, Locus, NotAff4Reason, Result};
@@ -112,6 +112,30 @@ const MAX_SEGMENT_SIZE_USIZE: usize = if MAX_SEGMENT_SIZE > usize::MAX as u64 {
 /// module — so a write-capable handle cannot be introduced quietly.
 fn open_read_only(path: &Path) -> std::io::Result<File> {
     File::open(path)
+}
+
+/// Fill `buf` from `file` at `offset`, without using or moving a shared cursor.
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+/// Fill `buf` from `file` at `offset`. Windows' `seek_read` moves the cursor,
+/// but every caller passes its own offset, so none depends on where it is left.
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match std::os::windows::fs::FileExt::seek_read(file, buf, offset) {
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => {
+                buf = &mut buf[n..];
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Classify a segment by its name.
@@ -547,6 +571,16 @@ pub struct ZipVolume {
     /// constant would reintroduce a smaller version of the cost this whole
     /// path exists to remove.
     data_offsets: Mutex<HashMap<String, Option<u64>>>,
+    /// A second read-only handle, for positional reads of member interiors.
+    ///
+    /// Opened on the first range read and kept, rather than opened per read: a
+    /// range read serves one chunk, so a handle per read cost an `open` and a
+    /// `close` per 32 KiB -- 56 million of them across a 1.8 TB image. Not
+    /// opened with the archive, because most volumes are only ever read whole,
+    /// and a multi-part set of hundreds of parts would otherwise hold twice the
+    /// descriptors. Positional reads carry their own offset, so the handle
+    /// needs no cursor and is safe to share through `&self`.
+    range_file: OnceLock<File>,
     deviations: Vec<Deviation>,
 }
 
@@ -641,6 +675,7 @@ impl ZipVolume {
             segment_index,
             sorted_names,
             data_offsets: Mutex::new(HashMap::new()),
+            range_file: OnceLock::new(),
             deviations,
         })
     }
@@ -679,6 +714,17 @@ impl ZipVolume {
         Ok(resolved)
     }
 
+    /// The handle for range reads, opened on first use.
+    fn range_file(&self) -> Result<&File> {
+        if let Some(file) = self.range_file.get() {
+            return Ok(file);
+        }
+        let opened = open_read_only(&self.path).map_err(|e| Error::io(&self.path, e))?;
+        // If another thread got there first, its handle is kept and this one
+        // is closed; either reads the same file.
+        Ok(self.range_file.get_or_init(|| opened))
+    }
+
     /// Read one local file header and compute the data offset it implies.
     fn resolve_data_offset(&self, name: &str) -> Result<Option<u64>> {
         let Some(size) = self.stored_sizes.get(name) else {
@@ -688,11 +734,8 @@ impl ZipVolume {
             return Ok(None);
         }
 
-        let mut file = open_read_only(&self.path).map_err(|e| Error::io(&self.path, e))?;
-        file.seek(SeekFrom::Start(size.header_offset))
-            .map_err(|e| Error::io(&self.path, e))?;
         let mut header = [0u8; LOCAL_HEADER_LEN];
-        if file.read_exact(&mut header).is_err() {
+        if read_exact_at(self.range_file()?, &mut header, size.header_offset).is_err() {
             return Ok(None);
         }
         if &header[..4] != LOCAL_HEADER_SIGNATURE {
@@ -789,12 +832,13 @@ impl Volume for ZipVolume {
             return Ok(None);
         }
 
-        let mut file = open_read_only(&self.path).map_err(|e| Error::io(&self.path, e))?;
-        file.seek(SeekFrom::Start(data_start.saturating_add(offset)))
-            .map_err(|e| Error::io(&self.path, e))?;
         let mut buf = vec![0u8; length];
-        file.read_exact(&mut buf)
-            .map_err(|e| Error::io(&self.path, e))?;
+        read_exact_at(
+            self.range_file()?,
+            &mut buf,
+            data_start.saturating_add(offset),
+        )
+        .map_err(|e| Error::io(&self.path, e))?;
         Ok(Some(buf))
     }
 
@@ -1388,6 +1432,23 @@ mod tests {
             let at = usize::try_from(offset).unwrap();
             assert_eq!(part, &body[at..at + length], "at {offset}+{length}");
         }
+    }
+
+    /// The range handle costs a descriptor only once a range read needs it,
+    /// so a set of many parts read whole holds one per part, not two.
+    #[test]
+    fn the_range_handle_opens_on_first_range_read_only() {
+        let body = vec![7u8; 128];
+        let (_dir, path) = synth(
+            &[(DESCRIPTION_SEGMENT, VOLUME.as_bytes()), ("data", &body)],
+            None,
+        );
+        let mut volume = ZipVolume::open(&path).unwrap();
+        volume.read_segment("data").unwrap();
+        assert!(volume.range_file.get().is_none(), "a whole read opened it");
+
+        volume.read_segment_range("data", 0, 16).unwrap().unwrap();
+        assert!(volume.range_file.get().is_some());
     }
 
     #[test]

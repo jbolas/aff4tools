@@ -49,6 +49,43 @@ pub const INDEX_ENTRY_LEN: usize = 12;
 /// The suffix naming a bevy's chunk index.
 pub const INDEX_SUFFIX: &str = ".index";
 
+/// Refuse a chunk that decompressed short of `aff4:chunkSize` anywhere but at
+/// the end of its stream, given the bytes `delivered` before it.
+///
+/// Chunk `n` holds the stream's bytes from `n × chunkSize`, so only the final
+/// chunk may cover less, and v1.0a §3.2 pads even that one. A short chunk
+/// earlier would put every later byte at the wrong offset; joining it to the
+/// next would deliver a stream that looks whole and is not.
+///
+/// # Errors
+///
+/// [`Error::Malformed`] for a short chunk with stream bytes still to follow.
+pub(crate) fn refuse_short_chunk(
+    stream: &ImageStream,
+    plain_len: usize,
+    delivered: u64,
+    locus: &Locus,
+) -> Result<()> {
+    let end = delivered.saturating_add(plain_len as u64);
+    if plain_len >= stream.chunk_size || end >= stream.size {
+        return Ok(());
+    }
+    // Every chunk before this one was full, or it would have been refused.
+    let chunk_number = delivered / stream.chunk_size as u64;
+    Err(Error::malformed(
+        locus.clone(),
+        format!(
+            "chunk {chunk_number} of stream {} decompressed to {plain_len} bytes, \
+             short of its aff4:chunkSize of {}, but the stream declares {} more \
+             bytes after it; only the final chunk may cover less than chunkSize \
+             (v1.0a §3.2), so every later byte would land at the wrong offset",
+            stream.arn,
+            stream.chunk_size,
+            stream.size - end
+        ),
+    ))
+}
+
 /// One chunk's location within its bevy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkLocation {
@@ -312,6 +349,7 @@ impl ImageStream {
                 let chunk = slice_chunk(&bevy, *location, chunk_index, &chunk_locus)?;
 
                 let mut plain = decompress_chunk(self.codec, chunk, self.chunk_size, &chunk_locus)?;
+                refuse_short_chunk(self, plain.len(), delivered, &chunk_locus)?;
 
                 // The last chunk of the stream is truncated to the declared
                 // size. Delivering the whole chunk would append padding that

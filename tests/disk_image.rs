@@ -363,3 +363,178 @@ fn report_mode_refuses_the_unreadable_region_and_fill_mode_serves_its_placeholde
     assert_eq!(n, 1024);
     assert!(buf.starts_with(b"UNREADABLEDATA"));
 }
+
+const ZERO: &str = "http://aff4.org/Schema#Zero";
+const FF: &str = "http://aff4.org/Schema#SymbolicStreamFF";
+
+/// Thread plans covering the serial whole-bevy path (no workers) and lopsided
+/// parallel ones.
+fn plans() -> Vec<aff4tools::ThreadPlan> {
+    [(1, 0), (1, 1), (2, 3), (4, 1)]
+        .into_iter()
+        .map(|(readers, workers)| aff4tools::ThreadPlan {
+            readers,
+            workers,
+            digesters: 0,
+            available: readers + workers,
+            budget: readers + workers,
+        })
+        .collect()
+}
+
+/// The image read entry by entry, and its accounting.
+fn read_serial(h: &mut DiskImageHandle) -> (Vec<u8>, aff4tools::ReadAccounting) {
+    let locus = Locus::new(&h.primary);
+    let mut out = Vec::new();
+    let accounting = h
+        .image
+        .read_from_set(
+            h.container.volumes_mut(),
+            &mut |b| {
+                out.extend_from_slice(b);
+                Ok(())
+            },
+            &locus,
+        )
+        .unwrap();
+    (out, accounting)
+}
+
+/// The image read stream by stream under `plan`, and its accounting.
+fn read_parallel(
+    h: &mut DiskImageHandle,
+    plan: aff4tools::ThreadPlan,
+) -> aff4tools::Result<(Vec<u8>, aff4tools::ReadAccounting)> {
+    let locus = Locus::new(&h.primary);
+    let mut out = Vec::new();
+    let accounting = h.image.read_from_set_parallel(
+        h.container.volumes_mut(),
+        plan,
+        &mut |b| {
+            out.extend_from_slice(b);
+            Ok(())
+        },
+        &locus,
+    )?;
+    Ok((out, accounting))
+}
+
+/// A container whose image interleaves three stored runs of one stream with
+/// a zero run and an `0xFF` run. Run boundaries fall mid-chunk. Returns the
+/// image's bytes.
+fn write_interleaved(path: &Path) -> Vec<u8> {
+    let (a, z, b, f, c) = (
+        40_000usize,
+        50_000usize,
+        70_001usize,
+        10_000usize,
+        60_003usize,
+    );
+    let stored = pattern(a + b + c);
+
+    let registry = SourceRegistry::new();
+    let locus = Locus::new(path);
+    let mut writer = ContainerWriter::create(path, &registry).unwrap();
+    let written = write_stream(&mut writer, &stored, &locus);
+    let entry = |mapped: usize, length: usize, target: usize, id: u32| MapEntry {
+        mapped_offset: mapped as u64,
+        length: length as u64,
+        target_offset: target as u64,
+        target_id: id,
+    };
+    let entries = [
+        entry(0, a, 0, 0),
+        entry(a, z, 0, 1),
+        entry(a + z, b, a, 0),
+        entry(a + z + b, f, 0, 2),
+        entry(a + z + b + f, c, a + b, 0),
+    ];
+    let size = (a + z + b + f + c) as u64;
+    write_map(
+        &mut writer,
+        &entries,
+        &[written.arn.clone(), ZERO.to_owned(), FF.to_owned()],
+        size,
+        &[],
+        &locus,
+    )
+    .unwrap();
+    writer.finish().unwrap();
+
+    let mut image = Vec::with_capacity(usize::try_from(size).unwrap());
+    image.extend_from_slice(&stored[..a]);
+    image.extend(std::iter::repeat_n(0u8, z));
+    image.extend_from_slice(&stored[a..a + b]);
+    image.extend(std::iter::repeat_n(0xFFu8, f));
+    image.extend_from_slice(&stored[a + b..]);
+    image
+}
+
+#[test]
+fn a_parallel_read_cuts_one_stream_back_into_interleaved_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("interleaved.aff4");
+    let expected = write_interleaved(&path);
+
+    let mut h = disk_image::open(&path).unwrap();
+    let (serial, serial_accounting) = read_serial(&mut h);
+    assert_eq!(serial, expected);
+    assert!(serial_accounting.described > 0 && serial_accounting.stored > 0);
+
+    for plan in plans() {
+        let (bytes, accounting) = read_parallel(&mut h, plan).unwrap();
+        assert!(bytes == expected, "{plan:?} delivered different bytes");
+        assert_eq!(accounting, serial_accounting, "{plan:?}");
+    }
+}
+
+#[test]
+fn a_parallel_read_of_a_set_equals_the_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = pattern(768 * 1024);
+    let parts = write_set(dir.path(), &body);
+
+    let mut h = disk_image::open(&parts[0]).unwrap();
+    let (_, serial_accounting) = read_serial(&mut h);
+    for plan in plans() {
+        let (bytes, accounting) = read_parallel(&mut h, plan).unwrap();
+        assert!(bytes == body, "{plan:?} delivered different bytes");
+        assert_eq!(accounting, serial_accounting, "{plan:?}");
+    }
+}
+
+#[test]
+fn a_parallel_read_falls_back_when_the_map_skips_stream_bytes() {
+    // The unreadable region skips stream bytes 4096..5120, so the stream is
+    // not consumed whole and in order; the entry-by-entry read must serve it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unreadable.aff4");
+    write_with_unreadable_region(&path, &pattern(200_000));
+
+    let mut h = disk_image::open(&path).unwrap();
+    let (serial, serial_accounting) = read_serial(&mut h);
+    for plan in plans() {
+        let (bytes, accounting) = read_parallel(&mut h, plan).unwrap();
+        assert!(bytes == serial, "{plan:?} delivered different bytes");
+        assert_eq!(accounting, serial_accounting, "{plan:?}");
+    }
+}
+
+#[test]
+fn a_parallel_read_of_a_set_missing_a_part_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = pattern(768 * 1024);
+    let parts = write_set(dir.path(), &body);
+    // Written by this test into its own TempDir; no evidence is touched.
+    #[allow(clippy::disallowed_methods)]
+    std::fs::remove_file(&parts[1]).unwrap();
+
+    if let Ok(mut h) = disk_image::open(&parts[0]) {
+        for plan in plans() {
+            assert!(
+                read_parallel(&mut h, plan).is_err(),
+                "{plan:?}: a set missing a part read back as a complete image"
+            );
+        }
+    }
+}
