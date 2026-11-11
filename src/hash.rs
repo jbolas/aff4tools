@@ -38,7 +38,8 @@ use sha1::Sha1;
 // crate; taking it from one keeps `digest` out of the direct dependencies.
 use sha2::{Digest as _, Sha256, Sha512};
 use sha3::digest::{ExtendableOutput as _, XofReader as _};
-use sha3::{Sha3_256, Sha3_384, Sha3_512, Shake128, Shake256};
+use sha3::{Sha3_256, Sha3_384, Sha3_512};
+use shake::{Shake128, Shake256};
 
 use crate::model::{HashAlgorithm, StoredHash};
 

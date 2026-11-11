@@ -460,7 +460,7 @@ fn verify_recomputes_a_whole_image_digest_in_parallel_and_catches_damage() {
         .map(|b| vec![chunk_bytes(2 * b), chunk_bytes(2 * b + 1)])
         .collect();
     let image: Vec<u8> = bevies.iter().flatten().flatten().copied().collect();
-    let md5 = format!("{:x}", Md5::digest(&image));
+    let md5 = hex(&Md5::digest(&image));
     let (dir, path) = volume(
         "image-digest.aff4",
         &bevies,
@@ -516,4 +516,13 @@ fn verify_recomputes_a_whole_image_digest_in_parallel_and_catches_damage() {
         whole_image(&result).iter().all(|c| c["outcome"] != "Match"),
         "the whole-image digest must not match over damaged data"
     );
+}
+
+/// Lowercase hex, the form AFF4 records digests in.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }

@@ -2755,7 +2755,7 @@ fn both_stripe_maps_reconstruct_the_same_image() {
 
         use sha2::Digest as _;
         assert_eq!(total, 268_435_456, "{first} must deliver the whole image");
-        digests.push((first, format!("{:x}", hasher.finalize())));
+        digests.push((first, hex(&hasher.finalize())));
     }
 
     assert_eq!(
@@ -3581,7 +3581,7 @@ fn re_acquiring_an_aff4_reproduces_the_source_image() {
                 &locus,
             )
             .unwrap();
-        (format!("{:x}", hasher.finalize()), total)
+        (hex(&hasher.finalize()), total)
     }
 
     let source = corpus_root().join(format!("{STD}/Base-Linear.aff4"));
@@ -4071,4 +4071,13 @@ fn folders_are_not_reported_as_unresolvable_images() {
             report.notes
         );
     }
+}
+
+/// Lowercase hex, the form AFF4 records digests in.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }

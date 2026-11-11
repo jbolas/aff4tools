@@ -38,7 +38,6 @@
 pub mod arn;
 pub mod codec;
 pub mod container;
-pub mod cpu;
 pub mod disk_image;
 pub mod error;
 pub mod export;

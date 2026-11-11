@@ -12,9 +12,9 @@ Windows is unsupported; building and running on Windows Subsystem for Linux (WSL
 
 ## Prerequisites
 
-- **Rust 1.85 or newer.** Install it with [rustup](https://rustup.rs). Linux
+- **Rust 1.88 or newer.** Install it with [rustup](https://rustup.rs). Linux
   distribution packages are often too old.
-- **A C compiler and linker.** You need this to build the C library, and also for two hashing dependencies.
+- **A C compiler and linker.** You need this to build the C library, and also for the BLAKE3 hashing dependency.
   - On macOS: `xcode-select --install`
   - On Linux: `build-essential` (Debian, Ubuntu) or `gcc` (Fedora, Arch)
 

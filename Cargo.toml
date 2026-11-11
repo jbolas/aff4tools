@@ -2,17 +2,24 @@
 [workspace]
 members = ["aff4tools-ffi"]
 
-# Metadata both crates share, so the URL, license, and edition live in exactly
-# one place and cannot drift apart between the library and its C ABI.
+# Metadata both crates share, so the URL, license, edition, and minimum Rust
+# live in exactly one place and cannot drift apart between the library and its
+# C ABI.
+#
+# `rust-version` is the highest any dependency declares (`sha2` 0.11 and `zip`
+# 9 both need 1.88), and the crate's own `let` chains need it too. Raise it when
+# a dependency update does; `docs/tutorial-compiling.md` states the same figure.
 [workspace.package]
 repository = "https://github.com/jbolas/aff4tools"
 license = "MIT"
 edition = "2024"
+rust-version = "1.88"
 
 [package]
 name = "aff4tools"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 description = "Rust implementation for access to AFF4 and AFF4-L evidence files"
 authors = ["Jeffrey Bolas"]
 license.workspace = true
@@ -20,7 +27,6 @@ repository.workspace = true
 readme = "README.md"
 
 [features]
-default = ["hash-asm"]
 corpus = []
 
 # Capabilities that exist to build proposed Canonical Reference Images for
@@ -28,25 +34,8 @@ corpus = []
 # output this tool's own `conformance` would fault.
 nonconforming = []
 
-# Compiles the hardware SHA-2 paths, by enabling `sha2`'s `asm` feature.
-#
-# A default, so an ordinary build reaches the CPU's hash instructions.
-# `--no-default-features` gives a build with no C-compiler requirement, which is
-# the escape hatch for a constrained build host.
-#
-# **The effect is not uniform.** On aarch64 this is the only route to the
-# hardware path. On x86 the SHA-NI path compiles in regardless, and this only
-# upgrades the software fallback for CPUs predating it. Detection is at runtime
-# with a software fallback either way, so the binary stays correct on any CPU
-# and the recorded digests never change.
-#
-# Named as this crate's own feature rather than reaching `sha2/asm` at the use
-# site because `cfg!` can read a feature of this crate but not of a dependency,
-# and `crate::cpu` needs to state what was compiled in.
-hash-asm = ["sha2/asm"]
-
 [dependencies]
-blake2 = "0.10"
+blake2 = "0.11"
 # BLAKE3. Named by no AFF4 document; written as aff4:BLAKE3 in the base
 # namespace, following v1.0a's own precedent of carrying aff4:blake2b there.
 #
@@ -55,18 +44,12 @@ blake2 = "0.10"
 blake3 = "1.5"
 clap = { version = "4.6", features = ["derive"] }
 crc32fast = "1.5"
-# Runtime CPU feature detection, so `crate::cpu` can report whether this machine
-# has the hash instructions. Declared because this crate calls it directly.
-#
-# 0.3 rather than the 0.2 that `sha2` 0.10 carries: the 0.2 `new!` macro
-# expands to the deprecated `u8::max_value()`, which newer compilers report
-# against this crate. Both versions detect the named features identically.
-cpufeatures = "0.3"
-# OS randomness for volume UUIDs. Already in the tree via `rand`.
-getrandom = "0.3"
+# OS randomness for volume UUIDs. The version `zip` uses; `oxrdf`'s `rand`
+# still carries 0.3.
+getrandom = "0.4"
 flate2 = "1.1.9"
 lz4_flex = "0.14.0"
-md-5 = "0.10"
+md-5 = "0.11"
 # RDF term types (IRI, Literal, Triple) produced by oxttl.
 oxrdf = "0.3"
 # Streaming RDF Turtle parser; reads `information.turtle`.
@@ -74,12 +57,18 @@ oxttl = "0.2"
 # `derive` annotates the model types for `--format json`.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-sha1 = "0.10"
-sha2 = "0.10"
-# SHA-3 and SHAKE, for AFF4-L v1.0-ALPHA §4.4. Pinned to 0.10 so it shares the
-# `digest` 0.10 traits the rest of the tree already uses; 0.12 would pull in a
-# second copy of `digest`. Licensed MIT OR Apache-2.0.
-sha3 = "0.10"
+sha1 = "0.11"
+# The hardware backends (x86 SHA-NI and AVX2, AArch64 SHA-2 and SHA-3
+# extensions) are always compiled in, written with intrinsics rather than
+# assembly, and chosen at runtime with a software fallback. No feature
+# selects them, and the recorded digests are the same on every path.
+sha2 = "0.11"
+# SHA-3 and SHAKE, for AFF4-L v1.0-ALPHA §4.4. 0.12 is the release on the
+# same `digest` 0.11 traits as the other hash crates. Licensed MIT OR Apache-2.0.
+sha3 = "0.12"
+# SHAKE128 and SHAKE256, for AFF4-L v1.0-ALPHA §4.4. Split out of `sha3` at 0.12
+# into its own RustCrypto crate. Licensed MIT OR Apache-2.0.
+shake = "0.1"
 snap = "1.1.2"
 # Derives std::error::Error for the crate's typed Error enum.
 thiserror = "2"
@@ -110,7 +99,7 @@ zip = { version = "9.5", default-features = false, features = [
 assert_cmd = "2"
 # An independent digest path for tests that must not trust the library's own
 # answer — e.g. recomputing the metadata integrity hash from stored bytes.
-sha2 = "0.10"
+sha2 = "0.11"
 oxttl = "0.2"
 # Composable output assertions, pairs with assert_cmd.
 predicates = "3"

@@ -273,8 +273,8 @@ fn recorded_digests_are_of_the_true_file_not_the_padded_chunks() {
     let body = pseudorandom(1000, 0x99);
     write_file(&tree.join("odd.bin"), &body);
 
-    let expected_md5 = format!("{:x}", md5::Md5::digest(&body));
-    let expected_sha1 = format!("{:x}", sha1::Sha1::digest(&body));
+    let expected_md5 = hex(&md5::Md5::digest(&body));
+    let expected_sha1 = hex(&sha1::Sha1::digest(&body));
 
     let out = acquire_deduped(dir.path(), &tree);
     let turtle = {
@@ -471,4 +471,13 @@ fn deduplication_reports_its_two_extensions() {
         kinds.iter().any(|k| k.contains("ContentAddressedSubject")),
         "the content-addressed subject extension must be reported: {kinds:?}"
     );
+}
+
+/// Lowercase hex, the form AFF4 records digests in.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }

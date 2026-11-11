@@ -3486,7 +3486,6 @@ names for this format; writing {}",
             // `run_acquire_split` has already stamped `Acquisition Complete:`;
             // this closes the run.
             Ok(code) => {
-                report_missed_acceleration(out);
                 stamp_completed(out);
                 code
             }
@@ -3587,31 +3586,9 @@ names for this format; writing {}",
     // built rather than a second parse of the same metadata.
     report_conformance_after_acquire(out, output, summarized);
 
-    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
-}
-
-/// Tell the examiner when the machine could hash faster than this build can.
-///
-/// Printed only in that one case. A line on every acquisition would be noise
-/// that trains people to skip it, and there is nothing to act on when the
-/// hardware path is already in use or the CPU does not have the instructions.
-/// An undetectable CPU reports nothing either: unknown is not evidence of
-/// absence — see [`aff4tools::cpu`].
-///
-/// The cost this names is real. On Apple silicon the hardware path recomputes a
-/// container's SHA-256 roughly three times faster, which on a multi-terabyte
-/// source is hours.
-fn report_missed_acceleration(out: &mut impl Write) {
-    if aff4tools::cpu::hash_acceleration().is_opportunity_missed() {
-        let _ = writeln!(
-            out,
-            "Note:        this CPU has hash acceleration this build does not \
-             use; rebuild with default features to acquire faster"
-        );
-    }
 }
 
 /// The caller's reporting hook, run after a multi-part set is written.
@@ -3748,7 +3725,6 @@ fn run_acquire_from_aff4(
             // `run_acquire_split` has already stamped `Acquisition Complete:`;
             // this closes the run. A write failure gets no completion line.
             Ok(code) => {
-                report_missed_acceleration(out);
                 stamp_completed(out);
                 code
             }
@@ -3839,7 +3815,6 @@ fn run_acquire_from_aff4(
     // Conformance, from the summary the verification pass already built.
     report_conformance_after_acquire(out, output, summarized);
 
-    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
@@ -4289,7 +4264,6 @@ fn run_acquire_logical(
     // built rather than a second parse of the same metadata.
     report_conformance_after_acquire(out, output, summarized);
 
-    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
@@ -4672,7 +4646,6 @@ fn run_acquire_device(
             }
             worst = worst.max(EXIT_ACQUISITION_FINDING);
         }
-        report_missed_acceleration(out);
         stamp_completed(out);
 
         // `code` carries any floor the verification pass contributed; `worst`
@@ -4820,7 +4793,6 @@ fn run_acquire_device(
         .0,
     );
 
-    report_missed_acceleration(out);
     stamp_completed(out);
 
     ExitCode::from(worst)
