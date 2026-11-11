@@ -711,8 +711,8 @@ mod tests {
         let mut hasher = MultiHasher::for_algorithms(&[]);
         hasher.update(b"data");
         assert!(hasher.is_empty());
-        assert!(hasher.declined().is_empty());
-        assert!(hasher.finish().is_empty());
+        assert_eq!(hasher.declined(), []);
+        assert_eq!(hasher.finish(), []);
     }
 
     /// Threaded hashing must produce exactly the digests single-threaded

@@ -187,7 +187,7 @@ fn acquired_file_content_is_byte_identical() {
     let file = std::fs::File::open(&out).unwrap();
     let mut zip = zip::ZipArchive::new(file).unwrap();
     let name = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_owned())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
         .find(|n| n.ends_with("a.txt"))
         .expect("the acquired file must be a member");
 
@@ -316,7 +316,7 @@ fn files_above_the_threshold_are_stored_as_image_streams() {
     let file = std::fs::File::open(&out).unwrap();
     let mut zip = zip::ZipArchive::new(file).unwrap();
     let names: Vec<String> = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_owned())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
         .collect();
     assert!(
         names.iter().any(|n| n.ends_with("big.bin/00000000")),
@@ -722,7 +722,7 @@ fn same_named_roots_in_different_places_do_not_collide() {
     let file = std::fs::File::open(&out).unwrap();
     let mut zip = zip::ZipArchive::new(file).unwrap();
     let members: Vec<String> = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_owned())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
         .collect();
     let notes: Vec<&String> = members
         .iter()

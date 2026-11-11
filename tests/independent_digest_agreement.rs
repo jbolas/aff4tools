@@ -397,6 +397,7 @@ fn shared_block_hash_algorithms(path: &Path) -> AlgorithmCoverage {
     let archive = zip::ZipArchive::new(file).unwrap();
     let suffixes: Vec<String> = archive
         .file_names()
+        .map(|name| name.unwrap())
         .filter_map(|name| name.rsplit_once(".blockHash.").map(|(_, s)| s.to_owned()))
         .collect();
 

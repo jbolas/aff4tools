@@ -118,9 +118,9 @@ pub(super) const AFF4_V1_0A: &[RuleInfo] = &[
         requirement: Must,
         state: Detected,
         governs: Container,
-        statement: "The ZIP comment carries the volume ARN starting at offset 0, with nothing appended.",
-        kind: Some(K::NulPaddedComment),
-        routine: true,
+        statement: "Where the ZIP comment carries the volume ARN, the ARN starts at offset 0 of the comment; the clause says nothing about bytes after it.",
+        kind: Some(K::ArnNotAtCommentStart),
+        routine: false,
     },
     declare_rule! {
         id: (Document::Aff4Standard10a, "§5.4", 2),
@@ -129,6 +129,15 @@ pub(super) const AFF4_V1_0A: &[RuleInfo] = &[
         governs: Container,
         statement: "The ZIP comment and container.description agree on the volume ARN.",
         kind: Some(K::InconsistentVolumeArn),
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§5.4", 3),
+        requirement: Must,
+        state: Detected,
+        governs: Container,
+        statement: "Where the volume ARN is stored in a container.description segment, that segment is the first member of the ZIP volume.",
+        kind: Some(K::DescriptionNotFirst),
         routine: false,
     },
     declare_rule! {
@@ -141,70 +150,162 @@ pub(super) const AFF4_V1_0A: &[RuleInfo] = &[
         routine: false,
     },
     // AFF4 Standard v1.0a §6.2 opens by making the whole approach optional:
-    // implementations MAY adopt block map hashing. Nothing a container carries
-    // can depart from a permission, so this rule states that the option was
-    // taken up, and gives the four conditional requirements below something to
-    // hang from. Governed by both reader and writer: a writer produces the
-    // construction, a reader verifies it.
+    // implementations MAY adopt block map hashing. Every other rule in the
+    // section is conditional on that adoption, and a container that never
+    // adopted it satisfies them all trivially. The registry has no conditional
+    // requirement level, so each rule states its condition in its statement.
     //
-    // aff4tools took it up long before this phase — it has always written
-    // per-chunk block hashes — while never writing the digests that complete
-    // the construction. That is a departure from a requirement, not a declined
-    // option, and it went unreported because these rules were not declared.
+    // A container has adopted block map hashing when it holds a block-hash
+    // segment or a literal typed aff4:blockMapHashSHA512 or
+    // aff4:blockMapHashSHA256. Map digests alone are not adoption: the section
+    // defines those properties without tying them to the rest of the
+    // construction, and nothing requires a map to record them.
+    //
+    // Only four clauses carry a keyword. The rest define the construction
+    // without one, and are declared MUST because a container departing from a
+    // definition cannot be read by it. The clause naming the digest algorithm
+    // says implementations "WILL employ" them; WILL is read as SHALL, which
+    // RFC 2119 makes equivalent to MUST.
+    //
+    // The section's slips are resolved as follows. mapPointHash is defined over
+    // a "point" segment v1.0a §4.2 does not name; it is the map segment, as the
+    // value pyaff4 recorded in Base-Linear confirms. The mapHash formula's
+    // parentheses do not balance; it covers the three segments' bytes in order.
+    //
+    // Declared in ordinal order, which the reading-order test requires. 6.2/4
+    // is not declared: it required every map to record its segment digests,
+    // which no clause does. Its number is not reused.
     declare_rule! {
         id: (Document::Aff4Standard10a, "§6.2", 1),
         requirement: May,
         state: Honored,
         governs: ReaderWriter,
-        statement: "An implementation may adopt block map hashing, which digests each block and composes those digests into one hash protecting the stream and its map together.",
+        statement: "An implementation may adopt block map hashing: per-chunk block hashes, digests over the map's segments, and one block map hash composed from both.",
         kind: None,
         routine: false,
     },
-    // The conditional requirements. Each states its condition in the statement
-    // itself, because the registry has no conditional requirement level and
-    // adding one would touch every consumer of `Requirement`. A container that
-    // never adopted block map hashing satisfies all four trivially.
+    // The approach is the whole construction, so block hashes recorded without
+    // the hash they compose are a partial adoption, and the clause storing the
+    // block map hash is a MUST.
     declare_rule! {
         id: (Document::Aff4Standard10a, "§6.2", 2),
         requirement: Must,
-        // Task 7 moves this to Detected with kind Some(K::IncompleteBlockMapHash),
-        // once the checker exists. Declared now so the gap is reported.
         state: NotImplemented,
-        governs: Writer,
-        statement: "A writer that records block hashes also records the block map digest those hashes compose.",
+        governs: Container,
+        statement: "A container that records block-hash segments for an image's stream also records that image's block map hash.",
         kind: None,
         routine: false,
     },
+    // The clause names the datatypes but no property. pyaff4 writes aff4:hash,
+    // matching v1.0a §6's statement that both hashing methods use it.
     declare_rule! {
         id: (Document::Aff4Standard10a, "§6.2", 3),
         requirement: Must,
-        // Task 7 moves this to Detected with kind Some(K::MisplacedBlockMapHash),
-        // once the checker exists. Declared now so the gap is reported.
         state: NotImplemented,
-        governs: Writer,
-        statement: "A recorded block map digest is stored on the image, under a datatype naming the algorithm that produced it.",
+        governs: Container,
+        statement: "A recorded block map hash is stored on the aff4:Image, as a literal typed aff4:blockMapHashSHA512 or aff4:blockMapHashSHA256.",
         kind: None,
         routine: false,
     },
     declare_rule! {
-        id: (Document::Aff4Standard10a, "§6.2", 4),
+        id: (Document::Aff4Standard10a, "§6.2", 5),
         requirement: Must,
-        state: Detected,
+        state: NotImplemented,
         governs: Container,
-        statement: "A map records a digest of each segment it is built from, and one over their concatenation.",
-        kind: Some(K::MissingMapSegmentDigest),
+        statement: "If block map hashing is adopted, the digests it composes are SHA-512 or SHA-256: the digest over each aff4:BlockHashes resource, the map digests, and the block map hash.",
+        kind: None,
         routine: false,
     },
-    // Declared but not checked: the clause says implementations "WILL employ"
-    // SHA-512 or SHA-256, and whether that is a MUST or a strong SHOULD is not
-    // settled by the wording. Recorded as a SHOULD, and left unevaluated rather
-    // than enforcing a reading the document does not clearly state.
     declare_rule! {
-        id: (Document::Aff4Standard10a, "§6.2", 5),
-        requirement: Should,
+        id: (Document::Aff4Standard10a, "§6.2", 6),
+        requirement: Must,
         state: NotImplemented,
+        governs: Container,
+        statement: "If block map hashing is adopted, each bevy's block hashes are held in a segment named after that bevy with the algorithm's extension: md5, sha1, sha256, sha512, or blake2b.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 7),
+        requirement: Must,
+        state: NotImplemented,
+        governs: Container,
+        statement: "For each block-hash algorithm used on a stream, every bevy of that stream has its block-hash segment, so the segments join into one unbroken sequence.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 8),
+        requirement: Must,
+        state: NotImplemented,
+        governs: Container,
+        statement: "A block-hash segment holds one raw digest per chunk, not hex-encoded, in the order of the chunks in its bevy, so its length is the bevy's chunk count times the digest size.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 9),
+        requirement: Must,
+        state: NotImplemented,
+        governs: Container,
+        statement: "A digest over a stream's concatenated block hashes is recorded as aff4:hash on the resource formed by appending /blockhash.<extension> to the stream's ARN, whose rdf:type is aff4:BlockHashes.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 10),
+        requirement: May,
+        state: Honored,
         governs: Writer,
-        statement: "A digest composed for block map hashing is computed with one of the two algorithms the standard names for it.",
+        statement: "Block hashes may be generated with more than one algorithm.",
+        kind: None,
+        routine: false,
+    },
+    // Value definitions. Recomputing a recorded value is verify's work, where a
+    // mismatch is an integrity finding; conformance reads no segment bytes.
+    // Honored: aff4tools writes and verifies these values by this definition.
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 11),
+        requirement: Must,
+        state: Honored,
+        governs: ReaderWriter,
+        statement: "Where recorded, aff4:mapPointHash is the digest of the map's map segment, aff4:mapIdxHash of its idx segment, aff4:mapPathHash of its mapPath segment, and aff4:mapHash of those segments' bytes concatenated in that order, mapPath only when present.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 12),
+        requirement: Must,
+        state: Honored,
+        governs: ReaderWriter,
+        statement: "The block map hash is the digest of these raw digests concatenated: the aff4:BlockHashes digest for every block-hash algorithm on the stream, shortest first (MD5, SHA-1, SHA-256, then SHA-512 before BLAKE2b), followed by mapPointHash, mapIdxHash, and mapPathHash when the map has a mapPath segment.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 13),
+        requirement: May,
+        state: Honored,
+        governs: Writer,
+        statement: "The block map hash may also be stored on the aff4:Map, typed aff4:SHA512 or aff4:SHA256.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 14),
+        requirement: May,
+        state: NotCheckable,
+        governs: Unsettled,
+        statement: "The clause permitting a block map hash on the map names its datatype but not its property; by v1.0a's own convention that is aff4:hash, where aff4:SHA512 already means a linear digest of the map's stream, so a reader could not tell the two apart.",
+        kind: None,
+        routine: false,
+    },
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "§6.2", 15),
+        requirement: Must,
+        state: NotCheckable,
+        governs: Unsettled,
+        statement: "The composition assumes one image stream behind one map, and does not say which aff4:BlockHashes digests enter it when a map targets several streams, or what replaces the map digests when an image's data stream has no map.",
         kind: None,
         routine: false,
     },

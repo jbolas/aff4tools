@@ -1113,7 +1113,7 @@ mod tests {
         let value = g.object("aff4://s", "http://aff4.org/Schema#size").unwrap();
         let mut deviations = Vec::new();
         assert_eq!(as_u64(value, &locus(), &mut deviations), Some(3_964_928));
-        assert!(deviations.is_empty());
+        assert_eq!(deviations, []);
     }
 
     /// `dream.aff4` writes `aff4:size 8688`. Turtle types a bare integer as `xsd:integer`, so
@@ -1158,7 +1158,7 @@ mod tests {
 
         assert_eq!(a, Some(268_435_456));
         assert_eq!(a, b);
-        assert!(deviations.is_empty());
+        assert_eq!(deviations, []);
     }
 
     #[test]
@@ -1189,7 +1189,7 @@ mod tests {
             as_timestamp(value, &locus(), &mut deviations).as_deref(),
             Some("2016-12-07T03:40:14.127Z")
         );
-        assert!(deviations.is_empty());
+        assert_eq!(deviations, []);
     }
 
     /// Lowercase `xsd:datetime` appears 44 times in the corpus, outnumbering
@@ -1243,22 +1243,22 @@ mod tests {
         let g = Graph::parse(STD_PREFIXES.as_bytes(), &locus()).unwrap();
         assert!(g.is_empty());
         assert_eq!(g.len(), 0);
-        assert!(g.subjects().is_empty());
+        assert_eq!(g.subjects(), []);
     }
 
     #[test]
     fn absent_subjects_and_predicates_yield_nothing() {
         let g = parse("<aff4://s> a aff4:Map .\n");
-        assert!(g.statements_for("aff4://absent").is_empty());
-        assert!(
-            g.objects("aff4://s", "http://aff4.org/Schema#absent")
-                .is_empty()
+        assert_eq!(g.statements_for("aff4://absent"), Vec::<&Statement>::new());
+        assert_eq!(
+            g.objects("aff4://s", "http://aff4.org/Schema#absent"),
+            Vec::<&Value>::new()
         );
         assert!(
             g.object("aff4://s", "http://aff4.org/Schema#absent")
                 .is_none()
         );
-        assert!(g.types("aff4://absent").is_empty());
+        assert_eq!(g.types("aff4://absent"), Vec::<&str>::new());
     }
 
     /// The empty prefix binds to the volume ARN in `AFF4Std` containers.

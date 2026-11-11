@@ -12,8 +12,10 @@ registry in `src/rules/catalog.rs`.
 | enforced | A violation refuses the container rather than producing a deviation. |
 | detected | `aff4tools conformance` checks for compliance and reports a deviation. |
 | honored | `aff4tools info` or `acquire` honor this rule when reading or writing containers. |
-| not implemented | Declared, but no checker exists yet. Reported as a coverage gap. |
+| not implemented | Declared, but no checker exists yet. `conformance` neither checks nor reports it. |
 | not checkable | No checker can exist yet, because the requirement itself is unsettled. |
+
+`conformance` reports deviations from `detected` rules only. An empty report means no departure was observed by those rules, not that the container conforms.
 
 ## Governs
 
@@ -31,14 +33,24 @@ Whether a rule binds the content of a container, or the behavior of a reader or 
 | `AFF4_V1_0A/4/1` (§4) | MAY | detected | container | A discontiguous map's holes are filled from its declared gap stream. |
 | `AFF4_V1_0A/5/1` (§5) | MUST | detected | container | Each storage path holds one segment, so a repeated member name leaves the earlier one unreachable. |
 | `AFF4_V1_0A/5.1/1` (§5.1) | MUST | detected | container | An ARN maps to a storage path by the URI-to-path rules, which admit no byte-range suffix. |
-| `AFF4_V1_0A/5.4/1` (§5.4) | MUST | detected | container | The ZIP comment carries the volume ARN starting at offset 0, with nothing appended. |
+| `AFF4_V1_0A/5.4/1` (§5.4) | MUST | detected | container | Where the ZIP comment carries the volume ARN, the ARN starts at offset 0 of the comment; the clause says nothing about bytes after it. |
 | `AFF4_V1_0A/5.4/2` (§5.4) | MUST | detected | container | The ZIP comment and container.description agree on the volume ARN. |
+| `AFF4_V1_0A/5.4/3` (§5.4) | MUST | detected | container | Where the volume ARN is stored in a container.description segment, that segment is the first member of the ZIP volume. |
 | `AFF4_V1_0A/6.1/1` (§6.1) | MUST | detected | container | A digest's length matches the algorithm its datatype declares. |
-| `AFF4_V1_0A/6.2/1` (§6.2) | MAY | honored | reader, writer | An implementation may adopt block map hashing, which digests each block and composes those digests into one hash protecting the stream and its map together. |
-| `AFF4_V1_0A/6.2/2` (§6.2) | MUST | not implemented | writer | A writer that records block hashes also records the block map digest those hashes compose. |
-| `AFF4_V1_0A/6.2/3` (§6.2) | MUST | not implemented | writer | A recorded block map digest is stored on the image, under a datatype naming the algorithm that produced it. |
-| `AFF4_V1_0A/6.2/4` (§6.2) | MUST | detected | container | A map records a digest of each segment it is built from, and one over their concatenation. |
-| `AFF4_V1_0A/6.2/5` (§6.2) | SHOULD | not implemented | writer | A digest composed for block map hashing is computed with one of the two algorithms the standard names for it. |
+| `AFF4_V1_0A/6.2/1` (§6.2) | MAY | honored | reader, writer | An implementation may adopt block map hashing: per-chunk block hashes, digests over the map's segments, and one block map hash composed from both. |
+| `AFF4_V1_0A/6.2/2` (§6.2) | MUST | not implemented | container | A container that records block-hash segments for an image's stream also records that image's block map hash. |
+| `AFF4_V1_0A/6.2/3` (§6.2) | MUST | not implemented | container | A recorded block map hash is stored on the aff4:Image, as a literal typed aff4:blockMapHashSHA512 or aff4:blockMapHashSHA256. |
+| `AFF4_V1_0A/6.2/5` (§6.2) | MUST | not implemented | container | If block map hashing is adopted, the digests it composes are SHA-512 or SHA-256: the digest over each aff4:BlockHashes resource, the map digests, and the block map hash. |
+| `AFF4_V1_0A/6.2/6` (§6.2) | MUST | not implemented | container | If block map hashing is adopted, each bevy's block hashes are held in a segment named after that bevy with the algorithm's extension: md5, sha1, sha256, sha512, or blake2b. |
+| `AFF4_V1_0A/6.2/7` (§6.2) | MUST | not implemented | container | For each block-hash algorithm used on a stream, every bevy of that stream has its block-hash segment, so the segments join into one unbroken sequence. |
+| `AFF4_V1_0A/6.2/8` (§6.2) | MUST | not implemented | container | A block-hash segment holds one raw digest per chunk, not hex-encoded, in the order of the chunks in its bevy, so its length is the bevy's chunk count times the digest size. |
+| `AFF4_V1_0A/6.2/9` (§6.2) | MUST | not implemented | container | A digest over a stream's concatenated block hashes is recorded as aff4:hash on the resource formed by appending /blockhash.<extension> to the stream's ARN, whose rdf:type is aff4:BlockHashes. |
+| `AFF4_V1_0A/6.2/10` (§6.2) | MAY | honored | writer | Block hashes may be generated with more than one algorithm. |
+| `AFF4_V1_0A/6.2/11` (§6.2) | MUST | honored | reader, writer | Where recorded, aff4:mapPointHash is the digest of the map's map segment, aff4:mapIdxHash of its idx segment, aff4:mapPathHash of its mapPath segment, and aff4:mapHash of those segments' bytes concatenated in that order, mapPath only when present. |
+| `AFF4_V1_0A/6.2/12` (§6.2) | MUST | honored | reader, writer | The block map hash is the digest of these raw digests concatenated: the aff4:BlockHashes digest for every block-hash algorithm on the stream, shortest first (MD5, SHA-1, SHA-256, then SHA-512 before BLAKE2b), followed by mapPointHash, mapIdxHash, and mapPathHash when the map has a mapPath segment. |
+| `AFF4_V1_0A/6.2/13` (§6.2) | MAY | honored | writer | The block map hash may also be stored on the aff4:Map, typed aff4:SHA512 or aff4:SHA256. |
+| `AFF4_V1_0A/6.2/14` (§6.2) | MAY | not checkable | - | The clause permitting a block map hash on the map names its datatype but not its property; by v1.0a's own convention that is aff4:hash, where aff4:SHA512 already means a linear digest of the map's stream, so a reader could not tell the two apart. |
+| `AFF4_V1_0A/6.2/15` (§6.2) | MUST | not checkable | - | The composition assumes one image stream behind one map, and does not say which aff4:BlockHashes digests enter it when a map targets several streams, or what replaces the map digests when an image's data stream has no map. |
 | `AFF4_V1_0A/7.1/1` (§7.1) | MAY | detected | container | A stripe may reference streams held in a sibling volume of the same set. |
 | `AFF4_V1_0A/7.1/2` (§7.1) | MUST | detected | container | Volumes of one striped set agree on every property of a commonly-named stream. |
 | `AFF4_V1_0A/none/1` (not legislated) | MAY | detected | container | Content-addressed dedupe subjects are an extension no clause prohibits. |
@@ -109,4 +121,4 @@ Whether a rule binds the content of a container, or the behavior of a reader or 
 
 ## Coverage
 
-32 of 73 declared rules are checked.
+32 of 83 declared rules are checked.

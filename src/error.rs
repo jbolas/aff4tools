@@ -466,10 +466,19 @@ pub enum DeviationKind {
     UnexpectedDatatype,
     /// A digest whose length does not match its declared algorithm.
     DigestLengthMismatch,
-    /// A ZIP comment carrying trailing NUL bytes after the volume ARN.
-    NulPaddedComment,
+    /// A ZIP comment whose volume ARN does not start at offset 0.
+    ///
+    /// AFF4 Standard v1.0a §5.4 places the ARN at the start of the comment and
+    /// says nothing about what follows it, so trailing bytes are accepted in
+    /// silence and only leading ones are reported.
+    ArnNotAtCommentStart,
     /// The ZIP comment and `container.description` disagree on the volume ARN.
     InconsistentVolumeArn,
+    /// A `container.description` segment that is not the first ZIP member.
+    ///
+    /// AFF4 Standard v1.0a §5.4 requires the segment to be first wherever the
+    /// volume ARN is stored in it.
+    DescriptionNotFirst,
     /// An ARN using the byte-range extension `aff4://uuid[0xSTART:0xLEN]`,
     /// which is not in the standard but is produced by pyaff4.
     ByteRangeArn,
@@ -480,7 +489,8 @@ pub enum DeviationKind {
     /// not AFF4 resource names either — they carry no `aff4://` authority — so
     /// they cannot be summarised as objects.
     ContentAddressedSubject,
-    /// Two ZIP members share a name, so the later one is unreachable.
+    /// Two ZIP members share a name; reads resolve to the last, so the earlier
+    /// ones are unreachable.
     DuplicateSegmentName,
     /// A discontiguous map left holes, filled from its gap stream (v1.0a §4).
     ///
@@ -503,23 +513,6 @@ pub enum DeviationKind {
     /// unreported, `verify` silently declined that file's two recorded digests
     /// even though its bytes were present and matched.
     MissingZipSegmentType,
-    /// A map carries none of the digests that would show its own segments are
-    /// intact.
-    ///
-    /// AFF4 Standard v1.0a §6.2 defines four: `aff4:mapPointHash` over the
-    /// `map` segment, `aff4:mapIdxHash` over `idx`, `aff4:mapPathHash` over
-    /// `mapPath`, and `aff4:mapHash` over the three concatenated.
-    ///
-    /// **What this costs an examiner.** A map is the instruction sheet for
-    /// reassembling an image: which bytes come from where. Corrupt one entry
-    /// and the reconstructed image is wrong while every stream digest still
-    /// matches, because the streams were never touched. Without these digests a
-    /// damaged map is indistinguishable from an intact one.
-    ///
-    /// Not hypothetical. aff4tools itself wrote no map digest on any path until
-    /// Phase 10, and reported nothing, because AFF4 Standard v1.0a §6.2 was
-    /// absent from the rule registry entirely.
-    MissingMapSegmentDigest,
     /// A logical stream whose declared storage form holds no bytes.
     ///
     /// AFF4-L v1.0-ALPHA §6 makes a subject's `rdf:type` list the statement of
@@ -694,13 +687,12 @@ impl DeviationKind {
     ///
     /// A *routine* deviation is worth recording but does not by itself mean the
     /// container is questionable: inspecting one stripe of a striped set always
-    /// yields [`Self::ExternalReference`], and one writer NUL-pads every ZIP
-    /// comment it produces.
+    /// yields [`Self::ExternalReference`].
     ///
     /// Frequency alone does not make a condition routine. Three of the four
     /// corpus writers violate v1.0a §5.4's `container.description` ordering and
     /// so does one commercial tool, but member order can affect how another
-    /// implementation reads the volume, so [`Self::InconsistentVolumeArn`]
+    /// implementation reads the volume, so [`Self::DescriptionNotFirst`]
     /// stays noteworthy. The test is whether the condition can affect
     /// interpretation, not how often it occurs.
     #[must_use]
@@ -832,14 +824,14 @@ impl std::fmt::Display for DeviationKind {
             Self::NonstandardDatatype => "nonstandard datatype IRI",
             Self::UnexpectedDatatype => "unexpected datatype",
             Self::DigestLengthMismatch => "digest length mismatch",
-            Self::NulPaddedComment => "NUL-padded ZIP comment",
+            Self::ArnNotAtCommentStart => "volume ARN not at offset 0 of the ZIP comment",
             Self::InconsistentVolumeArn => "inconsistent volume ARN",
+            Self::DescriptionNotFirst => "container.description is not the first member",
             Self::ByteRangeArn => "byte-range ARN extension",
             Self::ContentAddressedSubject => "content-addressed dedupe subject",
             Self::MapGap => "discontiguous map gap",
             Self::DuplicateSegmentName => "duplicate segment name",
             Self::MissingZipSegmentType => "segment-stored file missing aff4:zip_segment",
-            Self::MissingMapSegmentDigest => "map missing its segment integrity digests",
             Self::StorageFormNotFound => "declared storage form holds no bytes",
             Self::AmbiguousStorageForm => "two storage forms declared for one stream",
             Self::OversizedResidentStream => "in-metadata stream above the one-kilobyte cap",
@@ -1005,12 +997,17 @@ mod tests {
                 Some("§6.1"),
             ),
             (
-                DeviationKind::NulPaddedComment,
+                DeviationKind::ArnNotAtCommentStart,
                 Generation::Standard10,
                 Some("§5.4"),
             ),
             (
                 DeviationKind::InconsistentVolumeArn,
+                Generation::Standard10,
+                Some("§5.4"),
+            ),
+            (
+                DeviationKind::DescriptionNotFirst,
                 Generation::Standard10,
                 Some("§5.4"),
             ),
@@ -1077,7 +1074,7 @@ mod tests {
         use crate::lexicon::Generation;
 
         for kind in [
-            DeviationKind::NulPaddedComment,
+            DeviationKind::ArnNotAtCommentStart,
             DeviationKind::MapGap,
             DeviationKind::DigestLengthMismatch,
         ] {
@@ -1131,11 +1128,11 @@ mod tests {
         );
     }
 
-    /// Exactly two conditions are routine today.
+    /// Exactly one condition is routine today.
     #[test]
     fn routine_kinds_are_unchanged() {
         assert!(DeviationKind::ExternalReference.is_routine());
-        assert!(DeviationKind::NulPaddedComment.is_routine());
+        assert!(!DeviationKind::DescriptionNotFirst.is_routine());
         assert!(!DeviationKind::MapGap.is_routine());
         assert!(!DeviationKind::DigestLengthMismatch.is_routine());
     }

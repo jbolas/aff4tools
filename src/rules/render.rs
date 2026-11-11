@@ -32,10 +32,14 @@ pub fn render_catalog() -> String {
         "| honored | `aff4tools info` or `acquire` honor this rule when reading or writing containers. |\n",
     );
     out.push_str(
-        "| not implemented | Declared, but no checker exists yet. Reported as a coverage gap. |\n",
+        "| not implemented | Declared, but no checker exists yet. `conformance` neither checks nor reports it. |\n",
     );
     out.push_str(
         "| not checkable | No checker can exist yet, because the requirement itself is unsettled. |\n\n",
+    );
+    out.push_str(
+        "`conformance` reports deviations from `detected` rules only. An empty report \
+         means no departure was observed by those rules, not that the container conforms.\n\n",
     );
 
     out.push_str("## Governs\n\n");

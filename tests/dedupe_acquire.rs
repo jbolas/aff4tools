@@ -336,7 +336,7 @@ fn a_files_idx_lists_only_its_own_chunks() {
         let mut count = 0u64;
         for i in 0..zip.len() {
             let m = zip.by_index(i).unwrap();
-            if m.name().ends_with("/idx") {
+            if m.name().unwrap().ends_with("/idx") {
                 total += m.size();
                 count += 1;
             }

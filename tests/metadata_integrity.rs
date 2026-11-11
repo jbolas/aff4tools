@@ -208,7 +208,13 @@ fn rebuild_with_altered_metadata(from: &std::path::Path, to: &std::path::Path) {
         .expect("the comment is copied");
 
     let names: Vec<String> = (0..zip.len())
-        .map(|i| zip.by_index(i).expect("a member").name().to_owned())
+        .map(|i| {
+            zip.by_index(i)
+                .expect("a member")
+                .name()
+                .unwrap()
+                .into_owned()
+        })
         .collect();
 
     for name in names {
@@ -224,8 +230,8 @@ fn rebuild_with_altered_metadata(from: &std::path::Path, to: &std::path::Path) {
             bytes.extend_from_slice(b"\n# altered\n");
             assert!(bytes.len() > before, "the metadata must actually change");
         }
-        let options: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         writer.start_file(&name, options).expect("a member starts");
         std::io::Write::write_all(&mut writer, &bytes).expect("written");
     }

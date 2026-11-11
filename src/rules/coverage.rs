@@ -76,23 +76,18 @@ mod tests {
     /// A v1.0 container's coverage, including the AFF4 Standard v1.0a §6.2
     /// block map hashing gap.
     ///
-    /// **Two of the five unevaluated rules are binding**, which is a change
-    /// this project made deliberately rather than a regression. Until Phase 10
-    /// the registry inventoried no AFF4 Standard v1.0a §6.2 rule at all, so
-    /// `conformance` reported full coverage of binding rules on containers
-    /// whose maps carried no integrity digests. An undeclared requirement
-    /// cannot appear as a gap; it simply vanishes, which is the failure mode
-    /// the registry exists to prevent.
+    /// Eleven rules go unevaluated: the two AFF4 Standard v1.0a §2.2
+    /// recommendations declared but deliberately never emitted, seven
+    /// AFF4 Standard v1.0a §6.2 requirements awaiting checkers, and two
+    /// AFF4 Standard v1.0a §6.2 questions the standard leaves unsettled. An
+    /// undeclared requirement cannot appear as a gap; it simply vanishes, which
+    /// is the failure mode the registry exists to prevent.
     ///
-    /// The count falls as Phase 10 lands its checkers.
+    /// The count falls as checkers land.
     #[test]
     fn a_v1_0_container_has_almost_full_coverage() {
         let coverage = Coverage::for_generation(Generation::Standard10);
-        // Two AFF4 Standard v1.0a §2.2 recommendations declared but
-        // deliberately never emitted, plus the three AFF4 Standard v1.0a §6.2
-        // rules still awaiting checkers. Phase 10 added a checker for
-        // AFF4 Standard v1.0a §6.2/4, so this count fell from six to five.
-        assert_eq!(coverage.unevaluated().count(), 5);
+        assert_eq!(coverage.unevaluated().count(), 11);
         assert!(
             !coverage.is_complete(),
             "some v1.0a rules are declared but not yet emitted"

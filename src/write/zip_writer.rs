@@ -390,7 +390,10 @@ mod tests {
         assert_eq!(archive.len(), 3);
 
         // Physical order must match call order: container.description first.
-        let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+        let names: Vec<String> = archive
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect();
         assert_eq!(names[0], "container.description", "§5.4: must be first");
 
         let mut body = String::new();

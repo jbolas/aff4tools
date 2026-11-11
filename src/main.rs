@@ -24,7 +24,6 @@ pub(crate) use aff4tools::human_bytes;
 // `RuleInfo` only; `aff4tools::rules::Coverage` is deliberately left
 // path-qualified, because `Coverage` in this module already names
 // `verify::Coverage` — what a hash check covered, a different question.
-use aff4tools::rules::RuleInfo;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 /// `info`'s human-readable report: object ordering, the manifest
@@ -5186,41 +5185,21 @@ fn write_conformance(
     }
     writeln!(out)?;
 
-    let unevaluated: Vec<_> = scan.coverage.unevaluated().collect();
-
     if deviations.is_empty() {
-        if unevaluated.is_empty() {
-            // Stated as what was checked, not as a clean bill of health: this
-            // command reads metadata and recomputes nothing, so "conforms" here
-            // must not be read as "the evidence is intact".
-            writeln!(
-                out,
-                "No deviations. This container's metadata conforms to {base_spec}."
-            )?;
-        } else {
-            // Finding nothing is not the same as having looked. Claiming
-            // conformance here would rest the claim on rules the scan never
-            // evaluated, which is the one thing a conformance report must not
-            // do.
-            writeln!(
-                out,
-                "No deviations found, but {} rule(s) were not evaluated — see below.",
-                unevaluated.len()
-            )?;
-        }
+        // Stated as an observation, never as conformance. The scan evaluates
+        // only the rules aff4tools has checkers for, and which those are is a
+        // property of this build, not of the container; docs/conformance-rules.md
+        // lists them. It also reads metadata only and recomputes nothing.
+        writeln!(out, "No deviations found.")?;
         writeln!(
             out,
             "(Metadata only — no digest was recomputed. Run `aff4tools verify` \
              to check the stored bytes against their recorded hashes.)"
         )?;
-        // Deliberately no early return: the coverage block below is exactly
-        // what a container with nothing to report most needs printed.
     } else {
         writeln!(out, "Deviations ({})", deviations.len())?;
         write_deviations(out, deviations, scan.generation, base_spec)?;
     }
-
-    write_coverage(out, &unevaluated)?;
 
     Ok(())
 }
@@ -5259,45 +5238,6 @@ fn write_deviations(
     Ok(())
 }
 
-/// Write the rules the scan did not evaluate.
-///
-/// Kept apart from the deviation list because the two claims differ. A
-/// deviation is an observed departure from the standard; an unevaluated rule
-/// is an absence of evidence about one, and a reader who conflated them would
-/// either read the container as broken or read the tool as complete. The
-/// heading says which of the two this is, and the note beneath it says so
-/// again in words, because this is the block most likely to be skimmed.
-///
-/// Nothing is printed when coverage is complete: a report that appended an
-/// empty "Not evaluated (0)" to every conforming container would train the
-/// reader to skip the heading.
-fn write_coverage(out: &mut impl Write, unevaluated: &[&'static RuleInfo]) -> std::io::Result<()> {
-    if unevaluated.is_empty() {
-        return Ok(());
-    }
-
-    writeln!(out)?;
-    writeln!(out, "Not evaluated ({})", unevaluated.len())?;
-    writeln!(
-        out,
-        "  These rules apply to this container but aff4tools did not check them."
-    )?;
-    writeln!(out, "  Nothing here says the container departs from them.")?;
-    for rule in unevaluated {
-        writeln!(out)?;
-        writeln!(
-            out,
-            "  [{}] {} {}",
-            rule.requirement.as_str(),
-            rule.id,
-            rule.state.as_str()
-        )?;
-        writeln!(out, "      {}", rule.statement)?;
-    }
-
-    Ok(())
-}
-
 /// The `--format json` envelope for `conformance`.
 ///
 /// Shaped like [`InfoJsonReport`] deliberately — same field names, same
@@ -5331,24 +5271,9 @@ struct ConformanceReport {
     /// specified in a paper rather than in the Standard.
     #[serde(skip_serializing_if = "Option::is_none")]
     logical_specification: Option<&'static str>,
-    /// Whether the container was *shown* to conform: nothing departed from the
-    /// standard, and every rule in scope was actually evaluated.
-    ///
-    /// Both halves are required. Routine conditions count as departures here,
-    /// as they do for [`ContainerSummary::is_conformant`]. But an empty deviation list from a
-    /// scan that checked only a dozen of a container's rules is not evidence of
-    /// conformance, and a script reading this field is asking whether the
-    /// container was shown to conform, not whether the checks that happened to
-    /// run found anything. When this is `false` for want of coverage rather
-    /// than for a deviation, `coverage` below names every rule responsible.
-    conformant: bool,
-    /// Every deviation, each with its spec citation.
+    /// Every deviation, each with its spec citation. Empty means none was
+    /// observed by the rules this build checks, not that the container conforms.
     deviations: Vec<ConformanceDeviation>,
-    /// Every rule in scope that no checker evaluated.
-    ///
-    /// Empty when coverage is complete. An entry is not a finding against the
-    /// container: it records that aff4tools has nothing to say about that rule.
-    coverage: Vec<ConformanceCoverage>,
 }
 
 impl ConformanceReport {
@@ -5364,56 +5289,11 @@ impl ConformanceReport {
             tool: scan.version.as_ref().and_then(|v| v.tool.clone()),
             specification: base_spec.name(),
             logical_specification: logical_spec.map(aff4tools::rules::Document::name),
-            // "No deviation at all", routine ones included, *and* a scan that
-            // evaluated every rule in scope. Deviations alone would report
-            // `true` for a container whose rules were never checked, which is
-            // the reading this field exists to prevent.
-            conformant: scan.deviations.is_empty() && scan.coverage.is_complete(),
             deviations: scan
                 .deviations
                 .iter()
                 .map(|d| ConformanceDeviation::from(d, scan.generation))
                 .collect(),
-            coverage: scan
-                .coverage
-                .unevaluated()
-                .map(ConformanceCoverage::from)
-                .collect(),
-        }
-    }
-}
-
-/// One rule the scan did not evaluate.
-///
-/// The text report's "Not evaluated" block, in machine-readable form.
-#[derive(Debug, serde::Serialize)]
-struct ConformanceCoverage {
-    /// The rule's stable identifier, e.g. `"AFF4L_V1_ALPHA/6.1/1"`. Assigned
-    /// once and never reused, so it keeps its meaning in an archived report.
-    rule: String,
-    /// How binding the rule is, as [`Requirement`] serializes it.
-    requirement: aff4tools::rules::Requirement,
-    /// Why it went unchecked, as [`RuleState`] serializes it:
-    /// `not_implemented` is work this project has not done, `not_checkable` a
-    /// question the standard has not answered. Never `detected`, `enforced` or
-    /// `honored`, since none of those is a coverage gap.
-    state: aff4tools::rules::RuleState,
-    /// Whose obligation the rule is, as [`Governs`] serializes it: `container`,
-    /// `reader`, `writer`, `reader_writer`, or `unsettled` for a
-    /// `not_checkable` rule.
-    governs: aff4tools::rules::Governs,
-    /// What the rule requires, in this project's own words.
-    statement: &'static str,
-}
-
-impl ConformanceCoverage {
-    fn from(rule: &'static RuleInfo) -> Self {
-        Self {
-            rule: rule.id.to_string(),
-            requirement: rule.requirement,
-            state: rule.state,
-            governs: rule.governs,
-            statement: rule.statement,
         }
     }
 }
@@ -5423,7 +5303,7 @@ impl ConformanceCoverage {
 struct ConformanceDeviation {
     /// The machine-readable kind token, as [`DeviationKind`] serializes it.
     kind: DeviationKind,
-    /// The kind rendered for a human, e.g. `"NUL-padded ZIP comment"`.
+    /// The kind rendered for a human, e.g. `"inconsistent volume ARN"`.
     description: String,
     /// Where the deviation was found.
     locus: String,

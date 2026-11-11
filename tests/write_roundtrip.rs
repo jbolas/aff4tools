@@ -107,7 +107,7 @@ fn container_description_is_written_first() {
     let mut infos: Vec<(String, u64)> = (0..archive.len())
         .map(|i| {
             let f = archive.by_index(i).unwrap();
-            (f.name().to_owned(), f.header_start())
+            (f.name().unwrap().into_owned(), f.header_start())
         })
         .collect();
     infos.sort_by_key(|(_, offset)| *offset);

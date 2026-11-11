@@ -473,7 +473,7 @@ mod tests {
             }
             let rendered = w.serialize();
             let elapsed = start.elapsed();
-            assert!(!rendered.is_empty());
+            assert_ne!(rendered, "");
             elapsed
         }
 

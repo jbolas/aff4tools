@@ -384,7 +384,7 @@ mod tests {
             &mut failures,
         );
 
-        assert!(children.is_empty());
+        assert_eq!(children, Vec::<PathBuf>::new());
         assert_eq!(failures[0].0, PathBuf::from("/tree"));
     }
 
@@ -412,6 +412,6 @@ mod tests {
                 PathBuf::from("/tree/c"),
             ]
         );
-        assert!(failures.is_empty());
+        assert_eq!(failures, []);
     }
 }

@@ -375,8 +375,8 @@ fn splitting_does_not_change_the_digests_of_the_stored_data() {
             // default moved off SHA-1 in Phase 10.
             let mut names: Vec<String> = archive
                 .file_names()
+                .map(|name| name.unwrap().into_owned())
                 .filter(|n| n.contains(".blockHash."))
-                .map(str::to_owned)
                 .collect();
             names.sort();
             for name in names {
@@ -433,15 +433,8 @@ fn every_part_conforms_with_zero_deviations() {
         // A part read alone necessarily references its siblings (v1.0a §7.1), so
         // `ExternalReference` is expected here. Nothing else is: this pins that
         // no other deviation creeps into split output.
-        //
-        // Scoped to the deviation section rather than the whole report. The
-        // report's "Not evaluated" block lists rules in the same bracketed
-        // shape, and those are not deviations: a rule aff4tools did not check
-        // says nothing about this container. Counting one as a departure is
-        // exactly the conflation the coverage block exists to prevent.
         let others: Vec<&str> = text
             .lines()
-            .take_while(|l| !l.starts_with("Not evaluated ("))
             .filter(|l| l.trim_start().starts_with('['))
             .filter(|l| !l.contains("reference to another volume"))
             .collect();

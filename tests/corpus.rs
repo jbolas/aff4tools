@@ -124,11 +124,10 @@ fn base_linear_matches_its_recorded_metadata() {
         .expect("the stream records an MD5");
     assert_eq!(md5.hex, "d5825dc1152a42958c8219ff11ed01a3");
 
-    // Evimetry NUL-pads the ZIP comment; that is the only expected departure.
-    let kinds: Vec<DeviationKind> = s.deviations.iter().map(|d| d.kind).collect();
-    assert_eq!(
-        kinds,
-        [DeviationKind::NulPaddedComment],
+    // Evimetry NUL-pads the ZIP comment after the ARN, which AFF4 Standard
+    // v1.0a §5.4 permits, so the container departs from nothing checked.
+    assert!(
+        s.deviations.is_empty(),
         "unexpected deviations: {:#?}",
         s.deviations
     );
@@ -613,7 +612,10 @@ fn read_member(path: &std::path::Path, name: &str) -> Vec<u8> {
 fn member_names(path: &std::path::Path) -> Vec<String> {
     let file = std::fs::File::open(path).unwrap();
     let archive = zip::ZipArchive::new(file).unwrap();
-    archive.file_names().map(str::to_owned).collect()
+    archive
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect()
 }
 
 /// Every chunk of a real snappy bevy decompresses to exactly the declared
@@ -1191,7 +1193,10 @@ fn altered_data_that_passes_the_zip_crc_is_caught_by_the_digest() {
         let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
 
-        let names: Vec<String> = reader.file_names().map(str::to_owned).collect();
+        let names: Vec<String> = reader
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect();
         for name in names {
             let mut member = reader.by_name(&name).unwrap();
             let mut body = Vec::new();
@@ -2249,7 +2254,10 @@ where
         .set_raw_comment(reader.comment().to_vec().into_boxed_slice())
         .unwrap();
 
-    let names: Vec<String> = reader.file_names().map(str::to_owned).collect();
+    let names: Vec<String> = reader
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect();
     for name in names {
         let mut entry = reader.by_name(&name).unwrap();
         let mut body = Vec::new();

@@ -1343,7 +1343,7 @@ mod corpus {
     fn conformance_reports_container_specification_and_deviations() {
         let assert = aff4tools()
             .args(["conformance"])
-            .arg(fixture(BASE_LINEAR))
+            .arg(fixture(DREAM))
             .assert()
             .success();
         let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
@@ -1359,7 +1359,7 @@ mod corpus {
             "the three parts must appear in order:\n{out}"
         );
         assert!(
-            out.contains("Base-Linear.aff4"),
+            out.contains("dream.aff4"),
             "the container must be named:\n{out}"
         );
     }
@@ -1400,17 +1400,20 @@ mod corpus {
     fn conformance_cites_a_spec_section_per_deviation() {
         aff4tools()
             .args(["conformance"])
-            .arg(fixture(BASE_LINEAR))
+            .arg(fixture(DREAM))
             .assert()
             .success()
             .stdout(
-                predicate::str::contains("NUL-padded ZIP comment")
+                predicate::str::contains("container.description is not the first member")
                     .and(predicate::str::contains("AFF4 Specification 1.0a §5.4")),
             );
     }
 
-    /// A container with nothing recorded says so, and still refuses to imply
-    /// its bytes were checked.
+    /// A container with nothing recorded says so, claims neither conformance
+    /// nor verification, and lists no unevaluated rule.
+    ///
+    /// `Base-Linear`'s only former finding was its NUL-padded ZIP comment,
+    /// which AFF4 Standard v1.0a §5.4 permits.
     #[test]
     fn conformance_on_a_clean_container_makes_no_verification_claim() {
         let assert = aff4tools()
@@ -1420,12 +1423,13 @@ mod corpus {
             .success();
         let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
 
-        if out.contains("No deviations") {
-            assert!(
-                out.contains("no digest was recomputed"),
-                "a clean conformance report must not read as verification:\n{out}"
-            );
-        }
+        assert!(out.contains("No deviations found."), "{out}");
+        assert!(
+            out.contains("no digest was recomputed"),
+            "a clean conformance report must not read as verification:\n{out}"
+        );
+        assert!(!out.contains("conforms"), "{out}");
+        assert!(!out.contains("Not evaluated"), "{out}");
     }
 
     /// The JSON envelope matches `info`'s shape and carries the citation.
@@ -1433,7 +1437,7 @@ mod corpus {
     fn conformance_json_has_the_envelope_and_citations() {
         let assert = aff4tools()
             .args(["conformance", "--format", "json"])
-            .arg(fixture(BASE_LINEAR))
+            .arg(fixture(DREAM))
             .assert()
             .success();
         let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
@@ -1447,10 +1451,10 @@ mod corpus {
             container["specification"], "AFF4 Specification 1.0a",
             "{out}"
         );
-        assert_eq!(container["conformant"], false, "{out}");
+        assert!(container.get("conformant").is_none(), "{out}");
 
         let deviation = &container["deviations"][0];
-        assert_eq!(deviation["kind"], "nul_padded_comment", "{out}");
+        assert_eq!(deviation["kind"], "description_not_first", "{out}");
         assert_eq!(deviation["spec_section"], "§5.4", "{out}");
         assert!(
             deviation["detail"].as_str().is_some_and(|d| !d.is_empty()),
@@ -1910,14 +1914,14 @@ mod corpus {
 
     /// `conformance` reports every deviation and sets no exit code for any.
     ///
-    /// `Base-Linear` carries a routine deviation, the NUL-padded ZIP comment;
-    /// `unicode.aff4` carries nonstandard datatype IRIs, which are not routine.
-    /// Both are reported and both exit 0: the report is the product, and a
-    /// script reads `--format json` for the findings themselves.
+    /// `dream.aff4` stores `container.description` out of place; `unicode.aff4`
+    /// carries nonstandard datatype IRIs. Both are reported and both exit 0:
+    /// the report is the product, and a script reads `--format json` for the
+    /// findings themselves.
     #[test]
     fn conformance_reports_deviations_without_an_exit_code() {
         for (name, finding) in [
-            (BASE_LINEAR, "NUL-padded ZIP comment"),
+            (DREAM, "container.description is not the first member"),
             (UNICODE, "Deviations"),
         ] {
             aff4tools()
@@ -2011,7 +2015,9 @@ mod corpus {
             .success()
             .stdout(
                 predicate::str::contains("Deviations")
-                    .and(predicate::str::contains("inconsistent volume ARN"))
+                    .and(predicate::str::contains(
+                        "container.description is not the first member",
+                    ))
                     .and(predicate::str::contains("AFF4 Specification 1.0a §5.4"))
                     .and(predicate::str::contains("xsd:datetime").not()),
             );
@@ -2205,7 +2211,10 @@ mod corpus {
                 .set_raw_comment(reader.comment().to_vec().into_boxed_slice())
                 .unwrap();
 
-            let names: Vec<String> = reader.file_names().map(str::to_owned).collect();
+            let names: Vec<String> = reader
+                .file_names()
+                .map(|name| name.unwrap().into_owned())
+                .collect();
             for name in names {
                 let mut entry = reader.by_name(&name).unwrap();
                 let mut body = Vec::new();
@@ -2296,7 +2305,7 @@ mod corpus {
     #[cfg(feature = "corpus")]
     #[test]
     fn brief_output_is_shorter_but_keeps_the_deviation_count() {
-        let path = fixture(BASE_LINEAR).to_string_lossy().into_owned();
+        let path = fixture(DREAM).to_string_lossy().into_owned();
 
         let full = aff4tools().args(["info", &path]).assert().success();
         let full = String::from_utf8_lossy(&full.get_output().stdout).to_string();
@@ -3767,7 +3776,7 @@ fn corrupt_member_containing(from: &std::path::Path, to: &std::path::Path, needl
     let mut ranges = Vec::new();
     for i in 0..archive.len() {
         let entry = archive.by_index(i).unwrap();
-        if entry.name().contains(needle) {
+        if entry.name().unwrap().contains(needle) {
             let start = usize::try_from(entry.data_start().unwrap()).unwrap();
             let len = usize::try_from(entry.compressed_size()).unwrap();
             if len > 0 {

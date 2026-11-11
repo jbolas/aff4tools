@@ -283,10 +283,9 @@ impl Generation {
     /// **Supported for reading is not the same as fully implemented.** A v2.1
     /// container using a capability this build lacks — a digest algorithm from
     /// AFF4-L v1.0-ALPHA §4.4, say — is [`crate::Error::Unsupported`] at the
-    /// point that capability is met, never an integrity finding. What
-    /// `conformance` has not evaluated is reported as a coverage gap rather
-    /// than as conformance, so nothing here lets an unchecked rule read as a
-    /// clean one.
+    /// point that capability is met, never an integrity finding. `conformance`
+    /// reports only deviations and never claims conformance, so nothing here
+    /// lets an unchecked rule read as a clean one.
     #[must_use]
     pub fn is_supported(self) -> bool {
         matches!(self, Self::Standard10 | Self::PyAff4Logical | Self::Aff4L10)

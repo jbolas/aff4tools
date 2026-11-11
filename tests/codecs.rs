@@ -176,7 +176,10 @@ fn compressed_containers_hold_compressed_chunks() {
 fn total_bevy_bytes(path: &Path) -> u64 {
     let file = std::fs::File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
-    let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect();
 
     names
         .iter()

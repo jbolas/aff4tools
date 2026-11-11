@@ -77,7 +77,13 @@ fn members(path: &Path) -> Vec<String> {
     let file = std::fs::File::open(path).expect("the container opens");
     let mut zip = zip::ZipArchive::new(file).expect("a ZIP archive");
     (0..zip.len())
-        .map(|i| zip.by_index(i).expect("a member").name().to_owned())
+        .map(|i| {
+            zip.by_index(i)
+                .expect("a member")
+                .name()
+                .unwrap()
+                .into_owned()
+        })
         .collect()
 }
 

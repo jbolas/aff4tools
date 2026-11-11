@@ -20,8 +20,10 @@
 //! - Canonical reference `Base-Linear.aff4`'s comment is
 //!   `aff4://685e15cc-…f77044\0`, while pyaff4 writes no padding and
 //!   `container.description` is never padded. An untrimmed ARN carries an
-//!   invisible `\0` and compares unequal to everything, so the NUL is trimmed
-//!   and a [`DeviationKind::NulPaddedComment`] recorded.
+//!   invisible `\0` and compares unequal to everything, so the NUL is trimmed.
+//!   v1.0a §5.4 places the ARN at offset 0 and says nothing about what follows
+//!   it, so the trim is silent; bytes *before* the ARN are a
+//!   [`DeviationKind::ArnNotAtCommentStart`].
 //! - **`container.description` is not always first.** v1.0a §5.4 says it MUST
 //!   be
 //!   the first member when present; all three pyaff4-written containers place
@@ -33,7 +35,7 @@
 //! container has a zip64 end-of-central-directory record, so this is not
 //! enforced — enforcing it would reject every real container.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -228,13 +230,28 @@ pub(crate) struct MemberSize {
     pub(crate) header_offset: u64,
 }
 
+/// What one pass over the central directory finds.
+///
+/// Names are keyed by their raw bytes, which is also how the `zip` crate
+/// indexes members, so a repeated name here is a repeated name there. A UTF-8
+/// name looks up directly by its `&str`; a name `zip` decodes as CP437 does not
+/// match, and its caller falls back to a full read.
+#[derive(Default)]
+struct CentralDirectory {
+    /// Each member's sizes. A repeated name holds its last occurrence, which
+    /// is also the one `zip::ZipArchive::by_name` reads.
+    sizes: HashMap<Box<[u8]>, MemberSize>,
+    /// Every name recorded more than once, with how many times it appears.
+    repeated: BTreeMap<Box<[u8]>, usize>,
+}
+
 /// Every member's name and both sizes, read from the central directory.
 ///
-/// One bulk read of the directory rather than a seek per member. Returns an
-/// empty map on any parse failure: this feeds a *cost estimate*, so a
-/// container whose directory this cannot read should still verify, just
-/// without a size prediction. Nothing here is used for a correctness claim.
-fn central_directory_sizes(path: &Path) -> Option<HashMap<String, MemberSize>> {
+/// One bulk read of the directory rather than a seek per member. Returns
+/// [`None`] on any parse failure: the sizes feed cost estimates and range
+/// reads, both of which fall back to a full read, so a container whose
+/// directory this cannot read still verifies.
+fn central_directory(path: &Path) -> Option<CentralDirectory> {
     use std::io::{Read as _, Seek as _, SeekFrom};
 
     let mut file = open_read_only(path).ok()?;
@@ -280,7 +297,7 @@ fn central_directory_sizes(path: &Path) -> Option<HashMap<String, MemberSize>> {
     let mut cd = vec![0u8; usize::try_from(cd_size).ok()?];
     file.read_exact(&mut cd).ok()?;
 
-    let mut sizes = HashMap::new();
+    let mut directory = CentralDirectory::default();
     let mut at = 0usize;
     while at + 46 <= cd.len() && cd.get(at..at + 4)? == b"PK\x01\x02" {
         let name_len = usize::from(u16at(&cd, at + 28)?);
@@ -293,7 +310,7 @@ fn central_directory_sizes(path: &Path) -> Option<HashMap<String, MemberSize>> {
         let header_offset_32 = u32at(&cd, at + 42)?;
         let mut header_offset = u64::from(header_offset_32);
 
-        let name = String::from_utf8_lossy(cd.get(at + 46..at + 46 + name_len)?).into_owned();
+        let name: Box<[u8]> = cd.get(at + 46..at + 46 + name_len)?.into();
 
         // In a zip64 extra field the 8-byte values appear only for the fields
         // whose 32-bit slot held the sentinel, in a fixed order: uncompressed,
@@ -334,19 +351,25 @@ fn central_directory_sizes(path: &Path) -> Option<HashMap<String, MemberSize>> {
             }
         }
 
-        sizes.insert(
-            name,
-            MemberSize {
-                compressed,
-                uncompressed,
-                method,
-                header_offset,
-            },
-        );
+        let size = MemberSize {
+            compressed,
+            uncompressed,
+            method,
+            header_offset,
+        };
+        if directory.sizes.insert(name.clone(), size).is_some() {
+            *directory.repeated.entry(name).or_insert(1) += 1;
+        }
         at += 46 + name_len + extra_len + comment_len;
     }
 
-    Some(sizes)
+    Some(directory)
+}
+
+/// A raw member name as text, exactly: UTF-8 as is, anything else with its
+/// non-ASCII bytes escaped rather than replaced.
+fn display_name(raw: &[u8]) -> String {
+    std::str::from_utf8(raw).map_or_else(|_| raw.escape_ascii().to_string(), str::to_owned)
 }
 
 /// The last occurrence of `needle` in `haystack`.
@@ -551,9 +574,10 @@ pub struct ZipVolume {
     arn: Arn,
     arn_source: ArnSource,
     segment_names: Vec<String>,
-    /// Stored size per member, from the central directory. Empty if it could
-    /// not be parsed, in which case cost estimates simply go unreported.
-    stored_sizes: HashMap<String, MemberSize>,
+    /// Stored size per member, from the central directory, keyed by raw name.
+    /// Empty if it could not be parsed, in which case cost estimates go
+    /// unreported and range reads fall back to full reads.
+    stored_sizes: HashMap<Box<[u8]>, MemberSize>,
     /// Name to position in `segment_names`, so lookups are O(1).
     ///
     /// Built once at open. A container with 16,435 members makes a linear
@@ -622,7 +646,13 @@ impl ZipVolume {
             return Err(Error::not_aff4(&path, NotAff4Reason::EmptyArchive));
         }
 
-        let segment_names: Vec<String> = archive.file_names().map(String::from).collect();
+        // A name is decoded as UTF-8 when valid and as CP437 otherwise, so
+        // decoding is never lossy; a failure is reported, not papered over.
+        let segment_names: Vec<String> = archive
+            .file_names()
+            .map(|name| name.map(String::from))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| Error::zip(&path, e))?;
 
         // Stored sizes, read straight from the central directory in one pass.
         //
@@ -631,33 +661,47 @@ impl ZipVolume {
         // That costs ~7 ms per member on external media — nearly a minute on a
         // 16,000-member container, to answer a question the central directory
         // already holds. Parsing it directly keeps the whole thing to one read.
-        let stored_sizes = central_directory_sizes(&path).unwrap_or_default();
+        let directory = central_directory(&path);
 
         let mut deviations = Vec::new();
 
-        // A ZIP may legally carry two members with the same name. Keep the
-        // first — which is what `by_name` resolves to — and report the rest
-        // rather than silently letting one shadow the other.
-        let mut segment_index: HashMap<String, usize> = HashMap::with_capacity(segment_names.len());
-        let mut duplicates = 0usize;
-        for (index, name) in segment_names.iter().enumerate() {
-            if segment_index.insert(name.clone(), index).is_some() {
-                duplicates += 1;
+        // A ZIP may carry two members with the same name. `zip` indexes
+        // members by raw name, so it lists such a name once and reads its
+        // *last* occurrence; the central-directory parse above does the same.
+        // The earlier occurrences are unreachable, so each repeated name is
+        // reported. `file_names()` cannot reveal this, having already merged
+        // them.
+        if let Some(directory) = &directory {
+            for (name, count) in &directory.repeated {
+                deviations.push(Deviation::new(
+                    Locus::new(&path).segment(display_name(name)),
+                    DeviationKind::DuplicateSegmentName,
+                    format!(
+                        "the member name appears {count} times; reads resolve to the last \
+                         occurrence, and the {} earlier one(s) are unreachable",
+                        count - 1
+                    ),
+                ));
             }
         }
-        // `insert` overwrote on collision; rebuild those to the first index.
-        if duplicates > 0 {
-            segment_index.clear();
-            for (index, name) in segment_names.iter().enumerate() {
-                segment_index.entry(name.clone()).or_insert(index);
-            }
+        // The parse above failed but `zip` still saw a repeat: report it
+        // without names rather than not at all.
+        if directory.as_ref().is_none_or(|d| d.repeated.is_empty()) && archive.has_duplicate_names()
+        {
             deviations.push(Deviation::new(
                 Locus::new(&path),
                 DeviationKind::DuplicateSegmentName,
-                format!(
-                    "{duplicates} segment name(s) appear more than once; reads                      resolve to the first occurrence, and the later ones are                      unreachable"
-                ),
+                "member names appear more than once; reads resolve to the last occurrence \
+                 of each, and the earlier ones are unreachable",
             ));
+        }
+        let stored_sizes = directory.map(|d| d.sizes).unwrap_or_default();
+
+        // Distinct raw names can still decode to the same text (a UTF-8 name
+        // and a CP437 one), so the first position is kept for such a pair.
+        let mut segment_index: HashMap<String, usize> = HashMap::with_capacity(segment_names.len());
+        for (index, name) in segment_names.iter().enumerate() {
+            segment_index.entry(name.clone()).or_insert(index);
         }
 
         let sorted_names: BTreeSet<String> = segment_names.iter().cloned().collect();
@@ -727,7 +771,7 @@ impl ZipVolume {
 
     /// Read one local file header and compute the data offset it implies.
     fn resolve_data_offset(&self, name: &str) -> Result<Option<u64>> {
-        let Some(size) = self.stored_sizes.get(name) else {
+        let Some(size) = self.stored_sizes.get(name.as_bytes()) else {
             return Ok(None);
         };
         if size.method != METHOD_STORED {
@@ -781,10 +825,12 @@ impl ZipVolume {
     /// evidence either way and reports nothing, rather than guessing.
     #[must_use]
     pub fn member_storage(&self, name: &str) -> Option<MemberStorage> {
-        self.stored_sizes.get(name).map(|size| MemberStorage {
-            method: size.method,
-            uncompressed: size.uncompressed,
-        })
+        self.stored_sizes
+            .get(name.as_bytes())
+            .map(|size| MemberStorage {
+                method: size.method,
+                uncompressed: size.uncompressed,
+            })
     }
 
     /// A [`Locus`] pointing at this container, optionally at one segment.
@@ -824,7 +870,7 @@ impl Volume for ZipVolume {
         // Bounds come from the central directory, which is evidence-derived:
         // a request that runs past the member's recorded extent is refused
         // rather than allowed to read a neighbouring member's bytes.
-        let Some(size) = self.stored_sizes.get(name) else {
+        let Some(size) = self.stored_sizes.get(name.as_bytes()) else {
             return Ok(None);
         };
         let end = offset.saturating_add(length as u64);
@@ -845,13 +891,15 @@ impl Volume for ZipVolume {
     fn stored_bytes(&self, names: &[String]) -> u64 {
         names
             .iter()
-            .filter_map(|name| self.stored_sizes.get(name))
+            .filter_map(|name| self.stored_sizes.get(name.as_bytes()))
             .map(|size| size.compressed)
             .sum()
     }
 
     fn uncompressed_bytes(&self, name: &str) -> Option<u64> {
-        self.stored_sizes.get(name).map(|size| size.uncompressed)
+        self.stored_sizes
+            .get(name.as_bytes())
+            .map(|size| size.uncompressed)
     }
 
     fn segment_index(&self, name: &str) -> Option<usize> {
@@ -1006,8 +1054,9 @@ fn resolve_volume_arn(
                     DeviationKind::InconsistentVolumeArn,
                     format!(
                         "ZIP comment says {c:?} but {DESCRIPTION_SEGMENT} says {d:?}; \
-                         using {DESCRIPTION_SEGMENT}, which spec §5.4 requires to be \
-                         the first member and is the more deliberate declaration"
+                         using {DESCRIPTION_SEGMENT}, which AFF4 Standard v1.0a §5.4 \
+                         requires to be the first member and is the more deliberate \
+                         declaration"
                     ),
                 ));
             }
@@ -1042,23 +1091,25 @@ fn comment_arn(
     }
 
     let text = String::from_utf8_lossy(raw);
-    let trimmed = trim_arn(&text);
+    let padding = |c: char| c == '\0' || c.is_whitespace();
 
-    if trimmed.len() < text.trim_end().len() {
-        // Evimetry NUL-pads the comment; pyaff4 does not. Trimming is required
-        // for the ARN to compare equal to anything, but the padding is a real
-        // departure from the spec's "stored starting at offset 0" and is
-        // recorded rather than quietly normalised.
+    // v1.0a §5.4 stores the ARN starting at offset 0 of the comment and says
+    // nothing about what follows it. Evimetry NUL-pads the comment after the
+    // ARN, which the clause permits, so trailing padding is trimmed in
+    // silence. Anything before the ARN moves it off offset 0, and is reported.
+    let leading = text.chars().take_while(|&c| padding(c)).count();
+    if leading > 0 {
         deviations.push(Deviation::new(
             Locus::new(path),
-            DeviationKind::NulPaddedComment,
+            DeviationKind::ArnNotAtCommentStart,
             format!(
-                "the ZIP comment carries {} trailing NUL byte(s) after the volume ARN",
-                text.trim_end().len() - trimmed.len()
+                "the ZIP comment carries {leading} NUL or whitespace character(s) \
+                 before the volume ARN, which AFF4 Standard v1.0a §5.4 places at offset 0"
             ),
         ));
     }
 
+    let trimmed = text.trim_matches(padding);
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
@@ -1092,7 +1143,7 @@ fn description_arn(
             .map_or_else(String::new, |name| format!(" (\"{name}\" is)"));
         deviations.push(Deviation::new(
             Locus::new(path).segment(DESCRIPTION_SEGMENT),
-            DeviationKind::InconsistentVolumeArn,
+            DeviationKind::DescriptionNotFirst,
             format!(
                 "{DESCRIPTION_SEGMENT} is stored {position} of {} in the volume, \
                  but it is required to be the first member{occupant}",
@@ -1156,13 +1207,13 @@ mod tests {
         let vol = ZipVolume::open(&path).unwrap();
         assert_eq!(vol.arn().as_str(), VOLUME);
         assert_eq!(*vol.arn_source(), ArnSource::ZipComment);
-        assert!(vol.deviations().is_empty());
+        assert_eq!(vol.deviations(), []);
     }
 
     /// Finding B: Evimetry NUL-pads the comment. Untrimmed, the ARN carries an
     /// invisible `\0` and compares unequal to everything.
     #[test]
-    fn trims_nul_padding_and_records_it() {
+    fn trims_trailing_nul_padding_in_silence() {
         let mut comment = VOLUME.as_bytes().to_vec();
         comment.push(0);
         let (_d, path) = synth(&[("version.txt", b"x=1\n")], Some(&comment));
@@ -1170,14 +1221,30 @@ mod tests {
         let vol = ZipVolume::open(&path).unwrap();
         assert_eq!(vol.arn().as_str(), VOLUME, "the NUL must not survive");
         assert!(!vol.arn().as_str().contains('\0'));
-        assert_eq!(
+        assert!(
+            vol.deviations().is_empty(),
+            "AFF4 Standard v1.0a §5.4 says nothing about bytes after the ARN: {:?}",
             vol.deviations()
-                .iter()
-                .filter(|d| d.kind == DeviationKind::NulPaddedComment)
-                .count(),
-            1,
-            "trimming must be reported, not silent"
         );
+    }
+
+    /// Bytes before the ARN move it off the offset 0 that
+    /// AFF4 Standard v1.0a §5.4 requires. The ARN is still read, and the
+    /// departure recorded.
+    #[test]
+    fn reports_bytes_before_the_comment_arn() {
+        let comment = format!(" \0{VOLUME}");
+        let (_d, path) = synth(&[("version.txt", b"x=1\n")], Some(comment.as_bytes()));
+
+        let vol = ZipVolume::open(&path).unwrap();
+        assert_eq!(vol.arn().as_str(), VOLUME);
+        let detail = vol
+            .deviations()
+            .iter()
+            .find(|d| d.kind == DeviationKind::ArnNotAtCommentStart)
+            .map(|d| d.detail.clone())
+            .expect("a displaced ARN must be reported");
+        assert!(detail.contains("2 NUL or whitespace"), "{detail}");
     }
 
     #[test]
@@ -1197,7 +1264,7 @@ mod tests {
         );
         let vol = ZipVolume::open(&path).unwrap();
         assert_eq!(*vol.arn_source(), ArnSource::Both { consistent: true });
-        assert!(vol.deviations().is_empty());
+        assert_eq!(vol.deviations(), []);
     }
 
     /// A disagreement is an integrity signal: it must be reported, and
@@ -1243,7 +1310,7 @@ mod tests {
         let detail = vol
             .deviations()
             .iter()
-            .find(|d| d.detail.contains("first member"))
+            .find(|d| d.kind == DeviationKind::DescriptionNotFirst)
             .map(|d| d.detail.clone())
             .expect("position must be reported");
 
@@ -1402,6 +1469,91 @@ mod tests {
         assert!(
             text.contains("no data was read"),
             "the message must say nothing was read: {text}"
+        );
+    }
+
+    /// Rename a member to another name of the same length, in both its local
+    /// header and its directory record.
+    ///
+    /// `zip::ZipWriter` refuses a duplicate name, so a container repeating one
+    /// is made by writing two distinct names and then renaming the second.
+    /// Takes the same scoped exemption as [`declare_size`].
+    #[allow(clippy::disallowed_methods)]
+    fn rename_member(path: &Path, from: &str, to: &str) {
+        assert_eq!(from.len(), to.len(), "a rename must not move any bytes");
+        let mut bytes = std::fs::read(path).unwrap();
+        let mut renamed = 0;
+        let mut i = 0;
+        while let Some(at) = bytes[i..]
+            .windows(from.len())
+            .position(|w| w == from.as_bytes())
+        {
+            let start = i + at;
+            bytes[start..start + from.len()].copy_from_slice(to.as_bytes());
+            renamed += 1;
+            i = start + from.len();
+        }
+        assert_eq!(renamed, 2, "expected a local header and a directory record");
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A repeated member name is reported, and every read resolves to its
+    /// last occurrence.
+    ///
+    /// `zip` merges a repeated name into one entry, so a check over
+    /// `file_names()` can never see it. Full reads go through `zip`, range
+    /// reads through this module's own directory parse; both must pick the
+    /// same occurrence, or one segment would read as two different contents.
+    #[test]
+    fn a_repeated_member_name_is_reported_and_reads_the_last() {
+        let (_d, path) = synth(
+            &[
+                (DESCRIPTION_SEGMENT, VOLUME.as_bytes()),
+                ("dup-one", b"earlier"),
+                ("dup-two", b"later!!"),
+            ],
+            None,
+        );
+        rename_member(&path, "dup-two", "dup-one");
+        let mut vol = ZipVolume::open(&path).unwrap();
+
+        let repeats: Vec<&Deviation> = vol
+            .deviations()
+            .iter()
+            .filter(|d| d.kind == DeviationKind::DuplicateSegmentName)
+            .collect();
+        assert_eq!(repeats.len(), 1, "one deviation per repeated name");
+        assert_eq!(repeats[0].locus.segment.as_deref(), Some("dup-one"));
+        assert!(
+            repeats[0].detail.contains("appears 2 times"),
+            "{}",
+            repeats[0].detail
+        );
+
+        assert_eq!(vol.segment_names(), ["container.description", "dup-one"]);
+        assert_eq!(vol.read_segment("dup-one").unwrap(), b"later!!");
+        assert_eq!(
+            vol.read_segment_range("dup-one", 0, 7).unwrap().as_deref(),
+            Some(&b"later!!"[..]),
+        );
+    }
+
+    /// Distinct names raise no repeat.
+    #[test]
+    fn distinct_member_names_raise_no_repeat() {
+        let (_d, path) = synth(
+            &[
+                (DESCRIPTION_SEGMENT, VOLUME.as_bytes()),
+                ("dup-one", b"earlier"),
+                ("dup-two", b"later!!"),
+            ],
+            None,
+        );
+        let vol = ZipVolume::open(&path).unwrap();
+        assert!(
+            !vol.deviations()
+                .iter()
+                .any(|d| d.kind == DeviationKind::DuplicateSegmentName)
         );
     }
 

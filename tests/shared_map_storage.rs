@@ -68,7 +68,13 @@ fn members(container: &Path) -> Vec<String> {
     let file = std::fs::File::open(container).expect("the container opens");
     let mut zip = zip::ZipArchive::new(file).expect("a readable ZIP");
     (0..zip.len())
-        .map(|i| zip.by_index(i).expect("a member").name().to_owned())
+        .map(|i| {
+            zip.by_index(i)
+                .expect("a member")
+                .name()
+                .unwrap()
+                .into_owned()
+        })
         .collect()
 }
 
@@ -242,8 +248,7 @@ fn a_shared_map_container_conforms() {
     let (_src, root) = source_tree();
     let (_out, container) = acquire(&root);
 
-    // What is asserted here is that the map band contributes no *deviation*;
-    // unevaluated rules are listed separately and are not at issue.
+    // What is asserted here is that the map band contributes no *deviation*.
     let assert = aff4tools().arg("conformance").arg(&container).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(

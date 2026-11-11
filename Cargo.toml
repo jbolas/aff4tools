@@ -60,9 +60,12 @@ blake3 = "1.5"
 clap = { version = "4.6", features = ["derive"] }
 crc32fast = "1.5"
 # Runtime CPU feature detection, so `crate::cpu` can report whether this machine
-# has the hash instructions. Already in the tree via `sha2`; declared here
-# because this crate calls it directly.
-cpufeatures = "0.2"
+# has the hash instructions. Declared because this crate calls it directly.
+#
+# 0.3 rather than the 0.2 that `sha2` 0.10 carries: the 0.2 `new!` macro
+# expands to the deprecated `u8::max_value()`, which newer compilers report
+# against this crate. Both versions detect the named features identically.
+cpufeatures = "0.3"
 # OS randomness for volume UUIDs. Already in the tree via `rand`.
 getrandom = "0.3"
 flate2 = "1.1.9"
@@ -114,7 +117,7 @@ xattr = "1.6"
 #
 # `default-features = false` trims unused codecs (bzip2, zstd, lzma, aes) 
 # from the build.
-zip = { version = "8.6", default-features = false, features = [
+zip = { version = "9.5", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
 
@@ -130,7 +133,7 @@ predicates = "3"
 serde_json = "1"
 # Temp dirs for mutated-copy tests; corpus fixtures are never touched.
 tempfile = "3"
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # Optimize dependencies even in debug builds.
 [profile.dev.package."*"]

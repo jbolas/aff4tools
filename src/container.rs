@@ -2685,87 +2685,18 @@ tell where its content lives"
     ));
 }
 
-/// The four digests AFF4 Standard v1.0a §6.2 defines over a map's own segments.
-///
-/// `mapHash` covers the three concatenated; the others cover one segment each.
-const MAP_SEGMENT_DIGESTS: [&str; 4] = ["mapPointHash", "mapIdxHash", "mapPathHash", "mapHash"];
-
-/// Report a map that records no digest over its own segments.
-///
-/// AFF4 Standard v1.0a §6.2's map property table. **A map is the instruction
-/// sheet for reassembling an image**, so a corrupted map yields a wrong image
-/// while every stream digest still matches — the streams were never touched.
-/// Without these digests the two cases are indistinguishable.
-///
-/// # What is not reported
-///
-/// A map carrying *some* of the four is not reported. The clause defines four
-/// properties without saying an implementation must write all of them, and one
-/// digest over the `map` segment already makes corruption detectable. Demanding
-/// the complete set would report conforming containers.
-///
-/// A subject that is not a map is not reported, obviously — but neither is one
-/// whose map segments are absent. That is a different finding, an image with
-/// nothing to read, and reporting it here would misdescribe it.
-fn report_map_segment_digests(
-    object: &Aff4Object,
-    volume: &VolumeContext,
-    deviations: &mut Vec<Deviation>,
-) {
-    if !declares_local_type(object, "Map") {
-        return;
-    }
-
-    // The map's own segments must actually be present. A Map subject naming no
-    // member of this volume describes storage held elsewhere, and this check
-    // has nothing to say about it.
-    let Some(base) = object.arn.member_name(volume.volume_arn, volume.mapping) else {
-        return;
-    };
-    if !volume
-        .segment_present
-        .contains(format!("{base}/{}", crate::map::MAP_SEGMENT).as_str())
-    {
-        return;
-    }
-
-    if object
-        .hashes
-        .iter()
-        .any(|hash| MAP_SEGMENT_DIGESTS.contains(&hash.predicate.as_str()))
-    {
-        return;
-    }
-
-    deviations.push(Deviation::new(
-        volume.locus.clone().subject(object.arn.as_str()),
-        DeviationKind::MissingMapSegmentDigest,
-        format!(
-            "this map records no digest over its own segments, so a corrupted \
-map would reassemble the image wrongly while every stream digest still \
-matched; AFF4 Standard v1.0a §6.2 defines {} for this",
-            MAP_SEGMENT_DIGESTS
-                .iter()
-                .map(|p| format!("aff4:{p}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    ));
-}
-
 /// Every check that applies whatever generation wrote the container.
 ///
-/// Both cite the AFF4 Standard v1.0a, which governs the ZIP structure and map
+/// Cites the AFF4 Standard v1.0a, which governs the ZIP structure and map
 /// rules of every generation — a 1.1 or 2.1 container layers its logical
-/// vocabulary above that base rather than replacing it. One entry point so a
-/// caller cannot add one and forget the other, matching [`report_v21`].
+/// vocabulary above that base rather than replacing it. One entry point, so a
+/// check added here reaches every generation, matching [`report_v21`].
 fn report_any_generation(
     object: &Aff4Object,
     volume: &VolumeContext,
     deviations: &mut Vec<Deviation>,
 ) {
     report_missing_zip_segment_type(object, volume, deviations);
-    report_map_segment_digests(object, volume, deviations);
 }
 
 /// Every AFF4-L v1.0-ALPHA check one described object is subject to.
