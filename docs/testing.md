@@ -142,7 +142,6 @@ integration tests in `tests/`:
 | `discontiguous.rs` | Maps with holes |
 | `disk_image.rs` | Finding a set's parts, choosing its image, reading it |
 | `hash_algorithms.rs` | AFF4-L v1.0-ALPHA §4.4 digests, plus BLAKE3 |
-| `hdt_backend.rs` | The HDT backend answers as `Graph` does (`hdt-experiment`) |
 | `independent_digest_agreement.rs` | Gate 5: aff4tools and pyaff4 compute the same digests |
 | `logical_acquire.rs` | AFF4-L writing |
 | `logical_scan.rs` | The metadata scanner's queue, cost model, and degradation |

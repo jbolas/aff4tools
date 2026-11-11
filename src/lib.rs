@@ -47,9 +47,6 @@ pub mod hash_selection;
 pub mod image;
 pub mod lexicon;
 pub mod map;
-/// The metadata query surface and its backends (docs/RDF-scalability.md).
-pub mod metadata;
-
 pub mod model;
 /// Finding and ordering the parts of a multi-part AFF4 set.
 pub mod multi_part;

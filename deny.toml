@@ -8,13 +8,11 @@
 # failing. Run it when dependencies change.
 
 [licenses]
-# Every license permitted in a default build. All are permissive.
+# Every license permitted in any build. All are permissive.
 #
 # Only licenses actually present are listed: an allowance nothing matches warns
 # as `license-not-encountered`. Add one when a dependency brings it, not in
-# anticipation. Deliberately absent: AFL-3.0, MPL-2.0 and CECILL-B, which the
-# optional `hdt-experiment` feature pulls in — so `--all-features` fails here
-# until that question is settled. That is the signal, not a misconfiguration.
+# anticipation.
 allow = [
     "MIT",
     "Apache-2.0",

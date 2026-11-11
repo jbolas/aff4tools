@@ -805,6 +805,15 @@ mod tests {
         );
     }
 
+    /// A repeated predicate has no single object, and must not yield an
+    /// arbitrary one.
+    #[test]
+    fn a_repeated_predicate_has_no_single_object() {
+        let g = parse("<aff4://a> a aff4:FileImage, aff4:Image .\n");
+        assert!(g.object("aff4://a", RDF_TYPE).is_none());
+        assert_eq!(g.objects("aff4://a", RDF_TYPE).len(), 2);
+    }
+
     /// Output must be stable across runs; a reshuffling summary is hard to diff.
     #[test]
     fn subject_order_follows_first_appearance() {

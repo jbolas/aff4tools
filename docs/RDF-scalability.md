@@ -40,7 +40,7 @@ A logical (AFF4-L) acquisition of ten million files with 15 properties each has 
 Schatz's AFF4-L paper (§4–§6) proposes **HDT** — Header, Dictionary, Triples — a
 binary RDF format that stores each distinct string once in a dictionary and
 encodes triples as integer IDs into it. It is the obvious answer, so it was
-built and measured behind `--features hdt-experiment` (`src/metadata/hdt_store.rs`).
+built and measured behind an `hdt-experiment` feature.
 
 **As a store it worked**: 115.6 MiB against ~2.5 GB, a 22× reduction, with both
 backends agreeing on every triple across 60 corpus invocations.
@@ -59,8 +59,13 @@ which gave back much of the saving.
 
 **It is now further from being worth revisiting than when it was rejected.**
 Neither `info` nor `conformance` retains a triple store at all — HDT would be a
-compact representation of something that no longer exists in memory. The
-experiment is kept behind its feature flag as a record.
+compact representation of something that no longer exists in memory.
+
+**Removed on 2026-11-10.** The HDT backend, its `MetadataStore` trait, its
+tests, its measurement example and the `hdt-experiment` feature were deleted.
+This section is the record. The feature's dependency closure carried the only
+licenses in the tree outside the permissive set (AFL-3.0, MPL-2.0, CECILL-B)
+and two unmaintained crates.
 
 The real lesson was one of sequencing: **compressing a structure is worth less
 than not building it.**
