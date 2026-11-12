@@ -1129,6 +1129,31 @@ impl HashAlgorithm {
         }
     }
 
+    /// Whether this datatype names the composite block-map hash itself
+    /// (`blockMapHashSHA512` or `blockMapHashSHA256`) rather than a digest.
+    #[must_use]
+    pub fn is_block_map(&self) -> bool {
+        matches!(self, Self::BlockMapSha512 | Self::BlockMapSha256)
+    }
+
+    /// The digest a recorded `blockMapHash` is built with, read from its
+    /// datatype.
+    ///
+    /// AFF4 Standard v1.0a §6.2 allows SHA-512 or SHA-256 for the construction.
+    /// Its datatype names that algorithm in either of the two spellings: on the
+    /// `aff4:Image`, the `blockMapHash`-prefixed datatype; on the `aff4:Map`,
+    /// the plain algorithm datatype. One algorithm governs every level of the
+    /// construction, inner digests included. Any other datatype returns
+    /// [`None`], since the standard defines no construction for it.
+    #[must_use]
+    pub fn block_map_construction(&self) -> Option<Self> {
+        match self {
+            Self::Sha512 | Self::BlockMapSha512 => Some(Self::Sha512),
+            Self::Sha256 | Self::BlockMapSha256 => Some(Self::Sha256),
+            _ => None,
+        }
+    }
+
     /// The suffix a block hash segment carries for this algorithm.
     ///
     /// AFF4 Standard v1.0a §6.2 names five in its table — `md5`, `sha1`,
@@ -1201,6 +1226,31 @@ mod tests {
             .iter()
             .map(|n| format!("http://aff4.org/Schema#{n}"))
             .collect()
+    }
+
+    /// Both spellings of each v1.0a §6.2 block map datatype name the digest
+    /// that builds it; nothing else names one.
+    #[test]
+    fn a_block_map_datatype_names_its_construction() {
+        for (datatype, algorithm) in [
+            ("SHA512", HashAlgorithm::Sha512),
+            ("blockMapHashSHA512", HashAlgorithm::Sha512),
+            ("SHA256", HashAlgorithm::Sha256),
+            ("blockMapHashSHA256", HashAlgorithm::Sha256),
+        ] {
+            let iri = format!("http://aff4.org/Schema#{datatype}");
+            assert_eq!(
+                HashAlgorithm::from_datatype(&iri).block_map_construction(),
+                Some(algorithm),
+                "{datatype}"
+            );
+        }
+        assert_eq!(HashAlgorithm::Md5.block_map_construction(), None);
+        assert_eq!(HashAlgorithm::Blake2b.block_map_construction(), None);
+
+        assert!(HashAlgorithm::BlockMapSha256.is_block_map());
+        assert!(HashAlgorithm::BlockMapSha512.is_block_map());
+        assert!(!HashAlgorithm::Sha256.is_block_map());
     }
 
     /// v1.0a §2.1: a disk image declares three types. The most specific is what

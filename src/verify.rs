@@ -19,11 +19,14 @@
 //!
 //! ```text
 //! per-chunk MD5/SHA1  ->  .blockHash.md5 / .blockHash.sha1 segments
-//!                     ->  SHA512 of each segment      (blockHashesHash)
+//!                     ->  H of each segment           (blockHashesHash)
 //!         map, idx, mapPath segments
-//!                     ->  SHA512 of each              (mapPointHash, …)
-//!                     ->  blockMapHash = SHA512(the five digests concatenated)
+//!                     ->  H of each                   (mapPointHash, …)
+//!                     ->  blockMapHash = H(the five digests concatenated)
 //! ```
+//!
+//! H is SHA-512 or SHA-256 (v1.0a §6.2), named by the recorded datatype and
+//! the same at every level. The corpus uses SHA-512 throughout.
 //!
 //! Every construction here was derived and verified byte-for-byte against
 //! `Base-Linear.aff4`. Two details a
@@ -749,7 +752,7 @@ pub fn verify_container_with_progress(
                 // without reading. Both are what `verify_image_in_set` would
                 // have done for these hashes.
                 for hash in &object.hashes {
-                    if hash.algorithm == HashAlgorithm::BlockMapSha512 {
+                    if hash.algorithm.is_block_map() {
                         verify_striped_block_map_hash(
                             object,
                             container.volumes_mut(),
@@ -961,7 +964,7 @@ fn prepare_fused_image(
     let hashes: Vec<&StoredHash> = object
         .hashes
         .iter()
-        .filter(|h| h.algorithm != HashAlgorithm::BlockMapSha512 && is_computable(&h.algorithm))
+        .filter(|h| !h.algorithm.is_block_map() && is_computable(&h.algorithm))
         .collect();
     if hashes.is_empty() {
         return None;
@@ -1291,10 +1294,7 @@ pub fn estimate_work(
         .map(|o| {
             o.hashes
                 .iter()
-                .filter(|h| {
-                    h.algorithm != HashAlgorithm::BlockMapSha512
-                        && crate::hash::is_computable(&h.algorithm)
-                })
+                .filter(|h| !h.algorithm.is_block_map() && crate::hash::is_computable(&h.algorithm))
                 .count()
         })
         .max();
@@ -2248,7 +2248,7 @@ fn verify_map(
         .collect();
 
     for hash in &object.hashes {
-        // Each of the four is SHA512 over bytes already read. `mapHash` is over
+        // Each of the four is its recorded algorithm over bytes already read. `mapHash` is over
         // the three segments concatenated — bytes, not digests.
         let (input, coverage): (Option<Vec<u8>>, Coverage) = match hash.predicate.as_str() {
             "mapPointHash" => (Some(segments.map.clone()), Coverage::Segment),
@@ -2277,11 +2277,16 @@ fn verify_map(
             // goes unverified. The map's copy is recomputable on its own, so
             // recompute it here rather than depending on the image path.
             None if hash.predicate == "blockMapHash" => {
-                match block_map_hash_input(volume, mapping, &local_streams, &segments) {
+                let Some(algorithm) = block_map_algorithm(&object.arn, &object.role, hash, session)
+                else {
+                    continue;
+                };
+                match block_map_hash_input(volume, mapping, &local_streams, &segments, &algorithm) {
                     Ok(input) => push_block_map_check(
                         &object.arn,
                         object.role.clone(),
                         hash,
+                        &algorithm,
                         &input,
                         session,
                     ),
@@ -2707,7 +2712,7 @@ fn verify_image(
             continue;
         }
         match &hash.algorithm {
-            HashAlgorithm::BlockMapSha512 => {
+            algorithm if algorithm.is_block_map() => {
                 verify_block_map_hash(object, &image, volume, mapping, hash, session);
             }
             algorithm if is_computable(algorithm) => whole.push(hash),
@@ -2735,7 +2740,7 @@ fn verify_image(
 /// bytes rests on it.
 fn records_whole_image_digest(object: &crate::model::Aff4Object) -> bool {
     object.hashes.iter().any(|h| {
-        h.algorithm != HashAlgorithm::BlockMapSha512
+        !h.algorithm.is_block_map()
             // The map's own copy of the same value, which a combined
             // image-and-map subject carries under an ordinary SHA-512 datatype
             // and so is recognized by its predicate.
@@ -2805,7 +2810,7 @@ fn verify_image_in_set(
         traversed: false,
     });
 
-    // One read, many consumers. `BlockMapSha512` is not a digest over the
+    // One read, many consumers. A block map hash is not a digest over the
     // image's bytes — it is built from the map's own segments — so it keeps its
     // own path. Everything computable rides a single traversal; anything this
     // build cannot compute is declined without reading at all.
@@ -2834,7 +2839,7 @@ fn verify_image_in_set(
             continue;
         }
         match &hash.algorithm {
-            HashAlgorithm::BlockMapSha512 => {
+            algorithm if algorithm.is_block_map() => {
                 verify_striped_block_map_hash(object, volumes, mapping, hash, session);
             }
             algorithm if is_computable(algorithm) => whole.push(hash),
@@ -2868,9 +2873,10 @@ fn verify_single_volume_block_map_hash(
     mapping: NameMapping,
     index: usize,
     hash: &StoredHash,
+    algorithm: &HashAlgorithm,
     session: &mut Session,
 ) {
-    match recompute_stripe_digests(volumes, mapping, &[index]) {
+    match recompute_stripe_digests(volumes, mapping, &[index], algorithm) {
         Ok(stripes) => match stripes.first() {
             // The recorded value is the stripe's own blockMapHash directly.
             Some(stripe) => {
@@ -2920,6 +2926,7 @@ type OrderMatch<'s> = (StripeOrderKey, Vec<&'s Stripe>, String);
 fn search_stripe_order<'s>(
     stripes: &'s [Stripe],
     expected: &str,
+    algorithm: &HashAlgorithm,
 ) -> (Option<OrderMatch<'s>>, Vec<&'static str>) {
     let mut tried = Vec::new();
 
@@ -2932,7 +2939,7 @@ fn search_stripe_order<'s>(
         ordered.sort_by_key(|s| s.key(key));
 
         let input: Vec<u8> = ordered.iter().flat_map(|s| s.digest.clone()).collect();
-        let Some(computed) = digest_of(&HashAlgorithm::Sha512, &input) else {
+        let Some(computed) = digest_of(algorithm, &input) else {
             break;
         };
 
@@ -2971,12 +2978,16 @@ impl Stripe {
 
 /// Recompute every stripe's own `blockMapHash`, in volume order.
 ///
+/// `algorithm` is the construction's digest, the same for every stripe and for
+/// the root.
+///
 /// Returns `Err` with a reason when any stripe cannot be recomputed: a root
 /// built from a partial set would be meaningless.
 fn recompute_stripe_digests(
     volumes: &mut crate::zip_volume_set::ZipVolumeSet,
     mapping: NameMapping,
     members: &[usize],
+    algorithm: &HashAlgorithm,
 ) -> std::result::Result<Vec<Stripe>, String> {
     let mut stripes = Vec::new();
 
@@ -3004,14 +3015,12 @@ fn recompute_stripe_digests(
             .collect();
 
         let stream = local.first().cloned().unwrap_or_else(|| map_arn.clone());
-        let input = block_map_hash_input(volume, mapping, &local, &segments)
+        let input = block_map_hash_input(volume, mapping, &local, &segments, algorithm)
             .map_err(|reason| format!("volume {volume_arn}: block-hash segment {reason}"))?;
 
         // Raw digest bytes, never hex — the rule throughout the AFF4 tree.
-        let digest = sha512_raw(&input);
-        if digest.is_empty() {
-            return Err("SHA512 is unavailable in this build".to_owned());
-        }
+        let digest = raw_digest(algorithm, &input)
+            .ok_or_else(|| format!("{algorithm} is unavailable in this build"))?;
 
         stripes.push(Stripe {
             path,
@@ -3052,8 +3061,11 @@ impl StripeOrderKey {
 /// nowhere else:
 ///
 /// ```text
-/// root = SHA-512( blockMapHash₁ ‖ blockMapHash₂ ‖ … )   raw bytes
+/// root = H( blockMapHash₁ ‖ blockMapHash₂ ‖ … )   raw bytes
 /// ```
+///
+/// H is the digest the recorded datatype names, as for each stripe's own
+/// `blockMapHash`. The reference fixture uses SHA-512.
 ///
 /// Two properties make this delicate.
 ///
@@ -3077,6 +3089,10 @@ fn verify_striped_block_map_hash(
     hash: &StoredHash,
     session: &mut Session,
 ) {
+    let Some(algorithm) = block_map_algorithm(&object.arn, &object.role, hash, session) else {
+        return;
+    };
+
     // Only the volumes that actually declare this image are its stripes.
     //
     // A set may hold a volume carrying an image of its own alongside the shared
@@ -3098,12 +3114,14 @@ fn verify_striped_block_map_hash(
         // Not striped. The single-volume path already knows this construction,
         // and it is a different one — pass-through, not a concatenation.
         let index = declaring.first().copied().unwrap_or(PRIMARY);
-        verify_single_volume_block_map_hash(object, volumes, mapping, index, hash, session);
+        verify_single_volume_block_map_hash(
+            object, volumes, mapping, index, hash, &algorithm, session,
+        );
         return;
     }
 
     // Recompute each stripe's blockMapHash from its own segments.
-    let stripes = match recompute_stripe_digests(volumes, mapping, &declaring) {
+    let stripes = match recompute_stripe_digests(volumes, mapping, &declaring, &algorithm) {
         Ok(stripes) => stripes,
         Err(reason) => {
             session.push(HashCheck::declined(
@@ -3118,7 +3136,7 @@ fn verify_striped_block_map_hash(
     };
 
     // Try each ordering key in turn. The first that matches wins, and is named.
-    let (matched, tried) = search_stripe_order(&stripes, &hash.hex);
+    let (matched, tried) = search_stripe_order(&stripes, &hash.hex, &algorithm);
     if let Some((key, ordered, computed)) = matched {
         session.note(format!(
             "the striped image's blockMapHash matched with the stripes in \
@@ -3181,7 +3199,7 @@ fn verify_striped_block_map_hash(
     }
 
     let input: Vec<u8> = stripes.iter().flat_map(|s| s.digest.clone()).collect();
-    let computed = digest_of(&HashAlgorithm::Sha512, &input);
+    let computed = digest_of(&algorithm, &input);
 
     session.note(
         "the striped image's blockMapHash could not match: at least one \
@@ -3542,13 +3560,21 @@ fn verify_resident_image(object: &crate::model::Aff4Object, locus: &Locus, sessi
 /// holds — see [`volume_holds_stream_data`]; passing a foreign stream here
 /// produces a digest that will not match anything.
 ///
-/// Returns `Err(name)` naming the segment that could not be read.
+/// `algorithm` is the construction's digest, from
+/// [`HashAlgorithm::block_map_construction`]; every inner digest uses it.
+///
+/// Returns `Err(reason)` naming the segment that could not be read.
 fn block_map_hash_input(
     volume: &mut dyn Volume,
     mapping: NameMapping,
     streams: &[Arn],
     segments: &MapSegments,
+    algorithm: &HashAlgorithm,
 ) -> std::result::Result<Vec<u8>, String> {
+    let digest = |bytes: &[u8]| {
+        raw_digest(algorithm, bytes)
+            .ok_or_else(|| format!("{algorithm} is unavailable in this build"))
+    };
     let volume_arn = volume.arn().clone();
     let mut input: Vec<u8> = Vec::new();
 
@@ -3568,19 +3594,20 @@ fn block_map_hash_input(
                     Err(error) => return Err(format!("{name} could not be read: {error}")),
                 }
             }
-            input.extend_from_slice(&sha512_raw(&bytes));
+            input.extend_from_slice(&digest(&bytes)?);
         }
     }
 
-    input.extend_from_slice(&sha512_raw(&segments.map));
-    input.extend_from_slice(&sha512_raw(&segments.idx));
-    input.extend_from_slice(&sha512_raw(&segments.path));
+    input.extend_from_slice(&digest(&segments.map)?);
+    input.extend_from_slice(&digest(&segments.idx)?);
+    input.extend_from_slice(&digest(&segments.path)?);
     Ok(input)
 }
 
-/// Recompute `blockMapHash`: SHA512 over raw digests concatenated.
+/// Recompute `blockMapHash`: one digest over raw digests concatenated.
 ///
-/// The order is `hashOrderingMap` — MD5, SHA1, SHA256, SHA512, Blake2b — for
+/// The digest is SHA-512 or SHA-256, named by the recorded datatype; see
+/// [`HashAlgorithm::block_map_construction`]. The order is `hashOrderingMap` — MD5, SHA1, SHA256, SHA512, Blake2b — for
 /// the block-hash segments, then `mapPointHash`, `mapIdxHash`, `mapPathHash`.
 /// Metadata order is not the order; nor is alphabetical.
 ///
@@ -3595,6 +3622,9 @@ fn verify_block_map_hash(
     hash: &StoredHash,
     session: &mut Session,
 ) {
+    let Some(algorithm) = block_map_algorithm(&object.arn, &object.role, hash, session) else {
+        return;
+    };
     let volume_arn = volume.arn().clone();
 
     let Some(map_base) = image.map().arn().member_name(&volume_arn, mapping) else {
@@ -3632,7 +3662,7 @@ fn verify_block_map_hash(
         .map(|s| s.arn().clone())
         .collect();
 
-    let input = match block_map_hash_input(volume, mapping, &local, &segments) {
+    let input = match block_map_hash_input(volume, mapping, &local, &segments, &algorithm) {
         Ok(input) => input,
         Err(reason) => {
             session.push(HashCheck::unreadable(
@@ -3646,23 +3676,60 @@ fn verify_block_map_hash(
         }
     };
 
-    push_block_map_check(&object.arn, object.role.clone(), hash, &input, session);
+    push_block_map_check(
+        &object.arn,
+        object.role.clone(),
+        hash,
+        &algorithm,
+        &input,
+        session,
+    );
+}
+
+/// The digest a recorded `blockMapHash` is built with, or a declined check.
+///
+/// Read from the recorded datatype, never assumed. A datatype for which AFF4
+/// Standard v1.0a §6.2 defines no construction is declined with that stated:
+/// recomputing with some other digest would report a mismatch the evidence
+/// does not contain.
+fn block_map_algorithm(
+    subject: &Arn,
+    role: &ObjectRole,
+    hash: &StoredHash,
+    session: &mut Session,
+) -> Option<HashAlgorithm> {
+    let algorithm = hash.algorithm.block_map_construction();
+    if algorithm.is_none() {
+        session.push(HashCheck::declined(
+            subject,
+            role.clone(),
+            hash,
+            Coverage::Composite,
+            format!(
+                "a block map hash recorded as {} has no construction in AFF4 \
+                 Standard v1.0a §6.2, which allows SHA-512 or SHA-256",
+                hash.algorithm
+            ),
+        ));
+    }
+    algorithm
 }
 
 /// Compare a recomputed `blockMapHash` against its recorded value.
 ///
-/// The recorded datatype is `blockMapHashSHA512` while the value itself is a
-/// SHA512. Comparing hex directly rather than through `Digest::matches` keeps
-/// that datatype distinction intact instead of relabelling the computed digest
-/// to make it pass.
+/// The recorded datatype may be `blockMapHashSHA512` while the value itself is
+/// a SHA-512, computed here with `algorithm`. Comparing hex directly rather
+/// than through `Digest::matches` keeps that datatype distinction intact
+/// instead of relabelling the computed digest to make it pass.
 fn push_block_map_check(
     subject: &Arn,
     role: ObjectRole,
     hash: &StoredHash,
+    algorithm: &HashAlgorithm,
     input: &[u8],
     session: &mut Session,
 ) {
-    match digest_of(&HashAlgorithm::Sha512, input) {
+    match digest_of(algorithm, input) {
         Some(computed) => {
             let outcome = if computed.hex().eq_ignore_ascii_case(&hash.hex) {
                 Outcome::Match
@@ -3686,7 +3753,7 @@ fn push_block_map_check(
             role,
             hash,
             Coverage::Composite,
-            "SHA512 is unavailable in this build".to_owned(),
+            format!("{algorithm} is unavailable in this build"),
         )),
     }
 }
@@ -3719,11 +3786,10 @@ fn push_digest_check(
     }
 }
 
-/// SHA-512 of `bytes`, as raw digest bytes.
-fn sha512_raw(bytes: &[u8]) -> Vec<u8> {
-    digest_of(&HashAlgorithm::Sha512, bytes)
-        .map(|d| hex_to_bytes(d.hex()))
-        .unwrap_or_default()
+/// The digest of `bytes`, as raw bytes, or [`None`] if this build cannot
+/// compute `algorithm`.
+fn raw_digest(algorithm: &HashAlgorithm, bytes: &[u8]) -> Option<Vec<u8>> {
+    digest_of(algorithm, bytes).map(|d| hex_to_bytes(d.hex()))
 }
 
 /// Decode a lowercase hex string back to bytes.
@@ -3768,6 +3834,19 @@ mod tests {
         }
     }
 
+    fn quiet_session(progress: &mut dyn ProgressObserver) -> Session<'_> {
+        Session {
+            report: VerificationReport {
+                source_path: "/x.aff4".into(),
+                checks: Vec::new(),
+                read_accounting: Vec::new(),
+                notes: Vec::new(),
+                block_hashes_verified: false,
+            },
+            progress,
+        }
+    }
+
     #[test]
     fn hex_round_trips_through_bytes() {
         assert_eq!(hex_to_bytes("000fffa5"), vec![0x00, 0x0f, 0xff, 0xa5]);
@@ -3775,17 +3854,68 @@ mod tests {
         assert_eq!(hex_to_bytes(""), Vec::<u8>::new());
     }
 
-    /// The empty input's SHA-512, as raw bytes — the value `sha512_raw` must
+    /// The empty input's digest, as raw bytes — the value `raw_digest` must
     /// produce for an absent `mapPath`.
     #[test]
-    fn sha512_raw_is_the_digest_not_its_hex() {
-        let raw = sha512_raw(b"");
+    fn raw_digest_is_the_digest_not_its_hex() {
+        let raw = raw_digest(&HashAlgorithm::Sha512, b"").unwrap();
         assert_eq!(
             raw.len(),
             64,
             "a raw SHA-512 is 64 bytes, not 128 characters"
         );
         assert_eq!(to_hex(&raw)[..16], *"cf83e1357eefb8bd");
+
+        let raw = raw_digest(&HashAlgorithm::Sha256, b"").unwrap();
+        assert_eq!(
+            raw.len(),
+            32,
+            "a raw SHA-256 is 32 bytes, not 64 characters"
+        );
+        assert_eq!(to_hex(&raw)[..16], *"e3b0c44298fc1c14");
+    }
+
+    /// A recorded block map hash is recomputed with the digest its datatype
+    /// names, never a fixed one. Computing SHA-512 against a recorded SHA-256
+    /// value reported a mismatch on an intact container.
+    #[test]
+    fn a_block_map_hash_is_compared_with_its_recorded_algorithm() {
+        let input = b"digests";
+        let sha256 = digest_of(&HashAlgorithm::Sha256, input).unwrap();
+
+        for recorded in [HashAlgorithm::Sha256, HashAlgorithm::BlockMapSha256] {
+            let hash = stored("blockMapHash", recorded.clone(), sha256.hex());
+            let algorithm = hash.algorithm.block_map_construction().unwrap();
+            let mut quiet = NoProgress;
+            let mut session = quiet_session(&mut quiet);
+            push_block_map_check(
+                &arn("aff4://m"),
+                ObjectRole::Map,
+                &hash,
+                &algorithm,
+                input,
+                &mut session,
+            );
+            let check = &session.report.checks[0];
+            assert_eq!(check.outcome, Outcome::Match, "recorded as {recorded}");
+            assert_eq!(check.actual.len(), 64, "a SHA-256 is 64 characters");
+        }
+    }
+
+    /// A block map hash recorded with a datatype v1.0a §6.2 does not allow is
+    /// declined, not recomputed with a substitute and reported as a mismatch.
+    #[test]
+    fn a_block_map_hash_in_another_algorithm_is_declined() {
+        let hash = stored("blockMapHash", HashAlgorithm::Md5, "abc");
+        let mut quiet = NoProgress;
+        let mut session = quiet_session(&mut quiet);
+        let algorithm =
+            block_map_algorithm(&arn("aff4://m"), &ObjectRole::Map, &hash, &mut session);
+
+        assert!(algorithm.is_none());
+        let check = &session.report.checks[0];
+        assert!(!check.outcome.was_checked());
+        assert!(!check.outcome.is_mismatch());
     }
 
     /// `blockMapHash` concatenates raw digests; `mapHash` concatenates segment
@@ -3801,9 +3931,9 @@ mod tests {
 
         // The digest-concatenation form is 3 x 64 bytes, and differs.
         let digests = [
-            sha512_raw(&segments.map),
-            sha512_raw(&segments.idx),
-            sha512_raw(&segments.path),
+            raw_digest(&HashAlgorithm::Sha512, &segments.map).unwrap(),
+            raw_digest(&HashAlgorithm::Sha512, &segments.idx).unwrap(),
+            raw_digest(&HashAlgorithm::Sha512, &segments.path).unwrap(),
         ]
         .concat();
         assert_eq!(digests.len(), 192);
