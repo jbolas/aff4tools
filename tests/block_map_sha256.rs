@@ -5,6 +5,11 @@
 //! container with every one of those digests recomputed independently as
 //! SHA-256 and recorded under SHA-256 datatypes: `aff4:SHA256` on the map and
 //! the block-hash object, `aff4:blockMapHashSHA256` on the image.
+//!
+//! The rebuild can also drop the `mapPath` segment and its `mapPathHash`, the
+//! form Evimetry 3.2.6 writes. v1.0a §6.2 brackets the `mapPathHash` term and
+//! v1.0a §6.3 makes `mapPath` optional, so such a map's block map hash has no
+//! term for it, not the digest of empty input.
 
 // Integration tests build fixture trees in temp dirs, which needs the
 // directory constructors the library is denied. `tests/read_only_guard.rs`
@@ -87,7 +92,14 @@ struct Composition {
 }
 
 /// Compute the v1.0a §6.2 composition over the container's own segments.
-fn compose(members: &[(String, Vec<u8>)], digest: fn(&[u8]) -> Vec<u8>) -> Composition {
+///
+/// `map_path` says whether the map records `mapPathHash`; only then does the
+/// block map hash have a term for it.
+fn compose(
+    members: &[(String, Vec<u8>)],
+    digest: fn(&[u8]) -> Vec<u8>,
+    map_path: bool,
+) -> Composition {
     let mut block_hash_names: Vec<&String> = members
         .iter()
         .map(|(n, _)| n)
@@ -107,17 +119,15 @@ fn compose(members: &[(String, Vec<u8>)], digest: fn(&[u8]) -> Vec<u8>) -> Compo
     let idx = member(members, "map/idx");
     let path = member(members, "map/mapPath");
 
-    let inputs = [
-        digest(&block_hashes),
-        digest(map),
-        digest(idx),
-        digest(path),
-    ];
+    let mut inputs = vec![digest(&block_hashes), digest(map), digest(idx)];
+    if map_path {
+        inputs.push(digest(path));
+    }
     Composition {
         block_hashes: hex(&inputs[0]),
         map_point: hex(&inputs[1]),
         map_idx: hex(&inputs[2]),
-        map_path: hex(&inputs[3]),
+        map_path: hex(&digest(path)),
         map: hex(&digest(&[map, idx, path].concat())),
         block_map: hex(&digest(&inputs.concat())),
     }
@@ -139,10 +149,11 @@ fn replace(turtle: &mut String, old: &str, new: &str, count: usize) {
 /// Copy `from` with every v1.0a §6.2 digest recorded as SHA-256 instead.
 ///
 /// `block_map` overrides the recorded block map hash, to plant a mismatch.
-fn rebuild_as_sha256(from: &Path, to: &Path, block_map: Option<&str>) {
+/// Without `map_path`, the copy has no `mapPath` segment and no `mapPathHash`.
+fn rebuild_as_sha256(from: &Path, to: &Path, block_map: Option<&str>, map_path: bool) {
     let (comment, members) = members(from);
-    let old = compose(&members, sha512);
-    let new = compose(&members, sha256);
+    let old = compose(&members, sha512, true);
+    let new = compose(&members, sha256, map_path);
     let recorded_block_map = block_map.map_or_else(|| new.block_map.clone(), str::to_owned);
 
     let mut turtle =
@@ -172,6 +183,15 @@ fn rebuild_as_sha256(from: &Path, to: &Path, block_map: Option<&str>) {
         !turtle.contains("SHA512"),
         "every SHA-512 digest must be rewritten:\n{turtle}"
     );
+    if !map_path {
+        let before = turtle.lines().count();
+        turtle = turtle
+            .lines()
+            .filter(|line| !line.contains("aff4:mapPathHash"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(turtle.lines().count(), before - 1, "one mapPathHash line");
+    }
 
     let out = std::fs::File::create(to).expect("the copy is created");
     // A test fixture, written to a temp path: the read-only guard scans `src/`,
@@ -189,6 +209,7 @@ fn rebuild_as_sha256(from: &Path, to: &Path, block_map: Option<&str>) {
             // AFF4 Standard v1.0a does not define it, so it is left out
             // rather than recorded stale.
             "information.turtle.hashes" => continue,
+            "map/mapPath" if !map_path => continue,
             _ => bytes.as_slice(),
         };
         let options = zip::write::SimpleFileOptions::default()
@@ -229,7 +250,7 @@ fn block_map_checks(checks: &[serde_json::Value]) -> Vec<&serde_json::Value> {
 fn a_sha256_block_map_hash_verifies_clean() {
     let (dir, sha512) = acquire();
     let path = dir.path().join("sha256.aff4");
-    rebuild_as_sha256(&sha512, &path, None);
+    rebuild_as_sha256(&sha512, &path, None, true);
 
     let (code, checks) = verify(&path);
     assert_eq!(
@@ -259,7 +280,7 @@ fn a_wrong_sha256_block_map_hash_is_a_mismatch() {
     let (dir, sha512) = acquire();
     let path = dir.path().join("sha256-wrong.aff4");
     let wrong = hex(&sha256(b"not this container"));
-    rebuild_as_sha256(&sha512, &path, Some(&wrong));
+    rebuild_as_sha256(&sha512, &path, Some(&wrong), true);
 
     let (code, checks) = verify(&path);
     assert_eq!(code, Some(8), "a mismatch exits 8:\n{checks:#?}");
@@ -282,4 +303,50 @@ fn a_wrong_sha256_block_map_hash_is_a_mismatch() {
         .filter(|c| c["predicate"] != "blockMapHash" && c["algorithm"] != "blockMapHashSHA256")
         .all(|c| c["outcome"] == "Match");
     assert!(others_match, "{checks:#?}");
+}
+
+/// A map that records no `mapPathHash` contributes no term for it, the form
+/// Evimetry 3.2.6 writes.
+#[test]
+fn a_map_without_map_path_has_no_map_path_term() {
+    let (dir, sha512) = acquire();
+    let path = dir.path().join("sha256-no-map-path.aff4");
+    rebuild_as_sha256(&sha512, &path, None, false);
+
+    let (code, checks) = verify(&path);
+    assert_eq!(
+        code,
+        Some(0),
+        "an intact container verifies clean:\n{checks:#?}"
+    );
+    assert!(
+        !checks.iter().any(|c| c["predicate"] == "mapPathHash"),
+        "the copy records no mapPathHash:\n{checks:#?}"
+    );
+    let block_map = block_map_checks(&checks);
+    assert_eq!(block_map.len(), 2, "{checks:#?}");
+    for check in block_map {
+        assert_eq!(check["outcome"], "Match", "{check:#?}");
+    }
+}
+
+/// The digest of empty input standing in for an absent `mapPath` is not the
+/// construction. A value built that way is a mismatch.
+#[test]
+fn an_absent_map_path_is_not_the_digest_of_empty_input() {
+    let (dir, sha512) = acquire();
+    // The acquisition's `mapPath` segment is empty, so composing with the
+    // term gives exactly SHA-256 of empty input in that position.
+    let (_, original) = members(&sha512);
+    assert!(member(&original, "map/mapPath").is_empty());
+    let with_empty_term = compose(&original, sha256, true).block_map;
+
+    let path = dir.path().join("sha256-empty-term.aff4");
+    rebuild_as_sha256(&sha512, &path, Some(&with_empty_term), false);
+
+    let (code, checks) = verify(&path);
+    assert_eq!(code, Some(8), "{checks:#?}");
+    for check in block_map_checks(&checks) {
+        assert_eq!(check["outcome"], "Mismatch", "{check:#?}");
+    }
 }

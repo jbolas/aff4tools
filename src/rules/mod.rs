@@ -522,6 +522,7 @@ mod tests {
             K::ExternalReference,
             K::ConflictingStreamValue,
             K::DanglingReference,
+            K::VolumeDigest,
         ];
 
         for kind in all_kinds {

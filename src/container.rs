@@ -1340,6 +1340,7 @@ fn build_object(
         siblings,
         deviations,
     );
+    report_volume_digest(&role, &hashes, &subject_locus, deviations);
 
     // Grown by pushing, so each `Vec` sits on a power-of-two capacity: a
     // two-element `edges` or `hashes` list occupies four slots. Harmless on a
@@ -1363,6 +1364,40 @@ fn build_object(
     };
     object.block_hashes = object.block_hashes_info();
     Some(object)
+}
+
+/// Report a linear `aff4:hash` recorded on a volume rather than on an image.
+///
+/// Extracted from [`build_object`] for the same line-count reason as
+/// [`locality_of`].
+fn report_volume_digest(
+    role: &ObjectRole,
+    hashes: &[StoredHash],
+    subject_locus: &Locus,
+    deviations: &mut Vec<Deviation>,
+) {
+    if !matches!(role, ObjectRole::Volume) {
+        return;
+    }
+    let algorithms: Vec<String> = hashes
+        .iter()
+        .filter(|h| h.predicate == "hash")
+        .map(|h| h.algorithm.to_string())
+        .collect();
+    if algorithms.is_empty() {
+        return;
+    }
+    deviations.push(Deviation::new(
+        subject_locus.clone().predicate("hash"),
+        DeviationKind::VolumeDigest,
+        format!(
+            "the volume records aff4:hash ({}); v1.0a §6.1 places the linear hash \
+             on the Image, and no document says what a digest on a volume covers. \
+             verify checks it as a digest of the whole image when the volume \
+             describes exactly one image",
+            algorithms.join(", ")
+        ),
+    ));
 }
 
 /// Whether `stored_arn` resolves within the volumes currently open.

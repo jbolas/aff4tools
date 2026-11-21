@@ -563,6 +563,14 @@ pub enum DeviationKind {
     /// The reference cannot be resolved or attributed: it is neither a
     /// described object nor a declared external one.
     DanglingReference,
+    /// A linear `aff4:hash` recorded on a volume.
+    ///
+    /// No AFF4 document defines a digest on a volume or says what it covers;
+    /// v1.0a §6.1 places the linear hash on the `Image`. Evimetry 3.2.6 records
+    /// the image's only linear digest there. Reported because a reader that
+    /// follows the standard looks for it on the image, finds none, and could
+    /// conclude the evidence carries no linear digest at all.
+    VolumeDigest,
     /// A v2.1 object's resource name is not the AFF4 scheme plus a GUID.
     ///
     /// AFF4-L v1.0-ALPHA §2 fixes the shape, and AFF4-L v1.0-ALPHA §1.1
@@ -838,6 +846,7 @@ impl std::fmt::Display for DeviationKind {
             Self::ExternalReference => "reference to another volume",
             Self::ConflictingStreamValue => "volumes disagree about a stream",
             Self::DanglingReference => "reference to an object nothing describes",
+            Self::VolumeDigest => "digest recorded on the volume",
             Self::NonGuidArn => "resource name is not a GUID",
             Self::UppercaseGuidArn => "resource name GUID is not lower case",
             Self::EscapedV21MemberName => "member name escaped where v2.1 stores it literally",
@@ -1042,6 +1051,7 @@ mod tests {
                 Generation::Standard10,
                 None,
             ),
+            (DeviationKind::VolumeDigest, Generation::Standard10, None),
             (
                 DeviationKind::MissingZipSegmentType,
                 Generation::Standard10,

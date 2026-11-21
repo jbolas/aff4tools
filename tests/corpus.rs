@@ -973,8 +973,7 @@ fn recomputed_digests_match_the_stored_hashes_by_value_and_algorithm() {
     let summary = summarize(&format!("{STD}/Base-Linear.aff4"));
 
     // Only `aff4:hash` is a digest over the stream's bytes. Evimetry also
-    // writes `aff4:imageStreamHash`, whose construction is undocumented and
-    // which pyaff4 never reads — see finding R.
+    // writes `aff4:imageStreamHash`, a digest over other digests.
     let stored: Vec<_> = summary
         .with_role(&ObjectRole::ImageStream)
         .first()
@@ -1973,6 +1972,60 @@ fn block_hashes_objects_have_their_digests_recomputed() {
     }
 }
 
+/// Every reference image recording `imageStreamHash` has it recomputed, and it
+/// matches.
+///
+/// No specification defines the digest; its construction is documented on
+/// `image_stream_hash_input` in `src/verify.rs`. `Base-Linear.aff4` and
+/// `Base-Linear-AllHashes.aff4` store byte-identical segments and record
+/// different values, so a construction that ignored the recorded `aff4:hash`
+/// set could match at most one of them.
+#[test]
+fn image_stream_hash_is_recomputed_on_every_reference_image() {
+    use aff4tools::verify::{Coverage, Outcome, VerifyOptions, verify_container};
+
+    let expected = [
+        (
+            "Base-Linear.aff4",
+            "7c909ad458a90ca083cf2d10848fb3aaee7d9ac008605f85aef1ac2db8249973\
+             ac7b6716f3250edb80219ff628d6fb4873c33c59de0a3e6c7657e234e7ba0db3",
+        ),
+        (
+            "Base-Linear-AllHashes.aff4",
+            "f333238ff3e2c817628e81e3e40020da7ca6e4ecd2e3476fbba63aa246274584\
+             87337725b01075ed2aefaac69d74fd789b2e18fc255fd1c4316e6ca159ce54c6",
+        ),
+        (
+            "Base-Linear-ReadError.aff4",
+            "3a0574abf41c8b4cd394a12195e3ca38c419718636b0f9fb6e7c3a0a067ba860\
+             4b403908a407aab212949f12e21ff4acdbc1de3301e357a7f80c3fe0609e9a24",
+        ),
+        (
+            "Base-Allocated.aff4",
+            "9fc93f63036b72ebbfe389661698f3f6307addcb7d7f9fee03c32b46cdf37ea2\
+             ae036bc90f62eee677a3b7bb2cbeda2617ed07e4ff53aecc02e9821803ee59f3",
+        ),
+    ];
+
+    for (name, digest) in expected {
+        let path = corpus_root().join(format!("{STD}/{name}"));
+        let mut container = Container::open(&path).unwrap();
+        let report = verify_container(&mut container, VerifyOptions::default()).unwrap();
+
+        let checks: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|c| c.predicate == "imageStreamHash")
+            .collect();
+        assert_eq!(checks.len(), 1, "{name} records one imageStreamHash");
+        let check = checks[0];
+        assert_eq!(check.outcome, Outcome::Match, "{name}: {check:#?}");
+        assert_eq!(check.coverage, Coverage::Composite, "{name}");
+        assert_eq!(check.actual, digest, "{name} recomputed to the wrong value");
+        assert_eq!(check.expected, digest, "{name} records a different value");
+    }
+}
+
 /// A stripe verifies its own `blockMapHash` without opening the image.
 ///
 /// Two independent Stage 1 findings meet here.
@@ -2916,9 +2969,8 @@ fn the_striped_image_root_digest_verifies() {
 /// Every digest a striped set records is either recomputed or declined.
 ///
 /// The failure this guards is silence: a check that never appears reads as
-/// "nothing to report" while a recorded digest goes unverified. Only
-/// `imageStreamHash` may be outstanding, and only because its construction is
-/// genuinely unidentified.
+/// "nothing to report" while a recorded digest goes unverified. None may be
+/// outstanding: every digest the set records is one this build recomputes.
 #[test]
 fn a_striped_set_leaves_no_recorded_digest_unaccounted_for() {
     use aff4tools::verify::{VerifyOptions, verify_container};
@@ -2947,15 +2999,14 @@ fn a_striped_set_leaves_no_recorded_digest_unaccounted_for() {
         report.checks.len()
     );
 
-    let unexplained: Vec<_> = report
+    let outstanding: Vec<_> = report
         .checks
         .iter()
         .filter(|c| !c.outcome.was_checked())
-        .filter(|c| !format!("{:?}", c.outcome).contains("imageStreamHash"))
         .collect();
     assert!(
-        unexplained.is_empty(),
-        "every digest not recomputed must say why: {unexplained:#?}"
+        outstanding.is_empty(),
+        "every recorded digest must be recomputed: {outstanding:#?}"
     );
 }
 

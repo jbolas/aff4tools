@@ -378,6 +378,19 @@ pub(super) const UNLEGISLATED: &[RuleInfo] = &[
         kind: None,
         routine: false,
     },
+    // `Detected` though nothing prohibits it: v1.0a §6.1 shows the linear hash
+    // on the `Image` and defines no digest on a volume. Reported because a
+    // reader following the standard would find no linear digest on the image
+    // and could wrongly conclude the evidence has none.
+    declare_rule! {
+        id: (Document::Aff4Standard10a, "none", 4),
+        requirement: May,
+        state: Detected,
+        governs: Container,
+        statement: "A linear aff4:hash recorded on a volume is an extension; v1.0a §6.1 places the linear hash on the Image, and no document says what a volume's digest covers.",
+        kind: Some(K::VolumeDigest),
+        routine: false,
+    },
 ];
 
 /// Rules from the AFF4-L Standard v1.0-ALPHA.

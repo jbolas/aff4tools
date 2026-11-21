@@ -20,9 +20,9 @@
 //! ```text
 //! per-chunk MD5/SHA1  ->  .blockHash.md5 / .blockHash.sha1 segments
 //!                     ->  H of each segment           (blockHashesHash)
-//!         map, idx, mapPath segments
+//!         map, idx, [mapPath] segments
 //!                     ->  H of each                   (mapPointHash, …)
-//!                     ->  blockMapHash = H(the five digests concatenated)
+//!                     ->  blockMapHash = H(those digests concatenated)
 //! ```
 //!
 //! H is SHA-512 or SHA-256 (v1.0a §6.2), named by the recorded datatype and
@@ -33,6 +33,9 @@
 //! plausible guess gets wrong: `mapHash` concatenates segment **bytes** while
 //! `blockMapHash` concatenates raw **digests**, and `mapPathHash` is a fourth
 //! input to `blockMapHash` whose omission yields a clean-looking wrong answer.
+//! The converse holds too: v1.0a §6.2 brackets the `mapPathHash` term and
+//! v1.0a §6.3 makes `mapPath` optional, so a map recording no `mapPathHash`
+//! contributes no term for it. Evimetry 3.2.6 writes that form.
 //!
 //! # The linear bitstream hash
 //!
@@ -726,6 +729,11 @@ pub fn verify_container_with_progress(
         prepare_fused_image(&objects, container, dialect, &locus, striped, &mut session);
 
     for object in &objects {
+        // A volume's digests cover an image, so they are checked after every
+        // image has recorded its own read accounting.
+        if matches!(object.role, ObjectRole::Volume) {
+            continue;
+        }
         let announced = matches!(object.role, ObjectRole::ImageStream) || object.role.is_image();
         if announced {
             session.progress.on(Progress::ObjectStarted {
@@ -809,10 +817,32 @@ pub fn verify_container_with_progress(
         }
     }
 
+    verify_after_objects(&objects, container, &graph, dialect, &locus, &mut session);
+
+    Ok(session.report)
+}
+
+/// The checks that follow every object's own: volume digests, the metadata
+/// integrity hash, and the block-hash coverage flag.
+fn verify_after_objects(
+    objects: &[crate::model::Aff4Object],
+    container: &mut crate::container::Container,
+    graph: &Graph,
+    dialect: Dialect,
+    locus: &Locus,
+    session: &mut Session,
+) {
+    for object in objects
+        .iter()
+        .filter(|o| matches!(o.role, ObjectRole::Volume) && !o.hashes.is_empty())
+    {
+        verify_volume_hashes(object, objects, container, graph, dialect, locus, session);
+    }
+
     // AFF4-L v1.0-ALPHA §10.1: the metadata's own integrity hash, checked last
     // because it covers the segment every other check read its expectations
     // from. A mismatch here means the recorded digests themselves are in doubt.
-    verify_metadata_hash(container, &mut session);
+    verify_metadata_hash(container, session);
 
     // Derived from the work done, not from the option that asked for it. A
     // container storing no block-hash segments produces no Coverage::Block
@@ -823,8 +853,6 @@ pub fn verify_container_with_progress(
         .checks
         .iter()
         .any(|check| check.coverage == Coverage::Block && check.outcome.was_checked());
-
-    Ok(session.report)
 }
 
 /// Recompute the AFF4-L v1.0-ALPHA §10.1 metadata integrity hash.
@@ -1258,11 +1286,6 @@ pub fn estimate_work(
                         format!("{} is not implemented in this build", hash.algorithm),
                     ));
                 }
-            } else if hash.predicate == "imageStreamHash" {
-                not_recomputed.push((
-                    hash.predicate.clone(),
-                    "its input has not been identified".to_owned(),
-                ));
             }
         }
 
@@ -1278,6 +1301,10 @@ pub fn estimate_work(
 
     estimate_segment_stored(&objects, container, mapping, &mut estimate);
 
+    estimate.bytes_to_read = estimate.bytes_to_read.saturating_add(estimate_volume_hash(
+        &objects, container, &graph, dialect, &locus,
+    ));
+
     // Streams are read one after another, so the run's peak cost is the widest
     // single stream rather than the sum. `MultiHasher` starts one thread per
     // algorithm once a stream records more than one, and those threads are
@@ -1290,7 +1317,7 @@ pub fn estimate_work(
     let widest_stream = estimate.streams.iter().map(|s| s.linear.len()).max();
     let widest_image = objects
         .iter()
-        .filter(|o| o.role.is_image())
+        .filter(|o| o.role.is_image() || matches!(o.role, ObjectRole::Volume))
         .map(|o| {
             o.hashes
                 .iter()
@@ -1306,6 +1333,38 @@ pub fn estimate_work(
     estimate.threads = estimate.threads.with_digest_threads(widest);
 
     Ok(estimate)
+}
+
+/// The bytes a volume's `aff4:hash` adds to a run: one more pass over its
+/// image, when [`verify_volume_hashes`] will check it.
+fn estimate_volume_hash(
+    objects: &[crate::model::Aff4Object],
+    container: &mut crate::container::Container,
+    graph: &Graph,
+    dialect: Dialect,
+    locus: &Locus,
+) -> u64 {
+    let Dialect { lexicon, mapping } = dialect;
+    let volume_hashed = objects.iter().any(|o| {
+        matches!(o.role, ObjectRole::Volume)
+            && o.hashes
+                .iter()
+                .any(|h| h.predicate == "hash" && is_computable(&h.algorithm))
+    });
+    if volume_hashed
+        && let Ok(image) = volume_hash_image(objects, container)
+        && let Ok(image) = Image::open(
+            &image.arn,
+            container.volumes_mut().primary_mut(),
+            graph,
+            lexicon,
+            mapping,
+            locus,
+        )
+    {
+        return image.size();
+    }
+    0
 }
 
 /// Add the data stored as plain ZIP members to a work estimate.
@@ -1658,7 +1717,7 @@ fn verify_stream(
         }
     };
 
-    verify_stream_index_hashes(object, &stream, volume, dialect.mapping, session);
+    verify_stream_index_hashes(object, &stream, volume, graph, dialect, session);
 
     let mut blocks = wanted_block_digests(object, volume, dialect.mapping, options);
 
@@ -1850,65 +1909,104 @@ fn compare_stream_digests(
 ///
 /// `imageStreamIndexHash` **is** SHA-512 over the bevy index segment's bytes —
 /// measured against `Base-Linear.aff4`, where the recorded value reproduces
-/// exactly. Neither reference implementation reads it, so this is aff4tools
-/// checking something pyaff4 does not.
+/// exactly.
 ///
-/// `imageStreamHash` remains unidentified, and is now known not to be a digest
-/// over the stream's stored bytes at all: `Base-Linear.aff4` and
-/// `Base-Linear-AllHashes.aff4` carry byte-identical bevy, index, and
-/// block-hash segments yet record different values, so no arrangement of those
-/// bytes can be the input. Rather than guess at a digest's input, it is
-/// reported as not recomputed with its recorded value shown.
+/// `imageStreamHash` is a digest over other digests, constructed as
+/// [`image_stream_hash_input`] describes. No specification defines either
+/// term; both constructions are the writers' own, reproduced on every corpus
+/// container that records them.
 fn verify_stream_index_hashes(
     object: &crate::model::Aff4Object,
     stream: &ImageStream,
     volume: &mut dyn Volume,
-    mapping: NameMapping,
+    graph: &Graph,
+    dialect: Dialect,
     session: &mut Session,
 ) {
-    let volume_arn = volume.arn().clone();
+    let wants_index = object.hashes.iter().any(|h| {
+        matches!(
+            h.predicate.as_str(),
+            "imageStreamIndexHash" | "imageStreamHash"
+        )
+    });
+    // Read once: both digests take the same concatenated index segments.
+    let index = if wants_index {
+        read_index_segments(stream, volume, dialect.mapping)
+    } else {
+        Ok(Vec::new())
+    };
 
     for hash in &object.hashes {
         match hash.predicate.as_str() {
             "hash" => {}
-            "imageStreamIndexHash" => {
-                let Some(base) = stream.arn().member_name(&volume_arn, mapping) else {
-                    continue;
-                };
-
-                // One index segment per bevy, concatenated in bevy order.
-                let mut bytes = Vec::new();
-                let mut failed = None;
-                for bevy in 0..stream.bevy_count() {
-                    let name = format!("{base}/{bevy:08}{}", crate::stream::INDEX_SUFFIX);
-                    if !volume.has_segment(&name) {
-                        continue;
+            "imageStreamIndexHash" => match &index {
+                Ok(bytes) => push_digest_check(
+                    &object.arn,
+                    object.role.clone(),
+                    hash,
+                    Coverage::Segment,
+                    bytes,
+                    session,
+                ),
+                Err(reason) => session.push(HashCheck::declined(
+                    &object.arn,
+                    object.role.clone(),
+                    hash,
+                    Coverage::Segment,
+                    reason.clone(),
+                )),
+            },
+            "imageStreamHash" => {
+                let input = index.clone().and_then(|index| {
+                    let block_hashes = block_hashes_hashes(object, volume, graph, dialect)?;
+                    let index_types: Vec<&HashAlgorithm> = object
+                        .hashes
+                        .iter()
+                        .filter(|h| {
+                            matches!(
+                                h.predicate.as_str(),
+                                "imageStreamIndexHash" | "imageStreamHash"
+                            )
+                        })
+                        .map(|h| &h.algorithm)
+                        .collect();
+                    let index_digests = index_digests(&index, &index_types)?;
+                    let recorded: Vec<&StoredHash> = object
+                        .hashes
+                        .iter()
+                        .filter(|h| h.predicate == "hash")
+                        .collect();
+                    image_stream_hash_input(&recorded, &block_hashes, &index_digests)
+                });
+                match input {
+                    Ok(bytes) if construction_rank(&hash.algorithm).is_some() => {
+                        push_digest_check(
+                            &object.arn,
+                            object.role.clone(),
+                            hash,
+                            Coverage::Composite,
+                            &bytes,
+                            session,
+                        );
                     }
-                    match volume.read_segment(&name) {
-                        Ok(segment) => bytes.extend_from_slice(&segment),
-                        Err(error) => {
-                            failed = Some(format!("{name} could not be read: {error}"));
-                            break;
-                        }
-                    }
-                }
-
-                match failed {
-                    Some(reason) => session.push(HashCheck::declined(
+                    Ok(_) => session.push(HashCheck::declined(
                         &object.arn,
                         object.role.clone(),
                         hash,
-                        Coverage::Segment,
+                        Coverage::Composite,
+                        format!(
+                            "the construction is known only for MD5, SHA-1, SHA-256, \
+                             SHA-512, and BLAKE2b, not {}",
+                            hash.algorithm
+                        ),
+                    )),
+                    Err(reason) => session.push(HashCheck::declined(
+                        &object.arn,
+                        object.role.clone(),
+                        hash,
+                        Coverage::Composite,
                         reason,
                     )),
-                    None => push_digest_check(
-                        &object.arn,
-                        object.role.clone(),
-                        hash,
-                        Coverage::Segment,
-                        &bytes,
-                        session,
-                    ),
                 }
             }
             other => session.push(HashCheck::declined(
@@ -1920,6 +2018,252 @@ fn verify_stream_index_hashes(
             )),
         }
     }
+}
+
+/// A stream's bevy index segments, concatenated in bevy order.
+///
+/// A bevy with no index segment contributes nothing; the digest over the
+/// remainder then fails to match, which is the finding.
+fn read_index_segments(
+    stream: &ImageStream,
+    volume: &mut dyn Volume,
+    mapping: NameMapping,
+) -> std::result::Result<Vec<u8>, String> {
+    let volume_arn = volume.arn().clone();
+    let Some(base) = stream.arn().member_name(&volume_arn, mapping) else {
+        return Err(format!(
+            "{} cannot be named as a member of {volume_arn}",
+            stream.arn()
+        ));
+    };
+
+    let mut bytes = Vec::new();
+    for bevy in 0..stream.bevy_count() {
+        let name = format!("{base}/{bevy:08}{}", crate::stream::INDEX_SUFFIX);
+        if !volume.has_segment(&name) {
+            continue;
+        }
+        let segment = volume
+            .read_segment(&name)
+            .map_err(|error| format!("{name} could not be read: {error}"))?;
+        bytes.extend_from_slice(&segment);
+    }
+    Ok(bytes)
+}
+
+/// Where an algorithm falls in the order `imageStreamHash` concatenates its
+/// inputs, or [`None`] for one the construction does not admit.
+///
+/// The order is `Md5`, `Sha1`, `Sha256`, `Sha512`, `Blake2b` — the five algorithms of
+/// v1.0a §6.2's table, in that table's order.
+fn construction_rank(algorithm: &HashAlgorithm) -> Option<u8> {
+    match algorithm {
+        HashAlgorithm::Md5 => Some(1),
+        HashAlgorithm::Sha1 => Some(2),
+        HashAlgorithm::Sha256 => Some(3),
+        HashAlgorithm::Sha512 => Some(4),
+        HashAlgorithm::Blake2b => Some(5),
+        _ => None,
+    }
+}
+
+/// One block-hash digest feeding `imageStreamHash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockHashesHash {
+    /// The per-chunk algorithm, named by the segment suffix.
+    per_chunk: HashAlgorithm,
+    /// The algorithm the stream's `<stream>/blockhash.<suffix>` subject
+    /// records its `aff4:hash` under.
+    digest: HashAlgorithm,
+    /// That digest, recomputed over the concatenated block-hash segments.
+    bytes: Vec<u8>,
+}
+
+/// Recompute the digest of every block-hash segment set the stream records.
+///
+/// Which sets count is decided by the metadata: one for each `aff4:hash` on a
+/// `<stream>/blockhash.<suffix>` subject. The value used is recomputed from
+/// the stored segments, never copied from that recorded `aff4:hash`, so a
+/// damaged block-hash segment fails `imageStreamHash` as well as its own
+/// check. Whether the segments agree with the stream's chunks is the separate
+/// block-hash check.
+fn block_hashes_hashes(
+    object: &crate::model::Aff4Object,
+    volume: &mut dyn Volume,
+    graph: &Graph,
+    dialect: Dialect,
+) -> std::result::Result<Vec<BlockHashesHash>, String> {
+    let volume_arn = volume.arn().clone();
+    let hash_iri = dialect.lexicon.iri(dialect.lexicon.hash);
+    let mut found = Vec::new();
+
+    for (per_chunk, suffix) in BLOCK_HASH_ALGORITHMS {
+        let subject = format!("{}/blockhash.{suffix}", object.arn.as_str());
+        for value in graph.objects(&subject, &hash_iri) {
+            let crate::rdf::Value::Literal {
+                datatype: Some(datatype),
+                ..
+            } = value
+            else {
+                return Err(format!("{subject} records an aff4:hash with no datatype"));
+            };
+            let digest = HashAlgorithm::from_datatype(datatype);
+            if construction_rank(&digest).is_none() {
+                return Err(format!(
+                    "{subject} records its digest as {digest}, which the \
+                     construction does not admit"
+                ));
+            }
+
+            let Some(base) = object.arn.member_name(&volume_arn, dialect.mapping) else {
+                return Err(format!(
+                    "{} cannot be named as a member of {volume_arn}",
+                    object.arn
+                ));
+            };
+            let segments = block_hash_segments(volume, &base, suffix);
+            if segments.is_empty() {
+                return Err(format!(
+                    "no {suffix} block-hash segments are stored under {base}"
+                ));
+            }
+            let mut bytes = Vec::new();
+            for name in &segments {
+                let segment = volume.read_segment(name).map_err(|error| {
+                    format!("block-hash segment {name} could not be read: {error}")
+                })?;
+                bytes.extend_from_slice(&segment);
+            }
+            let bytes = raw_digest(&digest, &bytes)
+                .ok_or_else(|| format!("this build cannot compute {digest}"))?;
+            found.push(BlockHashesHash {
+                per_chunk: per_chunk.clone(),
+                digest,
+                bytes,
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// The index segments' digest under each distinct algorithm in `types`.
+fn index_digests(
+    index: &[u8],
+    types: &[&HashAlgorithm],
+) -> std::result::Result<Vec<(HashAlgorithm, Vec<u8>)>, String> {
+    let mut digests: Vec<(HashAlgorithm, Vec<u8>)> = Vec::new();
+    for algorithm in types {
+        if digests.iter().any(|(seen, _)| seen == *algorithm) {
+            continue;
+        }
+        if construction_rank(algorithm).is_none() {
+            return Err(format!(
+                "the stream records an index digest as {algorithm}, which the \
+                 construction does not admit"
+            ));
+        }
+        let bytes = raw_digest(algorithm, index)
+            .ok_or_else(|| format!("this build cannot compute {algorithm}"))?;
+        digests.push(((*algorithm).clone(), bytes));
+    }
+    Ok(digests)
+}
+
+/// The bytes `imageStreamHash` is a digest of.
+///
+/// No AFF4 document defines `imageStreamHash`. This construction is the one
+/// pyaff4 2.0 implements, and it reproduces the value Evimetry recorded on
+/// every corpus container that carries one. Three groups of raw digests,
+/// concatenated in order, each ordered by [`construction_rank`]:
+///
+/// 1. the stream's **recorded** `aff4:hash` values. Recorded, not recomputed:
+///    this is why `Base-Linear.aff4` and `Base-Linear-AllHashes.aff4`, whose
+///    stored segments are byte-identical, record different values. An
+///    algorithm outside the five is left out, as the writer leaves it out;
+/// 2. each [`BlockHashesHash`], ordered by per-chunk algorithm and then by
+///    digest algorithm;
+/// 3. the digest of the concatenated index segments under each algorithm that
+///    either `imageStreamIndexHash` or `imageStreamHash` is recorded under.
+///
+/// A match therefore shows that the record is consistent with the stored
+/// index and block-hash segments. It does not show that the stream's bytes
+/// are intact; the stream's own `aff4:hash` check does that.
+///
+/// # Errors
+///
+/// Returns the reason when the input cannot be formed without a guess: a
+/// recorded digest that is not hex, or two different recorded values under
+/// one algorithm.
+fn image_stream_hash_input(
+    recorded: &[&StoredHash],
+    block_hashes: &[BlockHashesHash],
+    index_digests: &[(HashAlgorithm, Vec<u8>)],
+) -> std::result::Result<Vec<u8>, String> {
+    let mut stream_hashes: Vec<(u8, Vec<u8>)> = Vec::new();
+    for hash in recorded {
+        let Some(rank) = construction_rank(&hash.algorithm) else {
+            continue;
+        };
+        let bytes = decode_hex(&hash.hex).ok_or_else(|| {
+            format!(
+                "the recorded {} aff4:hash {} is not a hex digest",
+                hash.algorithm, hash.hex
+            )
+        })?;
+        match stream_hashes.iter().find(|(seen, _)| *seen == rank) {
+            Some((_, earlier)) if *earlier == bytes => {}
+            Some(_) => {
+                return Err(format!(
+                    "the stream records two different {} aff4:hash values, so \
+                     the input is ambiguous",
+                    hash.algorithm
+                ));
+            }
+            None => stream_hashes.push((rank, bytes)),
+        }
+    }
+    stream_hashes.sort_by_key(|(rank, _)| *rank);
+
+    let mut block_hashes: Vec<&BlockHashesHash> = block_hashes.iter().collect();
+    block_hashes.sort_by_key(|h| {
+        (
+            construction_rank(&h.per_chunk),
+            construction_rank(&h.digest),
+        )
+    });
+
+    let mut index: Vec<&(HashAlgorithm, Vec<u8>)> = index_digests.iter().collect();
+    index.sort_by_key(|(algorithm, _)| construction_rank(algorithm));
+
+    let mut input = Vec::new();
+    for (_, bytes) in &stream_hashes {
+        input.extend_from_slice(bytes);
+    }
+    for hash in block_hashes {
+        input.extend_from_slice(&hash.bytes);
+    }
+    for (_, bytes) in index {
+        input.extend_from_slice(bytes);
+    }
+    Ok(input)
+}
+
+/// Decode a hex digest, in either case, or [`None`] if it is not hex.
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    let bytes = hex.as_bytes();
+    // Checked first because `from_str_radix` accepts a leading `+`.
+    if bytes.is_empty()
+        || !bytes.len().is_multiple_of(2)
+        || !bytes.iter().all(u8::is_ascii_hexdigit)
+    {
+        return None;
+    }
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
 }
 
 /// The block-hash segments a stream actually has, for one algorithm suffix.
@@ -2281,7 +2625,15 @@ fn verify_map(
                 else {
                     continue;
                 };
-                match block_map_hash_input(volume, mapping, &local_streams, &segments, &algorithm) {
+                let map_path = records_map_path_hash(object);
+                match block_map_hash_input(
+                    volume,
+                    mapping,
+                    &local_streams,
+                    &segments,
+                    map_path,
+                    &algorithm,
+                ) {
                     Ok(input) => push_block_map_check(
                         &object.arn,
                         object.role.clone(),
@@ -2708,12 +3060,12 @@ fn verify_image(
         // combined subject's copy from being hashed as though it covered the
         // image's bytes, which mismatched a container whose value was right.
         if hash.predicate == "blockMapHash" {
-            verify_block_map_hash(object, &image, volume, mapping, hash, session);
+            verify_block_map_hash(object, &image, volume, graph, mapping, hash, session);
             continue;
         }
         match &hash.algorithm {
             algorithm if algorithm.is_block_map() => {
-                verify_block_map_hash(object, &image, volume, mapping, hash, session);
+                verify_block_map_hash(object, &image, volume, graph, mapping, hash, session);
             }
             algorithm if is_computable(algorithm) => whole.push(hash),
             algorithm => session.push(HashCheck::declined(
@@ -2998,6 +3350,9 @@ fn recompute_stripe_digests(
         let Some((map_arn, map_base)) = volumes.local_map(&volume_arn, mapping) else {
             return Err(format!("volume {volume_arn} declares no map of its own"));
         };
+        let map_path = volumes
+            .graph_of(&volume_arn)
+            .is_some_and(|graph| graph_records_map_path_hash(graph, &map_arn));
         let Some(volume) = volumes.get_mut(&volume_arn) else {
             return Err(format!("volume {volume_arn} is no longer available"));
         };
@@ -3015,8 +3370,9 @@ fn recompute_stripe_digests(
             .collect();
 
         let stream = local.first().cloned().unwrap_or_else(|| map_arn.clone());
-        let input = block_map_hash_input(volume, mapping, &local, &segments, algorithm)
-            .map_err(|reason| format!("volume {volume_arn}: block-hash segment {reason}"))?;
+        let input =
+            block_map_hash_input(volume, mapping, &local, &segments, map_path, algorithm)
+                .map_err(|reason| format!("volume {volume_arn}: block-hash segment {reason}"))?;
 
         // Raw digest bytes, never hex — the rule throughout the AFF4 tree.
         let digest = raw_digest(algorithm, &input)
@@ -3220,6 +3576,151 @@ fn verify_striped_block_map_hash(
     });
 }
 
+/// Verify the digests recorded on a volume.
+///
+/// No AFF4 document defines a digest on a volume: v1.0a §6.1 places the
+/// linear hash on the `Image`. Evimetry 3.2.6 records the image's linear
+/// SHA-256 on the `ZipVolume` instead, and on the one sample available it
+/// covers the whole image, stored and described, not the stream's stored
+/// bytes. So a volume's `aff4:hash` is checked as a whole-image digest when
+/// that choice is forced by the data: one volume describing exactly one image.
+/// Anything else is declined with the reason, never guessed at; a volume
+/// describing several images gives no way to tell which one is meant.
+fn verify_volume_hashes(
+    volume: &crate::model::Aff4Object,
+    objects: &[crate::model::Aff4Object],
+    container: &mut crate::container::Container,
+    graph: &Graph,
+    dialect: Dialect,
+    locus: &Locus,
+    session: &mut Session,
+) {
+    let mut linear: Vec<&StoredHash> = Vec::new();
+    for hash in &volume.hashes {
+        if hash.predicate != "hash" {
+            session.push(HashCheck::declined(
+                &volume.arn,
+                volume.role.clone(),
+                hash,
+                Coverage::Unidentified,
+                format!("unknown digest {} on a volume", hash.predicate),
+            ));
+        } else if !is_computable(&hash.algorithm) {
+            session.push(HashCheck::declined(
+                &volume.arn,
+                volume.role.clone(),
+                hash,
+                Coverage::WholeImage,
+                format!("this build cannot compute {}", hash.algorithm),
+            ));
+        } else {
+            linear.push(hash);
+        }
+    }
+    if linear.is_empty() {
+        return;
+    }
+
+    let decline_all = |reason: String, session: &mut Session| {
+        for hash in &linear {
+            session.push(HashCheck::declined(
+                &volume.arn,
+                volume.role.clone(),
+                hash,
+                Coverage::WholeImage,
+                reason.clone(),
+            ));
+        }
+    };
+
+    let image_object = match volume_hash_image(objects, container) {
+        Ok(image) => image,
+        Err(reason) => {
+            decline_all(reason, session);
+            return;
+        }
+    };
+
+    let Dialect { lexicon, mapping } = dialect;
+    let image = match Image::open(
+        &image_object.arn,
+        container.volumes_mut().primary_mut(),
+        graph,
+        lexicon,
+        mapping,
+        locus,
+    ) {
+        Ok(image) => image,
+        Err(error) => {
+            decline_all(
+                format!(
+                    "image {} could not be resolved to a map: {error}",
+                    image_object.arn
+                ),
+                session,
+            );
+            return;
+        }
+    };
+
+    session.note(format!(
+        "the volume's aff4:hash was checked as a digest of the whole of image {}, \
+         the only image the volume describes; no AFF4 document defines a digest \
+         on a volume",
+        image_object.arn
+    ));
+    session.progress.on(Progress::ObjectStarted {
+        arn: &volume.arn,
+        role: &volume.role,
+        total_bytes: Some(image.size()),
+    });
+    verify_whole_image_digests(
+        volume,
+        &image,
+        container.volumes_mut(),
+        &linear,
+        locus,
+        session,
+    );
+    session
+        .progress
+        .on(Progress::ObjectFinished { arn: &volume.arn });
+}
+
+/// The one image a volume's `aff4:hash` can cover, or why there is none.
+///
+/// See [`verify_volume_hashes`]: a single volume describing exactly one image
+/// that is not a folder.
+fn volume_hash_image<'o>(
+    objects: &'o [crate::model::Aff4Object],
+    container: &crate::container::Container,
+) -> std::result::Result<&'o crate::model::Aff4Object, String> {
+    if !container.volumes().is_single() {
+        return Err(format!(
+            "no AFF4 document defines aff4:hash on a volume, and in a set of {} \
+             volumes nothing shows which bytes it covers",
+            container.volumes().len()
+        ));
+    }
+    let images: Vec<&crate::model::Aff4Object> = objects
+        .iter()
+        .filter(|o| {
+            o.role.is_image()
+                && !matches!(o.role, ObjectRole::FolderImage)
+                && !declares_type(o, "Folder")
+        })
+        .collect();
+    match images.as_slice() {
+        [image] => Ok(image),
+        _ => Err(format!(
+            "no AFF4 document defines aff4:hash on a volume; it is checked as a \
+             whole-image digest only when the volume describes exactly one image, \
+             and this one describes {}",
+            images.len()
+        )),
+    }
+}
+
 /// Every plain digest over an image's bytes, in one traversal.
 ///
 /// One read, many consumers: decompressing the image is what this costs, and
@@ -3269,12 +3770,16 @@ fn verify_whole_image_digests(
             // map-derived line — and an examiner saw the same ARN listed
             // repeatedly with nothing to distinguish the copies. Mirrors the
             // single-volume path, which has always deduplicated this way.
+            //
+            // Keyed by the image traversed rather than by the subject recording
+            // the digest: a volume's `aff4:hash` covers an image it does not
+            // name, and its traversal replaces that image's entry.
             session
                 .report
                 .read_accounting
-                .retain(|e| e.image.as_str() != object.arn.as_str());
+                .retain(|e| e.image.as_str() != image.arn().as_str());
             session.report.read_accounting.push(ImageAccounting {
-                image: object.arn.clone(),
+                image: image.arn().clone(),
                 accounting,
                 traversed: true,
             });
@@ -3563,12 +4068,19 @@ fn verify_resident_image(object: &crate::model::Aff4Object, locus: &Locus, sessi
 /// `algorithm` is the construction's digest, from
 /// [`HashAlgorithm::block_map_construction`]; every inner digest uses it.
 ///
+/// `map_path` says whether the map records `mapPathHash`. Only then is there a
+/// `mapPathHash` term: v1.0a §6.2 brackets it, v1.0a §6.3 makes `mapPath`
+/// optional, and v1.0a §6.2's own example omits it. Whether a `mapPath`
+/// segment exists does not decide this; an absent one would otherwise
+/// contribute the digest of empty input, which no independent writer does.
+///
 /// Returns `Err(reason)` naming the segment that could not be read.
 fn block_map_hash_input(
     volume: &mut dyn Volume,
     mapping: NameMapping,
     streams: &[Arn],
     segments: &MapSegments,
+    map_path: bool,
     algorithm: &HashAlgorithm,
 ) -> std::result::Result<Vec<u8>, String> {
     let digest = |bytes: &[u8]| {
@@ -3600,15 +4112,37 @@ fn block_map_hash_input(
 
     input.extend_from_slice(&digest(&segments.map)?);
     input.extend_from_slice(&digest(&segments.idx)?);
-    input.extend_from_slice(&digest(&segments.path)?);
+    if map_path {
+        input.extend_from_slice(&digest(&segments.path)?);
+    }
     Ok(input)
+}
+
+/// Whether a map records `mapPathHash`, which decides whether `blockMapHash`
+/// has a `mapPathHash` term. See [`block_map_hash_input`].
+fn records_map_path_hash(map: &crate::model::Aff4Object) -> bool {
+    map.hashes.iter().any(|h| h.predicate == "mapPathHash")
+}
+
+/// [`records_map_path_hash`] for a map known only by its ARN.
+///
+/// Matched by local name, as [`verify_metadata_hash`] matches `hash`, so the
+/// pre-standard namespace is recognized too.
+fn graph_records_map_path_hash(graph: &Graph, map: &Arn) -> bool {
+    graph.statements_for(map.as_str()).iter().any(|statement| {
+        statement
+            .predicate
+            .rsplit_once(['#', '/'])
+            .is_some_and(|(_, name)| name == "mapPathHash")
+    })
 }
 
 /// Recompute `blockMapHash`: one digest over raw digests concatenated.
 ///
 /// The digest is SHA-512 or SHA-256, named by the recorded datatype; see
 /// [`HashAlgorithm::block_map_construction`]. The order is `hashOrderingMap` — MD5, SHA1, SHA256, SHA512, Blake2b — for
-/// the block-hash segments, then `mapPointHash`, `mapIdxHash`, `mapPathHash`.
+/// the block-hash segments, then `mapPointHash`, `mapIdxHash`, and
+/// `mapPathHash` when the map records one.
 /// Metadata order is not the order; nor is alphabetical.
 ///
 /// The count is one digest per block-hash segment *present for a local
@@ -3618,6 +4152,7 @@ fn verify_block_map_hash(
     object: &crate::model::Aff4Object,
     image: &Image,
     volume: &mut dyn Volume,
+    graph: &Graph,
     mapping: NameMapping,
     hash: &StoredHash,
     session: &mut Session,
@@ -3662,7 +4197,9 @@ fn verify_block_map_hash(
         .map(|s| s.arn().clone())
         .collect();
 
-    let input = match block_map_hash_input(volume, mapping, &local, &segments, &algorithm) {
+    let map_path = graph_records_map_path_hash(graph, image.map().arn());
+    let input = match block_map_hash_input(volume, mapping, &local, &segments, map_path, &algorithm)
+    {
         Ok(input) => input,
         Err(reason) => {
             session.push(HashCheck::unreadable(
@@ -3845,6 +4382,87 @@ mod tests {
             },
             progress,
         }
+    }
+
+    fn block(per_chunk: HashAlgorithm, digest: HashAlgorithm, byte: u8) -> BlockHashesHash {
+        BlockHashesHash {
+            per_chunk,
+            digest,
+            bytes: vec![byte],
+        }
+    }
+
+    /// Recorded stream digests, then block-hash digests, then index digests,
+    /// each group in MD5, SHA-1, SHA-256, SHA-512, `Blake2b` order whatever
+    /// order the inputs arrive in.
+    #[test]
+    fn image_stream_hash_input_orders_each_group() {
+        let sha1 = stored("hash", HashAlgorithm::Sha1, "02");
+        let md5 = stored("hash", HashAlgorithm::Md5, "01");
+        let blocks = [
+            block(HashAlgorithm::Sha1, HashAlgorithm::Sha512, 0x12),
+            block(HashAlgorithm::Md5, HashAlgorithm::Sha512, 0x11),
+            block(HashAlgorithm::Md5, HashAlgorithm::Md5, 0x10),
+        ];
+        let index = [
+            (HashAlgorithm::Sha512, vec![0x22]),
+            (HashAlgorithm::Md5, vec![0x21]),
+        ];
+
+        let input = image_stream_hash_input(&[&sha1, &md5], &blocks, &index).unwrap();
+        assert_eq!(input, vec![0x01, 0x02, 0x10, 0x11, 0x12, 0x21, 0x22]);
+    }
+
+    /// A recorded stream digest outside the five is left out rather than
+    /// refused: the writer leaves it out.
+    #[test]
+    fn image_stream_hash_input_leaves_out_other_stream_algorithms() {
+        let sha3 = stored("hash", HashAlgorithm::Sha3_256, "ff");
+        let md5 = stored("hash", HashAlgorithm::Md5, "01");
+        let input = image_stream_hash_input(&[&sha3, &md5], &[], &[]).unwrap();
+        assert_eq!(input, vec![0x01]);
+    }
+
+    /// Two values under one algorithm leave the input ambiguous, so the check
+    /// is declined rather than built from either. The same value twice is not
+    /// ambiguous.
+    #[test]
+    fn image_stream_hash_input_refuses_conflicting_recorded_values() {
+        let first = stored("hash", HashAlgorithm::Md5, "01");
+        let same = stored("hash", HashAlgorithm::Md5, "01");
+        let other = stored("hash", HashAlgorithm::Md5, "02");
+
+        assert_eq!(
+            image_stream_hash_input(&[&first, &same], &[], &[]).unwrap(),
+            vec![0x01]
+        );
+        let reason = image_stream_hash_input(&[&first, &other], &[], &[]).unwrap_err();
+        assert!(reason.contains("two different"), "{reason}");
+    }
+
+    /// A recorded digest that is not hex is refused, never decoded around.
+    #[test]
+    fn image_stream_hash_input_refuses_a_recorded_value_that_is_not_hex() {
+        for hex in ["0g", "+a", "abc", ""] {
+            let hash = stored("hash", HashAlgorithm::Md5, hex);
+            assert!(
+                image_stream_hash_input(&[&hash], &[], &[]).is_err(),
+                "{hex:?} must be refused"
+            );
+        }
+        assert_eq!(decode_hex("A0ff"), Some(vec![0xa0, 0xff]));
+    }
+
+    /// One digest per distinct algorithm, and none for an algorithm the
+    /// construction does not admit.
+    #[test]
+    fn index_digests_dedupe_and_refuse_other_algorithms() {
+        let digests =
+            index_digests(b"", &[&HashAlgorithm::Sha256, &HashAlgorithm::Sha256]).unwrap();
+        assert_eq!(digests.len(), 1);
+        assert_eq!(to_hex(&digests[0].1)[..16], *"e3b0c44298fc1c14");
+
+        assert!(index_digests(b"", &[&HashAlgorithm::Sha3_256]).is_err());
     }
 
     #[test]

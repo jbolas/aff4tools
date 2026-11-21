@@ -56,6 +56,7 @@ Whether a rule binds the content of a container, or the behavior of a reader or 
 | `AFF4_V1_0A/none/1` (not legislated) | MAY | detected | container | Content-addressed dedupe subjects are an extension no clause prohibits. |
 | `AFF4_V1_0A/none/2` (not legislated) | MAY | detected | container | A reference to an undescribed ARN with no aff4:stored pointer cannot be resolved or attributed. |
 | `AFF4_V1_0A/none/3` (not legislated) | MAY | honored | container | A volume may enumerate the ARNs it holds via an aff4:contains predicate, though this is not defined by any specification. |
+| `AFF4_V1_0A/none/4` (not legislated) | MAY | detected | container | A linear aff4:hash recorded on a volume is an extension; v1.0a §6.1 places the linear hash on the Image, and no document says what a volume's digest covers. |
 
 ## AFF4-L (Schatz, DFRWS USA 2019, Digital Investigation 29, S143-S149)
 
@@ -121,4 +122,4 @@ Whether a rule binds the content of a container, or the behavior of a reader or 
 
 ## Coverage
 
-32 of 83 declared rules are checked.
+33 of 84 declared rules are checked.

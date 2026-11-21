@@ -142,8 +142,7 @@ fn unreadable_evidence_exits_nine_on_reference_containers() {
         "the message must name the fix:\n{stderr}"
     );
 
-    // And an ordinary container stays clean even though it carries one digest
-    // (`imageStreamHash`) this build cannot recompute.
+    // And an ordinary container stays clean.
     aff4tools()
         .arg("verify")
         .arg(corpus_path("pyaff4/test_images/AFF4Std/Base-Linear.aff4"))
@@ -2719,11 +2718,11 @@ fn a_large_container_degrades_to_the_brief_listing() {
 
 /// When a check is not recomputed, the summary still reconciles with the list.
 ///
-/// `Base-Linear-ReadError.aff4` records an `imageStreamHash` this build cannot
-/// identify, so fourteen checks are rendered and thirteen complete. The summary
-/// must not open "13 checks completed; 13 of 13 matched", which reads as a
-/// clean sweep of everything present — an examiner counting the entries below
-/// could not reach the headline number from them.
+/// `Micro7.001.aff4` records five map and stream digests whose inputs this
+/// build has not identified, so eleven checks are rendered and six complete.
+/// The summary must not open "6 checks completed; 6 of 6 matched", which reads
+/// as a clean sweep of everything present — an examiner counting the entries
+/// below could not reach the headline number from them.
 ///
 /// Attempted is stated first, and it is the count that matches the list.
 #[cfg(feature = "corpus")]
@@ -2731,20 +2730,18 @@ fn a_large_container_degrades_to_the_brief_listing() {
 fn the_verify_summary_states_how_many_checks_were_attempted() {
     let assert = aff4tools()
         .arg("verify")
-        .arg(corpus_path(
-            "pyaff4/test_images/AFF4Std/Base-Linear-ReadError.aff4",
-        ))
+        .arg(corpus_path("aff4-cpp-lite/tests/resources/Micro7.001.aff4"))
         .assert()
         .success();
     let report = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
 
     assert!(
-        report.contains("14 checks attempted; 13 completed."),
+        report.contains("11 checks attempted; 6 completed."),
         "attempted must be stated and must exceed completed here:\n{report}"
     );
 
     // The attempted count is the one that reconciles with what is rendered:
-    // every check prints its ARN line, and there are fourteen of them. Counted
+    // every check prints its ARN line, and there are eleven of them. Counted
     // from the `Checks` heading down, since the read accounting above it opens
     // its block with an ARN line too.
     let checks_from = report
@@ -2755,14 +2752,14 @@ fn the_verify_summary_states_how_many_checks_were_attempted() {
         .filter(|l| l.starts_with("  aff4://"))
         .count();
     assert_eq!(
-        rendered, 14,
+        rendered, 11,
         "the attempted count must equal the checks actually listed:\n{report}"
     );
 
     // The declined one is still named separately: "attempted but not completed"
     // and "why" are different facts.
     assert!(
-        report.contains("1 recorded digest(s) were not recomputed"),
+        report.contains("5 recorded digest(s) were not recomputed"),
         "the decline must still be called out:\n{report}"
     );
 }

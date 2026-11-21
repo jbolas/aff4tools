@@ -331,56 +331,6 @@ fn recomputed_block_map_hash(report: &aff4tools::VerificationReport) -> Option<S
         .find(|actual| !actual.is_empty())
 }
 
-/// A digest neither implementation checks is worth naming, so nobody assumes
-/// this gate covers it.
-///
-/// `imageStreamHash` appears in every Evimetry container and in **no**
-/// specification or implementation: not in Standard v1.0a, not in pyaff4, not
-/// in c-aff4, not in aff4-cpp-lite. pyaff4's validator silently skips it;
-/// aff4tools reports it as unrecomputed rather than pretending. This test pins
-/// that asymmetry so a future change cannot quietly claim to verify it.
-#[test]
-fn image_stream_hash_is_recorded_by_evimetry_and_checked_by_nobody() {
-    let Some((python, root)) = harness() else {
-        return;
-    };
-    let path = reference_images()
-        .into_iter()
-        .find(|p| p.file_name().is_some_and(|n| n == "Base-Linear.aff4"))
-        .expect("Base-Linear.aff4 must be present");
-
-    // It is in the container.
-    let mut container = Container::open(&path).unwrap();
-    let summary = container.summarize().unwrap();
-    let recorded = summary
-        .objects
-        .iter()
-        .flat_map(|object| object.hashes.iter())
-        .any(|hash| hash.predicate.eq_ignore_ascii_case("imageStreamHash"));
-    assert!(recorded, "Base-Linear.aff4 must record an imageStreamHash");
-
-    // pyaff4 does not report it.
-    let py = pyaff4_validate(&python, &root, &path).unwrap();
-    assert!(
-        !py.named
-            .iter()
-            .any(|(typ, _)| typ.to_ascii_lowercase().contains("imagestreamhash")),
-        "pyaff4 now checks imageStreamHash; this gate's scope should be revisited"
-    );
-
-    // Nor does the term appear anywhere in pyaff4's source.
-    let hits = std::process::Command::new("grep")
-        .args(["-rl", "imageStreamHash"])
-        .arg(root.join("pyaff4"))
-        .output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-        .unwrap_or_default();
-    assert!(
-        hits.is_empty(),
-        "pyaff4 now mentions imageStreamHash in {hits}"
-    );
-}
-
 /// How many block-hash algorithms each implementation recomputes for a
 /// container.
 struct AlgorithmCoverage {

@@ -14,7 +14,8 @@ clean rather than merely parsing:
   - SHA-512 over each block-hash segment (blockHashesHash)
   - map, idx segments and their SHA-512 digests
   - mapHash   = SHA512(map || idx)          [no mapPath here]
-  - blockMapHash = SHA512(the digests above, concatenated raw)
+  - blockMapHash = SHA512(the digests above, concatenated raw), with no
+    mapPathHash term, since none is recorded (v1.0a §6.2, v1.0a §6.3)
   - MD5 and SHA-256 linear hashes over the whole stream
 """
 
@@ -321,19 +322,16 @@ def build(
         map_hash = hashlib.sha512(map_bytes + idx_bytes).hexdigest()
 
         # blockMapHash: BlockHashes ordered by digest length ascending
-        # (MD5 then SHA-1), then the three map-segment digests. With no block
+        # (MD5 then SHA-1), then mapPointHash and mapIdxHash. With no block
         # hashes written there are no BlockHashes terms to include.
         #
-        # `mapPath` is absent here, and an absent segment still contributes —
-        # as the SHA-512 of no bytes at all. Dropping the term instead is the
-        # obvious mistake, and it yields a clean-looking wrong answer.
+        # No `mapPath` segment and no mapPathHash are written, so there is no
+        # mapPathHash term: v1.0a §6.2 brackets it, and v1.0a §6.3 makes
+        # mapPath optional. Evimetry 3.2.6 writes this form.
         leaves = (
             blockhashes_md5 + blockhashes_sha1 if write_block_hashes else b""
         )
-        map_path = hashlib.sha512(b"").digest()
-        block_map = hashlib.sha512(
-            leaves + map_point + map_idx + map_path
-        ).hexdigest()
+        block_map = hashlib.sha512(leaves + map_point + map_idx).hexdigest()
 
         # Only claim BlockHashes subjects when the segments they describe were
         # actually written: recording a digest for an absent segment would make
@@ -528,11 +526,11 @@ def build_striped(
     map_point = hashlib.sha512(map_bytes).digest()
     map_idx_digest = hashlib.sha512(idx_bytes).digest()
     map_hash = hashlib.sha512(map_bytes + idx_bytes).hexdigest()
-    map_path = hashlib.sha512(b"").digest()
 
     # Per-stripe blockMapHash, over that stripe's OWN stream only. Including a
     # foreign stripe's block hashes matches nothing — verified against the
-    # reference fixture, and the trap this generator exists to reproduce.
+    # reference fixture, and the trap this generator exists to reproduce. No
+    # mapPathHash is recorded, so there is no mapPathHash term.
     block_map = []
     blockhashes = []
     for s in range(stripes):
@@ -544,7 +542,7 @@ def build_striped(
         leaves = digests[0] + digests[1] if write_block_hashes else b""
         block_map.append(
             hashlib.sha512(
-                leaves + map_point + map_idx_digest + map_path
+                leaves + map_point + map_idx_digest
             ).digest()
         )
 

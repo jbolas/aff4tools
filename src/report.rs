@@ -618,8 +618,8 @@ const BRIEF_BITSTREAM_LIMIT: usize = 3;
 ///
 /// Only the `hash`/`blockMapHash` predicates are shown — never
 /// `imageStreamHash` or `imageStreamIndexHash`. Those two are structural
-/// hashes over the stream's own `.index`/internal bytes, not digests of
-/// image content (`imageStreamHash` is flatly **unidentified**), so
+/// hashes: one over the stream's `.index` segments, the other over recorded
+/// and segment digests. Neither is a digest of image content, so
 /// labeling either "linear" would be worse than the
 /// mislabeling this function exists to prevent. The user asked for "linear
 /// bitstream hash values"; that is `hash` and nothing else.
